@@ -16,7 +16,7 @@
 - A probability does not account for any player's behaviour
 - Every claim of the current round is listed
 - A listed claim shows the claim
-- A listed claim shows how many dice the claimer held
+- The dice each player holds are shown
 
 ## Out of Scope
 - The minimal game has no network
