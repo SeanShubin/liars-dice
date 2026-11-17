@@ -376,9 +376,15 @@ fn die(ui: &mut egui::Ui, swatch: usize, face: Option<u8>) {
                 ink,
             );
         }
-        // An unrevealed die still shows whose it is and that it is there.
+        // A question mark rather than a dot: a dot reads as a die showing one.
         None => {
-            painter.circle_filled(rect.center(), 3.5, ink);
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "?",
+                egui::FontId::proportional(17.0),
+                ink,
+            );
         }
     }
 }
