@@ -14,7 +14,7 @@ use dice_render::palette;
 use dice_render::settings::{Glyph, Settings, Surface};
 use dice_render::texture::{BEVEL_PIXELS, GROUND_PIXELS};
 use dice_render::{
-    corners_mesh, face_base_color, face_normal_map, faces_mesh, surface_base_color,
+    bevel_mesh, face_base_color, face_normal_map, faces_mesh, surface_base_color,
     surface_normal_map,
 };
 
@@ -101,7 +101,7 @@ fn setup(
     let set = appearance.0;
 
     let faces = meshes.add(faces_mesh(&set.shape));
-    let corners = meshes.add(corners_mesh(&set.shape));
+    let corners = meshes.add(bevel_mesh(&set.shape));
 
     let face_color = images.add(face_base_color(&set.face, &set.glyph));
     let face_normal = images.add(face_normal_map(&set.face, &set.glyph));
@@ -225,10 +225,10 @@ fn panel(
             ui.collapsing("Shape", |ui| {
                 ui.add(
                     egui::Slider::new(
-                        &mut set.shape.sphere_radius,
-                        dice_render::settings::MIN_RADIUS..=dice_render::settings::MAX_RADIUS,
+                        &mut set.shape.rounding,
+                        dice_render::settings::MIN_ROUNDING..=dice_render::settings::MAX_ROUNDING,
                     )
-                    .text("sphere radius"),
+                    .text("rounding"),
                 );
                 ui.add(egui::Slider::new(&mut set.shape.arc_segments, 1..=32).text("arc segments"));
                 ui.add(egui::Slider::new(&mut set.shape.corner_rings, 1..=12).text("corner rings"));
@@ -260,7 +260,7 @@ fn rebuild(
             *mesh = faces_mesh(&set.shape);
         }
         if let Some(mut mesh) = meshes.get_mut(&built.corners) {
-            *mesh = corners_mesh(&set.shape);
+            *mesh = bevel_mesh(&set.shape);
         }
     }
 
@@ -328,7 +328,7 @@ fn orbit(
 
     if buttons.pressed(MouseButton::Left) {
         orbit.yaw -= dragged.x * 0.006;
-        orbit.pitch = (orbit.pitch - dragged.y * 0.006).clamp(-1.5, 1.5);
+        orbit.pitch = (orbit.pitch + dragged.y * 0.006).clamp(-1.5, 1.5);
     }
     if scrolled != 0.0 {
         orbit.distance = (orbit.distance - scrolled * 0.4).clamp(2.2, 24.0);

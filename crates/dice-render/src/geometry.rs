@@ -1,11 +1,17 @@
-//! The die mesh: a cube intersected with a sphere.
+//! The die mesh: a cube with its edges and corners rounded to a single radius.
 //!
-//! Every curved point lies on the one sphere and every flat point lies on one of six
-//! planes, so the mesh is constructed analytically rather than approximated. Flat faces
-//! are therefore exactly flat, which matters because the glyph sits on them.
+//! A smaller cube with a sphere of that radius swept over its surface. That gives exactly
+//! three kinds of surface, each with a closed form — flat squares, quarter cylinders along
+//! the edges, and sphere octants at the corners — so the mesh is constructed analytically
+//! rather than approximated. Flat faces are therefore exactly flat, which matters because
+//! the glyph sits on them.
 //!
 //! The mesh is produced in two parts, one per material. A triangle's material is known
 //! from which part generated it, so there is nothing to classify and nothing to tune.
+//!
+//! Seams are exact rather than close. A fillet's tangent line is a face's boundary edge,
+//! sharing both endpoints; a fillet's end arc is a corner patch's boundary arc, generated
+//! by the same function at the same angles.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::math::{Vec2, Vec3};
@@ -99,6 +105,11 @@ impl Builder {
         self.indices.extend_from_slice(&[a, b, c]);
     }
 
+    fn quad(&mut self, a: u32, b: u32, c: u32, d: u32) {
+        self.triangle(a, b, c);
+        self.triangle(a, c, d);
+    }
+
     fn into_mesh(self) -> Mesh {
         Mesh::new(
             PrimitiveTopology::TriangleList,
@@ -111,53 +122,28 @@ impl Builder {
     }
 }
 
-/// Points along a circular arc in two dimensions, both ends included.
-fn arc_2d(radius: f32, from: f32, to: f32, segments: u32) -> Vec<Vec2> {
+/// Unit directions along a quarter turn from `from` to `to`, at even angles, both ends
+/// included.
+///
+/// Every curved part of the die is built from this one function, which is why the fillets
+/// and the corner patches meet exactly instead of nearly.
+fn quarter_turn(from: Vec3, to: Vec3, segments: u32) -> Vec<Vec3> {
     let segments = segments.max(1);
     (0..=segments)
         .map(|step| {
-            let angle = from + (to - from) * step as f32 / segments as f32;
-            Vec2::new(radius * angle.cos(), radius * angle.sin())
+            let angle = std::f32::consts::FRAC_PI_2 * step as f32 / segments as f32;
+            from * angle.cos() + to * angle.sin()
         })
         .collect()
 }
 
-/// The outline of one face, counter-clockwise in local coordinates.
-///
-/// Four straight segments where the face meets a cube edge, and four arcs where the
-/// sphere cuts a corner away. The straight segments need no points of their own; they
-/// are the chords between consecutive arcs.
-fn face_outline(shape: &Shape) -> Vec<Vec2> {
-    let circle = shape.face_circle();
-    let w = shape.edge_offset();
-    let h = HALF_EXTENT;
-    let segments = shape.arc_segments;
-
-    let corners = [
-        (Vec2::new(w, -h), Vec2::new(h, -w)),
-        (Vec2::new(h, w), Vec2::new(w, h)),
-        (Vec2::new(-w, h), Vec2::new(-h, w)),
-        (Vec2::new(-h, -w), Vec2::new(-w, -h)),
-    ];
-
-    let mut outline = Vec::new();
-    for (start, end) in corners {
-        let from = start.y.atan2(start.x);
-        let mut to = end.y.atan2(end.x);
-        while to < from {
-            to += std::f32::consts::TAU;
-        }
-        outline.extend(arc_2d(circle, from, to, segments));
-    }
-    outline
-}
-
-/// Maps a point in a face's local coordinates into that face's cell of the atlas.
+/// Maps a point in a face's local coordinates, normalised so the face spans minus one to
+/// one, into that face's cell of the atlas.
 fn atlas_uv(value: u32, local: Vec2) -> Vec2 {
     let column = ((value - 1) % ATLAS_COLUMNS) as f32;
     let row = ((value - 1) / ATLAS_COLUMNS) as f32;
-    let s = (local.x / HALF_EXTENT + 1.0) * 0.5;
-    let t = (1.0 - local.y / HALF_EXTENT) * 0.5;
+    let s = (local.x + 1.0) * 0.5;
+    let t = (1.0 - local.y) * 0.5;
     let s = CELL_INSET + s * (1.0 - 2.0 * CELL_INSET);
     let t = CELL_INSET + t * (1.0 - 2.0 * CELL_INSET);
     Vec2::new(
@@ -168,114 +154,137 @@ fn atlas_uv(value: u32, local: Vec2) -> Vec2 {
 
 /// The six flat faces, as one mesh sharing one atlas material.
 pub fn faces_mesh(shape: &Shape) -> Mesh {
+    let inner = shape.inner();
     let mut builder = Builder::default();
-    let outline = face_outline(shape);
 
     for face in faces() {
-        let to_world =
-            |local: Vec2| face.normal * HALF_EXTENT + face.u * local.x + face.v * local.y;
-
-        let centre = builder.push(
-            to_world(Vec2::ZERO),
-            face.normal,
-            atlas_uv(face.value, Vec2::ZERO),
-        );
-        let ring: Vec<u32> = outline
+        let corners = [
+            Vec2::new(-1.0, -1.0),
+            Vec2::new(1.0, -1.0),
+            Vec2::new(1.0, 1.0),
+            Vec2::new(-1.0, 1.0),
+        ];
+        let ring: Vec<u32> = corners
             .iter()
-            .map(|&local| builder.push(to_world(local), face.normal, atlas_uv(face.value, local)))
+            .map(|&corner| {
+                let position = face.normal * HALF_EXTENT
+                    + face.u * corner.x * inner
+                    + face.v * corner.y * inner;
+                builder.push(position, face.normal, atlas_uv(face.value, corner))
+            })
             .collect();
-
-        for step in 0..ring.len() {
-            builder.triangle(centre, ring[step], ring[(step + 1) % ring.len()]);
-        }
+        builder.quad(ring[0], ring[1], ring[2], ring[3]);
     }
 
     builder.into_mesh()
 }
 
-/// Points along a circular arc in a plane, both ends included.
-///
-/// The plane is given by its `axis`. Both endpoints must already lie on the circle.
-fn arc_3d(centre: Vec3, from: Vec3, to: Vec3, axis: Vec3, segments: u32) -> Vec<Vec3> {
-    let segments = segments.max(1);
-    let radial = from - centre;
-    let radius = radial.length();
-    let e1 = radial / radius;
-    let e2 = axis.normalize().cross(e1);
-    let target = to - centre;
-    let mut sweep = target.dot(e2).atan2(target.dot(e1));
-    if sweep > std::f32::consts::PI {
-        sweep -= std::f32::consts::TAU;
-    }
-    (0..=segments)
-        .map(|step| {
-            let angle = sweep * step as f32 / segments as f32;
-            centre + radius * (angle.cos() * e1 + angle.sin() * e2)
-        })
-        .collect()
-}
-
-/// The eight curved corner patches, as one mesh sharing one bevel material.
-pub fn corners_mesh(shape: &Shape) -> Mesh {
+/// The twelve edge fillets and eight corner patches, as one mesh sharing one bevel
+/// material.
+pub fn bevel_mesh(shape: &Shape) -> Mesh {
+    let inner = shape.inner();
     let radius = shape.radius();
-    let w = shape.edge_offset();
-    let h = HALF_EXTENT;
+    let segments = shape.arc_segments.max(1);
     let rings = shape.corner_rings.max(1);
-    let segments = shape.arc_segments;
+    let axes = [Vec3::X, Vec3::Y, Vec3::Z];
 
     let mut builder = Builder::default();
 
-    for sx in [1.0f32, -1.0] {
-        for sy in [1.0f32, -1.0] {
-            for sz in [1.0f32, -1.0] {
-                // The three points where two cube planes and the sphere meet.
-                let on_yz = Vec3::new(sx * w, sy * h, sz * h);
-                let on_xz = Vec3::new(sx * h, sy * w, sz * h);
-                let on_xy = Vec3::new(sx * h, sy * h, sz * w);
+    // Twelve fillets: a quarter cylinder along each edge.
+    for (index, &along) in axes.iter().enumerate() {
+        let first_axis = axes[(index + 1) % 3];
+        let second_axis = axes[(index + 2) % 3];
+        for first_sign in [1.0f32, -1.0] {
+            for second_sign in [1.0f32, -1.0] {
+                let from = first_axis * first_sign;
+                let to = second_axis * second_sign;
+                let axis_line = from * inner + to * inner;
 
-                let mut outline = Vec::new();
-                for (centre, from, to, axis) in [
-                    (Vec3::new(0.0, 0.0, sz * h), on_yz, on_xz, Vec3::Z * sz),
-                    (Vec3::new(sx * h, 0.0, 0.0), on_xz, on_xy, Vec3::X * sx),
-                    (Vec3::new(0.0, sy * h, 0.0), on_xy, on_yz, Vec3::Y * sy),
+                // The surface's two tangents are the turn direction and the edge
+                // direction; their cross product has to come out as the outward normal.
+                let flipped = to.cross(along).dot(from) < 0.0;
+
+                let columns: Vec<[u32; 2]> = quarter_turn(from, to, segments)
+                    .iter()
+                    .enumerate()
+                    .map(|(step, &direction)| {
+                        let turn = step as f32 / segments as f32;
+                        let mut pair = [0u32; 2];
+                        for (end, &distance) in [-inner, inner].iter().enumerate() {
+                            let position = axis_line + along * distance + direction * radius;
+                            let uv = Vec2::new(turn, (distance / inner + 1.0) * 0.5);
+                            pair[end] = builder.push(position, direction, uv);
+                        }
+                        pair
+                    })
+                    .collect();
+
+                for step in 0..segments as usize {
+                    let near = columns[step];
+                    let far = columns[step + 1];
+                    if flipped {
+                        builder.quad(near[1], far[1], far[0], near[0]);
+                    } else {
+                        builder.quad(near[0], far[0], far[1], near[1]);
+                    }
+                }
+            }
+        }
+    }
+
+    // Eight corner patches: an octant of a sphere at each corner of the inner cube.
+    for x_sign in [1.0f32, -1.0] {
+        for y_sign in [1.0f32, -1.0] {
+            for z_sign in [1.0f32, -1.0] {
+                let toward_x = Vec3::X * x_sign;
+                let toward_y = Vec3::Y * y_sign;
+                let toward_z = Vec3::Z * z_sign;
+                let centre = Vec3::new(x_sign * inner, y_sign * inner, z_sign * inner);
+
+                // The boundary is the three quarter turns the adjacent fillets end on.
+                let mut boundary = Vec::new();
+                for (from, to) in [
+                    (toward_x, toward_y),
+                    (toward_y, toward_z),
+                    (toward_z, toward_x),
                 ] {
-                    let mut arc = arc_3d(centre, from, to, axis, segments);
-                    arc.pop();
-                    outline.extend(arc);
+                    let mut turn = quarter_turn(from, to, segments);
+                    turn.pop();
+                    boundary.extend(turn);
                 }
 
-                let apex_direction = Vec3::new(sx, sy, sz).normalize();
-
-                // Wind so the triangles face outward.
-                let first = (outline[0] - apex_direction * radius)
-                    .cross(outline[1] - apex_direction * radius);
-                if first.dot(apex_direction) < 0.0 {
-                    outline.reverse();
+                let apex_direction = (toward_x + toward_y + toward_z).normalize();
+                if (boundary[0] - apex_direction)
+                    .cross(boundary[1] - apex_direction)
+                    .dot(apex_direction)
+                    < 0.0
+                {
+                    boundary.reverse();
                 }
 
-                let apex =
-                    builder.push(apex_direction * radius, apex_direction, Vec2::new(0.5, 0.5));
+                let apex = builder.push(
+                    centre + apex_direction * radius,
+                    apex_direction,
+                    Vec2::new(0.5, 0.5),
+                );
 
-                // Each patch is parameterised as a disc, so the bevel texture is sampled
-                // without a seam and without projecting anything.
-                let count = outline.len();
+                // Parameterised as a disc, so the bevel texture is sampled without a seam
+                // and without projecting anything.
+                let count = boundary.len();
                 let mut previous: Vec<u32> = Vec::new();
                 for ring in 1..=rings {
                     let distance = ring as f32 / rings as f32;
-                    let current: Vec<u32> = outline
+                    let current: Vec<u32> = boundary
                         .iter()
                         .enumerate()
-                        .map(|(step, &boundary)| {
-                            let position = (apex_direction * radius)
-                                .lerp(boundary, distance)
-                                .normalize()
-                                * radius;
+                        .map(|(step, &edge)| {
+                            let direction = apex_direction.lerp(edge, distance).normalize();
                             let angle = std::f32::consts::TAU * step as f32 / count as f32;
                             let uv = Vec2::new(
                                 0.5 + 0.5 * distance * angle.cos(),
                                 0.5 + 0.5 * distance * angle.sin(),
                             );
-                            builder.push(position, position.normalize(), uv)
+                            builder.push(centre + direction * radius, direction, uv)
                         })
                         .collect();
 
@@ -286,8 +295,12 @@ pub fn corners_mesh(shape: &Shape) -> Mesh {
                     } else {
                         for step in 0..count {
                             let next = (step + 1) % count;
-                            builder.triangle(previous[step], current[step], current[next]);
-                            builder.triangle(previous[step], current[next], previous[next]);
+                            builder.quad(
+                                previous[step],
+                                current[step],
+                                current[next],
+                                previous[next],
+                            );
                         }
                     }
                     previous = current;

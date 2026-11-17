@@ -3,7 +3,7 @@
 ## Geometry
 - A die has six faces
 - The faces are numbered one through six
-- A die is a cube intersected with a sphere
+- A die is a cube with its edges and corners rounded to a single radius
 - Opposite faces sum to seven
 - A die is right-handed
 

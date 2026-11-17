@@ -3,21 +3,22 @@
 //! Colors are plain arrays rather than engine color types so that a settings panel can
 //! edit them without this crate knowing anything about a settings panel.
 
-/// The cube half-extent. Fixed; the sphere radius is expressed relative to it.
+/// The die's overall half-extent. Fixed; the rounding is expressed relative to it.
 pub const HALF_EXTENT: f32 = 1.0;
 
-/// Below this radius the sphere reaches the cube's edges and they round over.
-pub const MIN_RADIUS: f32 = std::f32::consts::SQRT_2;
+/// Below this, the rounding is too small to see.
+pub const MIN_ROUNDING: f32 = 0.01;
 
-/// At or above this radius the sphere misses the corners and the die is a plain cube.
-pub const MAX_RADIUS: f32 = 1.732_050_8;
+/// At one the die would be a sphere, with no flat face left to put a glyph on.
+pub const MAX_ROUNDING: f32 = 0.9;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Shape {
-    /// Sphere radius. Clamped to the band where the faces stay flat and the corners are
-    /// clipped.
-    pub sphere_radius: f32,
-    /// Segments per corner arc.
+    /// The radius every edge and corner is rounded to. The overall half-extent stays at
+    /// `HALF_EXTENT`, so this and the inner cube's half-extent sum to it.
+    pub rounding: f32,
+    /// Segments per quarter arc, shared by the fillets and the corners so their seams
+    /// meet exactly.
     pub arc_segments: u32,
     /// Concentric rings per corner patch.
     pub corner_rings: u32,
@@ -58,21 +59,15 @@ pub struct Settings {
 }
 
 impl Shape {
+    /// The rounding radius, kept inside the range where both a flat face and a visible
+    /// rounding exist.
     pub fn radius(&self) -> f32 {
-        self.sphere_radius
-            .clamp(MIN_RADIUS + 0.0005, MAX_RADIUS - 0.0005)
+        self.rounding.clamp(MIN_ROUNDING, MAX_ROUNDING) * HALF_EXTENT
     }
 
-    /// Radius of the circle where the sphere meets a face plane.
-    pub fn face_circle(&self) -> f32 {
-        let r = self.radius();
-        (r * r - HALF_EXTENT * HALF_EXTENT).sqrt()
-    }
-
-    /// Distance from a face's centre line to where an arc meets a cube edge.
-    pub fn edge_offset(&self) -> f32 {
-        let r = self.radius();
-        (r * r - 2.0 * HALF_EXTENT * HALF_EXTENT).sqrt()
+    /// Half-extent of the inner cube the rounding is swept over.
+    pub fn inner(&self) -> f32 {
+        HALF_EXTENT - self.radius()
     }
 }
 
@@ -80,9 +75,9 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             shape: Shape {
-                sphere_radius: 1.55,
-                arc_segments: 12,
-                corner_rings: 4,
+                rounding: 0.15,
+                arc_segments: 8,
+                corner_rings: 3,
             },
             face: Surface {
                 color: [0.88, 0.86, 0.80],

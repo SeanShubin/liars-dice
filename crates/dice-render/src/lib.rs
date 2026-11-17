@@ -10,7 +10,7 @@ pub mod palette;
 pub mod settings;
 pub mod texture;
 
-pub use geometry::{corners_mesh, faces, faces_mesh};
+pub use geometry::{bevel_mesh, faces, faces_mesh};
 pub use settings::{Glyph, Settings, Shape, Surface};
 pub use texture::{
     BEVEL_PIXELS, GROUND_PIXELS, face_base_color, face_normal_map, surface_base_color,

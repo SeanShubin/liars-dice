@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use bevy::math::Vec3;
 use bevy::render::mesh::{Indices, Mesh, VertexAttributeValues};
 
-use dice_render::geometry::{ATLAS_COLUMNS, ATLAS_ROWS, corners_mesh, faces, faces_mesh};
+use dice_render::geometry::{ATLAS_COLUMNS, ATLAS_ROWS, bevel_mesh, faces, faces_mesh};
 use dice_render::settings::Settings;
 use dice_render::texture::{FACE_PIXELS, face_base_color};
 
@@ -55,7 +55,7 @@ fn the_die_is_a_closed_surface() {
     let shape = Settings::default().shape;
     let mut edges: HashMap<[(i64, i64, i64); 2], usize> = HashMap::new();
 
-    for mesh in [faces_mesh(&shape), corners_mesh(&shape)] {
+    for mesh in [faces_mesh(&shape), bevel_mesh(&shape)] {
         let points = positions(&mesh);
         for triangle in triangles(&mesh) {
             for step in 0..3 {
@@ -84,7 +84,7 @@ fn the_die_is_a_closed_surface() {
 #[test]
 fn every_triangle_faces_outward() {
     let shape = Settings::default().shape;
-    for mesh in [faces_mesh(&shape), corners_mesh(&shape)] {
+    for mesh in [faces_mesh(&shape), bevel_mesh(&shape)] {
         let points = positions(&mesh);
         for triangle in triangles(&mesh) {
             let a = points[triangle[0] as usize];
@@ -108,8 +108,8 @@ fn mesh_generation_is_reproducible() {
         positions(&faces_mesh(&shape))
     );
     assert_eq!(
-        positions(&corners_mesh(&shape)),
-        positions(&corners_mesh(&shape))
+        positions(&bevel_mesh(&shape)),
+        positions(&bevel_mesh(&shape))
     );
 }
 
