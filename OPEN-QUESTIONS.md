@@ -78,12 +78,13 @@ they are.
 
 ## P — Players and Product
 
-- **P1 — Is this multiplayer only, or is there single-player?** The architecture has a
-  relay coordinating clients, which implies networked play, but nothing says whether a
-  solo player can play at all.
-- **P2 — Are there AI opponents?** If yes, that is a large unspecified subsystem: where
-  it runs (client, relay, separate service), how strong it is, whether it sees hidden
-  dice.
+- **P1 — Is this multiplayer only, or is there single-player?** *Answered:* both. The
+  minimal game is one human against AI opponents with no network. The networked game is a
+  separate application.
+- **P2 — Are there AI opponents?** *Answered:* yes, specified in
+  [ai-opponents.md](/specification/ai-opponents.md). They see only their own dice, treat
+  unknown dice as uniform, and model nobody's behaviour. Where they run is an
+  implementation question, answered for the minimal game by it having no network.
 - **P3 — Is local hot-seat play supported?** It conflicts directly with
   "players don't know their opponent's dice" on a shared screen.
 - **P4 — Player identity.** Accounts, anonymous sessions, persistent names, or none?
@@ -95,8 +96,9 @@ they are.
   their dice while they are gone? Is a substitute or auto-play used?
 - **P8 — Spectators.** Allowed? If so, what do they see — all dice, or only what is
   public?
-- **P9 — Target platforms.** Native desktop, web via WASM, mobile? Bevy supports
-  several; the Data Browser hints at a web surface but nothing states it.
+- **P9 — Target platforms.** *Partly answered:* the minimal game is single-touch, so a
+  touch screen is a target. Still unstated for the pretty game, the relay and the data
+  browser.
 - **P10 — Is there any persistence the player sees** — match history, statistics,
   ratings?
 

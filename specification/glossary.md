@@ -30,4 +30,4 @@
 | Ones wild | Variant. When on, ones count toward every face value at resolution, and a claim may not name the one face. |
 | Relay | The service that orders messages and knows no game rules. |
 | Event log | The ordered record of every message in a match. The only state. |
-| Player | **(undefined)** Human, AI opponent, or either. |
+| Player | A human or an AI opponent. |
