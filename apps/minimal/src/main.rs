@@ -12,7 +12,7 @@ use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 use std::io::Write;
 
 use ai::View;
-use protocol::Event;
+use protocol::{Event, Moment};
 use render_minimal::palette::{PALETTE, assign, ink};
 use rules::{Call, Claim, Entry, Match, Outcome, Rolls, Variants};
 
@@ -39,9 +39,28 @@ struct Audit {
 }
 
 impl Audit {
-    fn open(directory: &std::path::Path, stamp: u64) -> Self {
+    /// Named for when the match started, so sorting the directory as text sorts it by
+    /// time.
+    ///
+    /// Created rather than truncated: two matches starting in the same millisecond would
+    /// otherwise share a name and the second would erase the first.
+    fn open(directory: &std::path::Path, at: Moment) -> Self {
         let opened = std::fs::create_dir_all(directory).and_then(|()| {
-            std::fs::File::create(directory.join(format!("match-{stamp:016x}.log")))
+            let stem = at.file_stem();
+            let mut attempt = 1;
+            loop {
+                let name = if attempt == 1 {
+                    format!("match-{stem}.log")
+                } else {
+                    format!("match-{stem}-{attempt}.log")
+                };
+                match std::fs::File::create_new(directory.join(name)) {
+                    Err(clash) if clash.kind() == std::io::ErrorKind::AlreadyExists => {
+                        attempt += 1;
+                    }
+                    other => return other,
+                }
+            }
         });
         match opened {
             Ok(file) => Self { file: Some(file) },
@@ -190,6 +209,7 @@ fn start(colour: usize, opponents: usize) -> Playing {
     let colours = assign(colour, players);
 
     let seed = stamp();
+    let at = Moment::from_unix_nanos(seed);
     let mut dice = Dice::new(seed);
 
     // Turn order is chosen at random when the match starts.
@@ -203,7 +223,8 @@ fn start(colour: usize, opponents: usize) -> Playing {
     let game = Match::start(order.clone(), DICE_EACH, variants, &mut dice);
     let pending = first_legal(&game);
 
-    let mut audit = Audit::open(std::path::Path::new(LOGS), seed);
+    let mut audit = Audit::open(std::path::Path::new(LOGS), at);
+    audit.record(Event::Started { at });
     for player in 0..players {
         audit.record(Event::AddPlayer {
             name: name_of(player),
@@ -890,8 +911,9 @@ mod tests {
         let directory = std::env::temp_dir().join("liars-dice-audit-test");
         let _ = std::fs::remove_dir_all(&directory);
 
-        for stamp in [1u64, 2] {
-            let mut audit = Audit::open(&directory, stamp);
+        // A millisecond apart, so the two matches do not share a file name.
+        for nanos in [1_000_000u64, 2_000_000] {
+            let mut audit = Audit::open(&directory, Moment::from_unix_nanos(nanos));
             audit.record(Event::AddPlayer {
                 name: "You".into(),
                 colour: "red".into(),
@@ -928,7 +950,7 @@ mod tests {
     #[test]
     fn a_log_that_cannot_be_written_is_survivable() {
         let impossible = std::path::Path::new("logs").join(" ");
-        let mut audit = Audit::open(&impossible, 7);
+        let mut audit = Audit::open(&impossible, Moment::from_unix_nanos(0));
         audit.record(Event::Eliminate {
             player: "Alice".into(),
         });
