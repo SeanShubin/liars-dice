@@ -456,6 +456,21 @@ fn standing(ui: &mut egui::Ui, playing: &Playing) {
     );
 }
 
+/// A dialled number, centred in a box the height of a tap target.
+///
+/// Fixed width, so a two digit quantity does not shift the button beside it, and the same
+/// height as the buttons, so the rows line up vertically as well as across.
+fn dialled_value(ui: &mut egui::Ui, value: u32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(48.0, 44.0), egui::Sense::hover());
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        value,
+        egui::FontId::proportional(24.0),
+        ui.visuals().text_color(),
+    );
+}
+
 /// A claim in its claimer's colour.
 ///
 /// The grid position already says who claimed, so the claimer's dice do not have to be
@@ -683,57 +698,60 @@ fn play(ui: &mut egui::Ui, playing: &mut Playing) -> Option<Screen> {
     let step = |claim: Claim| game.check_raise(claim).is_ok();
 
     let mut dialled = pending;
-    ui.horizontal(|ui| {
-        ui.label("quantity");
-        if tap(
-            ui,
-            "-",
-            pending.quantity > 0
-                && step(Claim {
-                    quantity: pending.quantity - 1,
+    egui::Grid::new("dialler")
+        .spacing([6.0, 6.0])
+        .show(ui, |ui| {
+            ui.label(egui::RichText::new("quantity").size(16.0));
+            if tap(
+                ui,
+                "-",
+                pending.quantity > 0
+                    && step(Claim {
+                        quantity: pending.quantity - 1,
+                        ..pending
+                    }),
+            ) {
+                dialled.quantity -= 1;
+            }
+            dialled_value(ui, pending.quantity);
+            if tap(
+                ui,
+                "+",
+                step(Claim {
+                    quantity: pending.quantity + 1,
                     ..pending
                 }),
-        ) {
-            dialled.quantity -= 1;
-        }
-        ui.label(egui::RichText::new(format!("{}", pending.quantity)).size(26.0));
-        if tap(
-            ui,
-            "+",
-            step(Claim {
-                quantity: pending.quantity + 1,
-                ..pending
-            }),
-        ) {
-            dialled.quantity += 1;
-        }
-    });
-    ui.horizontal(|ui| {
-        ui.label("face    ");
-        if tap(
-            ui,
-            "-",
-            pending.face > 1
-                && step(Claim {
-                    face: pending.face - 1,
-                    ..pending
-                }),
-        ) {
-            dialled.face -= 1;
-        }
-        ui.label(egui::RichText::new(format!("{}", pending.face)).size(26.0));
-        if tap(
-            ui,
-            "+",
-            pending.face < 6
-                && step(Claim {
-                    face: pending.face + 1,
-                    ..pending
-                }),
-        ) {
-            dialled.face += 1;
-        }
-    });
+            ) {
+                dialled.quantity += 1;
+            }
+            ui.end_row();
+
+            ui.label(egui::RichText::new("face").size(16.0));
+            if tap(
+                ui,
+                "-",
+                pending.face > 1
+                    && step(Claim {
+                        face: pending.face - 1,
+                        ..pending
+                    }),
+            ) {
+                dialled.face -= 1;
+            }
+            dialled_value(ui, pending.face as u32);
+            if tap(
+                ui,
+                "+",
+                pending.face < 6
+                    && step(Claim {
+                        face: pending.face + 1,
+                        ..pending
+                    }),
+            ) {
+                dialled.face += 1;
+            }
+            ui.end_row();
+        });
     playing.pending = dialled;
 
     let chance = readout::percent(&view.chance_of(playing.pending));
