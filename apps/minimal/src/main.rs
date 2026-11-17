@@ -20,6 +20,8 @@ const DICE_EACH: u32 = 5;
 const MAX_PLAYERS: usize = 10;
 /// Every die is drawn in a box this size, shown or not, so the dice line up in a grid.
 const DIE: f32 = 32.0;
+/// Every claim is drawn in a box this size, filled or not, so the claims line up too.
+const CLAIM: [f32; 2] = [58.0, 30.0];
 /// Where the audit logs go.
 const LOGS: &str = "logs";
 /// Opponents get names rather than numbers, so a log line reads as a sentence and so the
@@ -454,31 +456,74 @@ fn standing(ui: &mut egui::Ui, playing: &Playing) {
     );
 }
 
-/// This round's claims: the claim, then the claimer's dice.
+/// A claim in its claimer's colour.
 ///
-/// The dice carry both who claimed and how many they held, so neither has to be written
-/// out.
+/// The grid position already says who claimed, so the claimer's dice do not have to be
+/// drawn beside it. An empty cell still takes its space, which is what keeps the columns
+/// lined up.
+fn claim_box(ui: &mut egui::Ui, swatch: usize, claim: Option<Claim>) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(CLAIM[0], CLAIM[1]), egui::Sense::hover());
+    let Some(claim) = claim else {
+        return;
+    };
+    let ink = ink_of(swatch);
+    let painter = ui.painter();
+    painter.rect_filled(rect, 5.0, colour_of(swatch));
+    painter.rect_stroke(
+        rect,
+        5.0,
+        egui::Stroke::new(1.5, ink),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        format!("{} x {}", claim.quantity, claim.face),
+        egui::FontId::proportional(15.0),
+        ink,
+    );
+}
+
+/// This round's claims: players down the side, trips around the table across the top.
+///
+/// A player's first claim sits in the first column, their second in the second, and so on,
+/// so a column is one time around the table and a row is one player's escalation. Reading
+/// down a column compares what everyone claimed at the same stage; reading along a row
+/// shows how far one player pushed.
 fn history(ui: &mut egui::Ui, playing: &Playing, entries: &[Entry]) {
     ui.label(egui::RichText::new("This round").strong());
     if entries.is_empty() {
         ui.label("no claims yet");
         return;
     }
+
+    let mut claims: Vec<Vec<Claim>> = vec![Vec::new(); playing.colours.len()];
+    for entry in entries {
+        claims[entry.player].push(entry.claim);
+    }
+    let trips = claims.iter().map(Vec::len).max().unwrap_or(0);
+
     egui::Grid::new("history")
-        .spacing([5.0, 5.0])
+        .spacing([4.0, 4.0])
         .show(ui, |ui| {
-            for Entry {
-                player,
-                dice_held,
-                claim,
-            } in entries
-            {
-                ui.label(
-                    egui::RichText::new(format!("at least {} × {}", claim.quantity, claim.face))
-                        .size(15.0),
-                );
-                for _ in 0..*dice_held {
-                    die(ui, playing.colours[*player], None);
+            ui.label("");
+            for trip in 1..=trips {
+                ui.label(egui::RichText::new(format!("{trip}")).size(13.0).weak());
+            }
+            ui.end_row();
+
+            for &player in playing.game.order() {
+                // A player who never claimed and is out of the match has nothing to show.
+                if claims[player].is_empty() && playing.game.eliminated(player) {
+                    continue;
+                }
+                ui.label(egui::RichText::new(name_of(player)).size(14.0));
+                for trip in 0..trips {
+                    claim_box(
+                        ui,
+                        playing.colours[player],
+                        claims[player].get(trip).copied(),
+                    );
                 }
                 ui.end_row();
             }
