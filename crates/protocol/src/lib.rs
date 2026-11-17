@@ -10,6 +10,16 @@
 //! all match state be derivable from the event log is met by writing only what cannot be
 //! derived.
 //!
+//! Two fields break that rule on purpose. `winner` tells a reader the log is a whole match
+//! rather than a truncated one. And the odds on a claim are derivable only by redoing the
+//! whole probability calculation, which is too much work to do by eye — reading a column of
+//! them is how a pattern in how a player bids becomes visible at all.
+//!
+//! Those odds are the only rounded thing in the log. They are for a person to read and
+//! must never be read back into a decision; a replay recomputes them exactly from the
+//! rolls. /specification/architecture.md forbids a value crossing from the floating point
+//! side to the exact side, and this is the field that would do it.
+//!
 //! Writing the log is an effect and belongs to a composition root. This crate only says
 //! what an event is and how it reads.
 
@@ -99,7 +109,10 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 }
 
 /// One thing that happened, in the order it happened.
-#[derive(Clone, PartialEq, Eq, Debug)]
+///
+/// Not `Eq`, because the odds on a claim are a float. That is a fair warning: a float does
+/// not belong in anything compared for equality, and these are only ever written out.
+#[derive(Clone, PartialEq, Debug)]
 pub enum Event {
     /// When the match started, in UTC.
     Started {
@@ -123,18 +136,24 @@ pub enum Event {
         dice: Vec<u8>,
     },
     /// A raise: at least this quantity of this face.
+    ///
+    /// `odds` is the percentage chance the claim is true, from what the claimer could see
+    /// when they made it.
     Claim {
         player: String,
         quantity: u32,
         face: u8,
+        odds: f64,
     },
-    /// A claim that the previous claim is false.
+    /// A claim that the previous claim is false. `odds` is the chance that is so.
     Liar {
         player: String,
+        odds: f64,
     },
-    /// A claim that the previous claim is exact.
+    /// A claim that the previous claim is exact. `odds` is the chance that is so.
     SpotOn {
         player: String,
+        odds: f64,
     },
     LoseDie {
         player: String,
@@ -187,6 +206,11 @@ fn tokens(values: &[String]) -> String {
         .join(" ")
 }
 
+/// The one rounded field in the log, to two places so a column of them can be scanned.
+fn percent(odds: f64) -> String {
+    format!("{odds:.2}%")
+}
+
 fn faces(values: &[u8]) -> String {
     values
         .iter()
@@ -218,9 +242,19 @@ impl fmt::Display for Event {
                 player,
                 quantity,
                 face,
-            } => write!(out, "claim {} {quantity} {face}", token(player)),
-            Event::Liar { player } => write!(out, "claim {} liar", token(player)),
-            Event::SpotOn { player } => write!(out, "claim {} spot-on", token(player)),
+                odds,
+            } => write!(
+                out,
+                "claim {} {quantity} {face} {}",
+                token(player),
+                percent(*odds)
+            ),
+            Event::Liar { player, odds } => {
+                write!(out, "claim {} liar {}", token(player), percent(*odds))
+            }
+            Event::SpotOn { player, odds } => {
+                write!(out, "claim {} spot-on {}", token(player), percent(*odds))
+            }
             Event::LoseDie { player } => write!(out, "lose-die {}", token(player)),
             Event::GainDie { player } => write!(out, "gain-die {}", token(player)),
             Event::Eliminate { player } => write!(out, "eliminate {}", token(player)),
@@ -340,9 +374,11 @@ mod tests {
                 player: named("Alice"),
                 quantity: 3,
                 face: 6,
+                odds: 38.207,
             },
             Event::Liar {
                 player: named("Bob"),
+                odds: 61.793,
             },
             Event::LoseDie {
                 player: named("Bob"),
@@ -360,8 +396,8 @@ mod tests {
                 "player-order Alice Bob",
                 "variant ones-wild off",
                 "roll Alice 1 3 2 6 6",
-                "claim Alice 3 6",
-                "claim Bob liar",
+                "claim Alice 3 6 38.21%",
+                "claim Bob liar 61.79%",
                 "lose-die Bob",
                 "next-turn Bob",
             ]
@@ -374,24 +410,27 @@ mod tests {
             Event::Claim {
                 player: named("Carol"),
                 quantity: 5,
-                face: 2
+                face: 2,
+                odds: 7.0,
             }
             .to_string(),
-            "claim Carol 5 2"
+            "claim Carol 5 2 7.00%"
         );
         assert_eq!(
             Event::Liar {
-                player: named("Dave")
+                player: named("Dave"),
+                odds: 93.0
             }
             .to_string(),
-            "claim Dave liar"
+            "claim Dave liar 93.00%"
         );
         assert_eq!(
             Event::SpotOn {
-                player: named("Dave")
+                player: named("Dave"),
+                odds: 0.004
             }
             .to_string(),
-            "claim Dave spot-on"
+            "claim Dave spot-on 0.00%"
         );
     }
 

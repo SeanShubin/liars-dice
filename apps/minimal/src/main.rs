@@ -631,6 +631,35 @@ fn history(ui: &mut egui::Ui, playing: &Playing, entries: &[Entry]) {
         });
 }
 
+/// How likely the claimant's own claim was true, from what they could see when they made
+/// it.
+///
+/// Computed here rather than passed in, so it is the same calculation whoever claimed —
+/// an opponent's line and the human's line mean the same thing. The complement for a liar
+/// call is taken exactly and only then rounded for writing.
+fn claimant_odds(game: &Match, actor: usize, call: Call) -> f64 {
+    let own = game.dice_of(actor).to_vec();
+    let unknown = game.dice_in_play() - game.count(actor);
+    let view = View {
+        own_dice: &own,
+        unknown,
+        legal_raises: &[],
+        previous: game.previous_claim(),
+        variants: game.variants(),
+    };
+    match call {
+        Call::Raise(claim) => readout::percent(&view.chance_of(claim)),
+        Call::Liar => match game.previous_claim() {
+            Some(claim) => readout::percent(&view.chance_of(claim).complement()),
+            None => 0.0,
+        },
+        Call::SpotOn => match game.previous_claim() {
+            Some(claim) => readout::percent(&view.chance_exactly(claim)),
+            None => 0.0,
+        },
+    }
+}
+
 /// Advance every opponent's turn until it is the human's, or the round ends.
 fn run_opponents(playing: &mut Playing) -> Option<Screen> {
     while !playing.game.over() && playing.game.current() != HUMAN {
@@ -662,6 +691,7 @@ fn apply(playing: &mut Playing, call: Call) -> Option<Screen> {
         .collect();
     // Resolving a round clears its claims from the match, so they are kept here first.
     let round: Vec<Entry> = playing.game.history().to_vec();
+    let odds = claimant_odds(&playing.game, actor, call);
 
     let outcome = playing
         .game
@@ -675,6 +705,7 @@ fn apply(playing: &mut Playing, call: Call) -> Option<Screen> {
                     player: name_of(actor),
                     quantity: claim.quantity,
                     face: claim.face,
+                    odds,
                 });
             }
             None
@@ -710,9 +741,11 @@ fn apply(playing: &mut Playing, call: Call) -> Option<Screen> {
             playing.audit.record(match call {
                 Call::Liar => Event::Liar {
                     player: name_of(actor),
+                    odds,
                 },
                 Call::SpotOn => Event::SpotOn {
                     player: name_of(actor),
+                    odds,
                 },
                 Call::Raise(_) => unreachable!("a raise does not resolve a round"),
             });
