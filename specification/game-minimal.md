@@ -5,7 +5,7 @@
 - One human plays against AI opponents
 - The human chooses the colour of their dice
 - The human chooses the number of opponents
-- The number of opponents has no upper bound
+- The number of opponents is at least one
 - Every number the human chooses can be increased and decreased
 - Every interaction is a single touch
 - The human can reach every legal claim

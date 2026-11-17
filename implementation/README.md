@@ -46,6 +46,7 @@ Not started | In progress | Built
 ## Documents
 
 - [Die Rendering Prototype](/implementation/die-rendering-prototype.md) — mesh, materials, glyphs, settings panel
+- [Minimal Game](/implementation/game-minimal.md) — probability model, AI decision rule, colour assignment, interaction
 
 ## Suggested Order
 

@@ -11,6 +11,7 @@
 
 ## Game Mechanics
 - A match requires two or more players to start
+- A match has at most ten players
 - each player starts with 5 dice
 - each player takes a turn until the round ends
 - new rounds continue until the match ends
