@@ -15,6 +15,10 @@
 //! whole probability calculation, which is too much work to do by eye — reading a column of
 //! them is how a pattern in how a player bids becomes visible at all.
 //!
+//! The `lucky` and `unlucky` lines are the third exception, for the same reason: spotting
+//! that a player keeps surviving claims they should have lost means comparing every claim
+//! against its resolution, which nobody does by eye.
+//!
 //! Those odds are the only rounded thing in the log. They are for a person to read and
 //! must never be read back into a decision; a replay recomputes them exactly from the
 //! rolls. /specification/architecture.md forbids a value crossing from the floating point
@@ -164,6 +168,20 @@ pub enum Event {
     Eliminate {
         player: String,
     },
+    /// A claim that came true against the odds. `odds` is how likely what happened was.
+    ///
+    /// Derivable from the claim's own odds and the resolution, and written anyway: a run
+    /// of these is how a reader sees that a player has been riding their luck.
+    Lucky {
+        player: String,
+        odds: f64,
+    },
+    /// A claim that failed when it should have held. `odds` is how likely what happened
+    /// was.
+    Unlucky {
+        player: String,
+        odds: f64,
+    },
     /// Who makes the first claim of the next round.
     NextTurn {
         player: String,
@@ -254,6 +272,12 @@ impl fmt::Display for Event {
             }
             Event::SpotOn { player, odds } => {
                 write!(out, "claim {} spot-on {}", token(player), percent(*odds))
+            }
+            Event::Lucky { player, odds } => {
+                write!(out, "lucky {} {}", token(player), percent(*odds))
+            }
+            Event::Unlucky { player, odds } => {
+                write!(out, "unlucky {} {}", token(player), percent(*odds))
             }
             Event::LoseDie { player } => write!(out, "lose-die {}", token(player)),
             Event::GainDie { player } => write!(out, "gain-die {}", token(player)),
@@ -485,6 +509,26 @@ mod tests {
             }
             .to_string(),
             "next-turn -"
+        );
+    }
+
+    #[test]
+    fn luck_reads_as_the_chance_of_what_happened() {
+        assert_eq!(
+            Event::Lucky {
+                player: named("Dave"),
+                odds: 1.2
+            }
+            .to_string(),
+            "lucky Dave 1.20%"
+        );
+        assert_eq!(
+            Event::Unlucky {
+                player: named("Alice"),
+                odds: 3.704
+            }
+            .to_string(),
+            "unlucky Alice 3.70%"
         );
     }
 

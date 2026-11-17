@@ -24,6 +24,12 @@ const DIE: f32 = 32.0;
 const CLAIM: [f32; 2] = [58.0, 30.0];
 /// Where the audit logs go.
 const LOGS: &str = "logs";
+/// An outcome this unlikely or worse is called out in the log as luck.
+///
+/// Five per cent is a one in twenty outcome. How often that actually fires depends on how
+/// often a confident claim gets challenged at all, which is a question for a few real logs
+/// rather than for reasoning, so this is a starting point rather than a settled number.
+const LUCK: f64 = 5.0;
 /// Opponents get names rather than numbers, so a log line reads as a sentence and so the
 /// screen does too. One token each, because the log is space separated.
 const OPPONENTS: [&str; 9] = [
@@ -638,8 +644,23 @@ fn history(ui: &mut egui::Ui, playing: &Playing, entries: &[Entry]) {
 /// an opponent's line and the human's line mean the same thing. The complement for a liar
 /// call is taken exactly and only then rounded for writing.
 fn claimant_odds(game: &Match, actor: usize, call: Call) -> f64 {
-    let own = game.dice_of(actor).to_vec();
-    let unknown = game.dice_in_play() - game.count(actor);
+    match call {
+        Call::Raise(claim) => claimant_odds_for(game, actor, claim, false),
+        Call::Liar => match game.previous_claim() {
+            Some(claim) => 100.0 - claimant_odds_for(game, actor, claim, false),
+            None => 0.0,
+        },
+        Call::SpotOn => match game.previous_claim() {
+            Some(claim) => claimant_odds_for(game, actor, claim, true),
+            None => 0.0,
+        },
+    }
+}
+
+/// How likely one claim is, from what one player can see.
+fn claimant_odds_for(game: &Match, player: usize, claim: Claim, exactly: bool) -> f64 {
+    let own = game.dice_of(player).to_vec();
+    let unknown = game.dice_in_play() - game.count(player);
     let view = View {
         own_dice: &own,
         unknown,
@@ -647,17 +668,44 @@ fn claimant_odds(game: &Match, actor: usize, call: Call) -> f64 {
         previous: game.previous_claim(),
         variants: game.variants(),
     };
-    match call {
-        Call::Raise(claim) => readout::percent(&view.chance_of(claim)),
-        Call::Liar => match game.previous_claim() {
-            Some(claim) => readout::percent(&view.chance_of(claim).complement()),
-            None => 0.0,
-        },
-        Call::SpotOn => match game.previous_claim() {
-            Some(claim) => readout::percent(&view.chance_exactly(claim)),
-            None => 0.0,
-        },
+    if exactly {
+        readout::percent(&view.chance_exactly(claim))
+    } else {
+        readout::percent(&view.chance_of(claim))
     }
+}
+
+/// Whether what actually happened to a claim was unlikely enough to call out.
+///
+/// One rule covers both directions: the measure is the chance of the outcome that
+/// occurred. A claim that was ninety-seven per cent likely and failed was a three per cent
+/// outcome; a two per cent claim that came true was a two per cent outcome. Same scale,
+/// same meaning.
+///
+/// The chance is exact until this point. A standard deviation would need the normal
+/// approximation, which wants far more dice than this game ever has — forty-nine unknown
+/// dice at the very most, and four when a player is nearly out.
+fn luck(player: usize, chance_true: f64, came_true: bool) -> Option<Event> {
+    let chance_of_outcome = if came_true {
+        chance_true
+    } else {
+        100.0 - chance_true
+    };
+    if chance_of_outcome > LUCK {
+        return None;
+    }
+    let player = name_of(player);
+    Some(if came_true {
+        Event::Lucky {
+            player,
+            odds: chance_of_outcome,
+        }
+    } else {
+        Event::Unlucky {
+            player,
+            odds: chance_of_outcome,
+        }
+    })
 }
 
 /// Advance every opponent's turn until it is the human's, or the round ends.
@@ -692,6 +740,9 @@ fn apply(playing: &mut Playing, call: Call) -> Option<Screen> {
     // Resolving a round clears its claims from the match, so they are kept here first.
     let round: Vec<Entry> = playing.game.history().to_vec();
     let odds = claimant_odds(&playing.game, actor, call);
+    let previous_player = playing.game.previous_player();
+    // Judging luck needs the round's dice, which resolving the round rolls away.
+    let before = playing.game.clone();
 
     let outcome = playing
         .game
@@ -763,6 +814,27 @@ fn apply(playing: &mut Playing, call: Call) -> Option<Screen> {
                 playing.audit.record(Event::Eliminate {
                     player: name_of(player),
                 });
+            }
+
+            // The disputed claim, judged from what its maker could see. Their own dice and
+            // the unknown count did not change during the round, so recomputing it now
+            // gives the chance they had in front of them.
+            let held = truth >= claim.quantity;
+            if let Some(maker) = previous_player {
+                if let Some(event) =
+                    luck(maker, claimant_odds_for(&before, maker, claim, false), held)
+                {
+                    playing.audit.record(event);
+                }
+            }
+            // The call that ended the round, judged the same way.
+            let call_held = match call {
+                Call::Liar => !held,
+                Call::SpotOn => truth == claim.quantity,
+                Call::Raise(_) => unreachable!("a raise does not resolve a round"),
+            };
+            if let Some(event) = luck(actor, odds, call_held) {
+                playing.audit.record(event);
             }
 
             playing.revealed = snapshot;
