@@ -503,8 +503,10 @@ fn claim_box(ui: &mut egui::Ui, swatch: usize, claim: Option<Claim>) {
 ///
 /// A player's first claim sits in the first column, their second in the second, and so on,
 /// so a column is one time around the table and a row is one player's escalation. Reading
-/// down a column compares what everyone claimed at the same stage; reading along a row
-/// shows how far one player pushed.
+/// along a row shows how far one player pushed.
+///
+/// Rows start with whoever opened the round rather than with the match's turn order, so the
+/// first column reads straight down in the order the claims were actually made.
 fn history(ui: &mut egui::Ui, playing: &Playing, entries: &[Entry]) {
     ui.label(egui::RichText::new("This round").strong());
     if entries.is_empty() {
@@ -518,6 +520,18 @@ fn history(ui: &mut egui::Ui, playing: &Playing, entries: &[Entry]) {
     }
     let trips = claims.iter().map(Vec::len).max().unwrap_or(0);
 
+    let order = playing.game.order();
+    let opener = entries[0].player;
+    let from = order
+        .iter()
+        .position(|&player| player == opener)
+        .unwrap_or(0);
+    let rotated: Vec<usize> = order[from..]
+        .iter()
+        .chain(order[..from].iter())
+        .copied()
+        .collect();
+
     egui::Grid::new("history")
         .spacing([4.0, 4.0])
         .show(ui, |ui| {
@@ -527,7 +541,7 @@ fn history(ui: &mut egui::Ui, playing: &Playing, entries: &[Entry]) {
             }
             ui.end_row();
 
-            for &player in playing.game.order() {
+            for &player in &rotated {
                 // A player who never claimed and is out of the match has nothing to show.
                 if claims[player].is_empty() && playing.game.eliminated(player) {
                     continue;
