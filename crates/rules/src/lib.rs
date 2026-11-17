@@ -120,6 +120,12 @@ impl Match {
         &self.history
     }
 
+    /// Turn order, including players who have been eliminated. Fixed at match start, since
+    /// players are not reordered during a match.
+    pub fn order(&self) -> &[usize] {
+        &self.order
+    }
+
     pub fn count(&self, player: usize) -> u32 {
         self.counts[player]
     }

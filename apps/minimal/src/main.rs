@@ -116,6 +116,8 @@ struct Playing {
     pending: Claim,
     /// Dice as they were when the round ended, for the reveal.
     revealed: Vec<Vec<u8>>,
+    /// The round's claims, kept because resolving a round clears them from the match.
+    round: Vec<Entry>,
     verdict: Option<String>,
     audit: Audit,
 }
@@ -221,6 +223,7 @@ fn start(colour: usize, opponents: usize) -> Playing {
         dice,
         pending,
         revealed: Vec::new(),
+        round: Vec::new(),
         verdict: None,
         audit,
     }
@@ -386,14 +389,24 @@ fn die(ui: &mut egui::Ui, swatch: usize, face: Option<u8>) {
 /// their slots unrevealed.
 fn table(ui: &mut egui::Ui, playing: &Playing, revealed: bool) {
     let game = &playing.game;
+    let turn = (!game.over()).then(|| game.current());
     egui::Grid::new("table").spacing([5.0, 5.0]).show(ui, |ui| {
-        for player in 0..playing.colours.len() {
+        // Turn order rather than player number, so who attacks whom is visible.
+        for &player in game.order() {
             let out = game.eliminated(player);
             let mut name = egui::RichText::new(name_of(player)).size(15.0);
             if out {
                 name = name.strikethrough();
             }
+            if turn == Some(player) {
+                name = name.strong();
+            }
             ui.label(name);
+            ui.label(if turn == Some(player) {
+                egui::RichText::new("turn").size(13.0).strong()
+            } else {
+                egui::RichText::new("")
+            });
 
             let dice: Vec<u8> = if revealed {
                 playing.revealed.get(player).cloned().unwrap_or_default()
@@ -412,13 +425,36 @@ fn table(ui: &mut egui::Ui, playing: &Playing, revealed: bool) {
     });
 }
 
+/// Whose turn it is, what there is to beat, and how many dice are in play.
+fn standing(ui: &mut egui::Ui, playing: &Playing) {
+    let game = &playing.game;
+    let whose = if game.over() {
+        "match over".to_string()
+    } else if game.current() == HUMAN {
+        "Your turn".to_string()
+    } else {
+        format!("{}'s turn", name_of(game.current()))
+    };
+    let beat = match game.previous_claim() {
+        Some(claim) => format!("to beat: at least {} x {}", claim.quantity, claim.face),
+        None => "nothing to beat yet".to_string(),
+    };
+    ui.label(
+        egui::RichText::new(format!(
+            "{whose}   -   {beat}   -   {} dice in play",
+            game.dice_in_play()
+        ))
+        .size(16.0),
+    );
+}
+
 /// This round's claims: the claim, then the claimer's dice.
 ///
 /// The dice carry both who claimed and how many they held, so neither has to be written
 /// out.
-fn history(ui: &mut egui::Ui, playing: &Playing) {
+fn history(ui: &mut egui::Ui, playing: &Playing, entries: &[Entry]) {
     ui.label(egui::RichText::new("This round").strong());
-    if playing.game.history().is_empty() {
+    if entries.is_empty() {
         ui.label("no claims yet");
         return;
     }
@@ -429,7 +465,7 @@ fn history(ui: &mut egui::Ui, playing: &Playing) {
                 player,
                 dice_held,
                 claim,
-            } in playing.game.history()
+            } in entries
             {
                 ui.label(
                     egui::RichText::new(format!("at least {} × {}", claim.quantity, claim.face))
@@ -472,6 +508,8 @@ fn apply(playing: &mut Playing, call: Call) -> Option<Screen> {
     let snapshot: Vec<Vec<u8>> = (0..playing.colours.len())
         .map(|player| playing.game.dice_of(player).to_vec())
         .collect();
+    // Resolving a round clears its claims from the match, so they are kept here first.
+    let round: Vec<Entry> = playing.game.history().to_vec();
 
     let outcome = playing
         .game
@@ -543,6 +581,7 @@ fn apply(playing: &mut Playing, call: Call) -> Option<Screen> {
             }
 
             playing.revealed = snapshot;
+            playing.round = round;
             playing.verdict = Some(said);
             if over {
                 playing.audit.record(Event::Winner {
@@ -572,7 +611,8 @@ fn play(ui: &mut egui::Ui, playing: &mut Playing) -> Option<Screen> {
 
     table(ui, playing, false);
     ui.separator();
-    history(ui, playing);
+    standing(ui, playing);
+    history(ui, playing, playing.game.history());
     ui.separator();
 
     let game = &playing.game;
@@ -686,8 +726,12 @@ fn reveal(ui: &mut egui::Ui, playing: &mut Playing) -> Option<Screen> {
     ui.separator();
     table(ui, playing, true);
     ui.separator();
+    standing(ui, playing);
+    history(ui, playing, &playing.round.clone());
+    ui.separator();
     if tap(ui, "Next round", true) {
         playing.revealed.clear();
+        playing.round.clear();
         playing.verdict = None;
         playing.pending = first_legal(&playing.game);
         return Some(Screen::Play);
@@ -702,6 +746,8 @@ fn over(ui: &mut egui::Ui, playing: &mut Playing) -> Option<Screen> {
     }
     ui.separator();
     table(ui, playing, true);
+    ui.separator();
+    history(ui, playing, &playing.round.clone());
     ui.separator();
     ui.label(egui::RichText::new("Finishing order").strong());
     egui::Grid::new("ranking")
