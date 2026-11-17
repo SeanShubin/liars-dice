@@ -126,6 +126,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ai"
+version = "0.0.0"
+dependencies = [
+ "odds",
+ "rules",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3906,6 +3914,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "minimal"
+version = "0.0.0"
+dependencies = [
+ "ai",
+ "bevy",
+ "bevy_egui",
+ "odds",
+ "render-minimal",
+ "rules",
+]
+
+[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4496,6 +4516,10 @@ dependencies = [
  "objc2-core-location",
  "objc2-foundation 0.2.2",
 ]
+
+[[package]]
+name = "odds"
+version = "0.0.0"
 
 [[package]]
 name = "offset-allocator"

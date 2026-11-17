@@ -2,6 +2,8 @@
 resolver = "3"
 members = [
     "crates/rules",
+    "crates/odds",
+    "crates/ai",
     "crates/model",
     "crates/protocol",
     "crates/integrity",
@@ -15,6 +17,7 @@ members = [
     "apps/relay",
     "apps/admin",
     "apps/prototype",
+    "apps/minimal",
 ]
 
 [workspace.package]
@@ -26,3 +29,7 @@ publish = false
 bevy = "0.20"
 bevy_egui = "0.43"
 dice-render = { path = "crates/dice-render" }
+rules = { path = "crates/rules" }
+odds = { path = "crates/odds" }
+ai = { path = "crates/ai" }
+render-minimal = { path = "crates/render-minimal" }

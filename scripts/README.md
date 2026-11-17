@@ -5,12 +5,14 @@ POSIX shell version, with the same name and the same behaviour.
 
 | Script | What it does |
 |--------|--------------|
+| `run-minimal` | The minimal game. One human against AI opponents, two dimensional, single touch. |
 | `run-prototype` | The die rendering prototype. One die, a ground, and live appearance settings. |
 | `verify` | Formats check, builds everything, runs every test. What continuous integration should run. |
 
 Run them from anywhere; each one moves to the repository root first.
 
 ```
+scripts/run-minimal.ps1          scripts/run-minimal.sh
 scripts/run-prototype.ps1        scripts/run-prototype.sh
 scripts/verify.ps1               scripts/verify.sh
 ```

@@ -4,7 +4,8 @@ A networked implementation of the dice game Liar's Dice, written in Rust with Be
 for rendering and AWS for hosting. The game model is deterministic and
 fully auditable; clients are thin and cannot see or influence hidden state.
 
-**Status:** the die rendering prototype is built. Everything else is documentation.
+**Status:** the minimal game and the die rendering prototype are built. The networked
+game, the pretty renderer and the data browser are documentation only.
 No code is written for a piece of work until its specification and its implementation
 document are settled.
 
@@ -14,6 +15,7 @@ One named script per runnable thing, in [`scripts/`](/scripts/README.md). Each e
 both a PowerShell and a POSIX shell version.
 
 ```
+scripts/run-minimal.ps1      the minimal game
 scripts/run-prototype.ps1    the die rendering prototype
 scripts/verify.ps1           format check, build everything, run every test
 ```

@@ -218,5 +218,16 @@ one is a product, the other a harness for the networked game.
 Deferred: how the touch build is delivered — a browser on a phone or a native mobile
 build. That is P9, still open for every application but this one's input model.
 
+/specification/game-rules.md says a match has a configurable time limit for taking a turn,
+and the minimal game does not implement one. A local single player game with a turn clock
+would be hostile, so the limit is presumed configurable to off — but no statement says the
+limit can be switched off, so this is a gap rather than a decision.
+
 ## Status
-Not started.
+Built, apart from the presentation statements a renderer would carry. `crates/odds`,
+`crates/rules`, `crates/ai`, `crates/render-minimal` and `apps/minimal`, run with
+`scripts/run-minimal`.
+
+Not yet done: the interface is an egui window rather than a laid out two dimensional
+board, and opponents take their turns the moment the human's call is made rather than one
+at a time. Both are presentation, and neither contradicts a statement.
