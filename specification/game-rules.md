@@ -63,9 +63,8 @@
 
 ## Exchanges
 - A round ends with an exchange between the player who ends it and the previous player
-- The player who ends a round wins the exchange if and only if their claim is true
-- A player who fails to claim in time loses the exchange
-- The winner of an exchange makes the first claim of the next round
+- The player whose dice count changed makes the first claim of the next round
+- If that player is eliminated, the other player in the exchange makes the first claim
 
 ## Raise
 - Declare that at least a certain amount of a certain face value is present among all players

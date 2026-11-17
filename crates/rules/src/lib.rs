@@ -42,7 +42,8 @@ pub enum Outcome {
     /// The round ended. `truth` is how many dice actually counted toward the disputed
     /// claim.
     Resolved {
-        winner: usize,
+        /// Who makes the first claim of the next round.
+        opens: usize,
         lost: Option<usize>,
         gained: Option<usize>,
         eliminated: Option<usize>,
@@ -258,33 +259,35 @@ impl Match {
                 let previous = *self.history.last().expect("checked");
                 let truth = self.truth(previous.claim.face);
                 let claim_held = truth >= previous.claim.quantity;
-                // The caller wins the exchange if and only if their claim is true, and
-                // their claim is that the previous claim is false.
-                let (winner, lost) = if claim_held {
-                    (previous.player, self.current)
+                // Whoever was wrong loses a die: the caller if the claim held, otherwise
+                // the player who made it.
+                let lost = if claim_held {
+                    self.current
                 } else {
-                    (self.current, previous.player)
+                    previous.player
                 };
-                Ok(self.resolve(winner, Some(lost), None, truth, rolls))
+                let pair = (self.current, previous.player);
+                Ok(self.resolve(pair, Some(lost), None, truth, rolls))
             }
             Call::SpotOn => {
                 let previous = *self.history.last().expect("checked");
                 let truth = self.truth(previous.claim.face);
                 let exact = truth == previous.claim.quantity;
+                let pair = (self.current, previous.player);
                 if exact {
-                    let winner = self.current;
-                    Ok(self.resolve(winner, None, Some(winner), truth, rolls))
+                    Ok(self.resolve(pair, None, Some(self.current), truth, rolls))
                 } else {
-                    let winner = previous.player;
-                    Ok(self.resolve(winner, Some(self.current), None, truth, rolls))
+                    Ok(self.resolve(pair, Some(self.current), None, truth, rolls))
                 }
             }
         }
     }
 
+    /// `pair` is the two players in the exchange: the one who ended the round and the
+    /// previous player.
     fn resolve(
         &mut self,
-        winner: usize,
+        pair: (usize, usize),
         lost: Option<usize>,
         gained: Option<usize>,
         truth: u32,
@@ -302,19 +305,29 @@ impl Match {
             }
         }
 
+        // The player whose dice count changed makes the first claim of the next round. If
+        // that player is eliminated, the other player in the exchange does. The other
+        // player lost no dice this round, so they are never also eliminated.
+        let changed = gained
+            .or(lost)
+            .expect("a resolution always changes someone's dice count");
+        let opens = if self.counts[changed] == 0 {
+            if changed == pair.0 { pair.1 } else { pair.0 }
+        } else {
+            changed
+        };
+
         self.history.clear();
         let over = self.over();
         if !over {
-            // The winner of an exchange makes the first claim of the next round. A winner
-            // never loses dice, so a winner is never the eliminated player.
-            self.current = winner;
+            self.current = opens;
             self.roll(rolls);
         } else {
             self.rolled = vec![Vec::new(); self.counts.len()];
         }
 
         Outcome::Resolved {
-            winner,
+            opens,
             lost,
             gained,
             eliminated,
@@ -515,20 +528,18 @@ mod tests {
         let outcome = game.apply(Call::Liar, &mut rolls).unwrap();
         match outcome {
             Outcome::Resolved {
-                winner,
-                lost,
-                truth,
-                ..
+                opens, lost, truth, ..
             } => {
                 assert_eq!(truth, 0);
                 assert_eq!(lost, Some(0));
-                assert_eq!(winner, 1);
+                // Player zero's dice count changed, so player zero opens the next round.
+                assert_eq!(opens, 0);
             }
             other => panic!("expected a resolution, got {other:?}"),
         }
         assert_eq!(game.count(0), 1);
         assert_eq!(game.count(1), 2);
-        assert_eq!(game.current(), 1);
+        assert_eq!(game.current(), 0);
     }
 
     #[test]
@@ -547,7 +558,8 @@ mod tests {
         game.apply(Call::Liar, &mut rolls).unwrap();
         assert_eq!(game.count(0), 2);
         assert_eq!(game.count(1), 1);
-        assert_eq!(game.current(), 0);
+        // Player one's dice count changed, so player one opens the next round.
+        assert_eq!(game.current(), 1);
     }
 
     #[test]
@@ -626,6 +638,9 @@ mod tests {
         assert_eq!(game.alive(), vec![1, 2]);
         assert_eq!(game.next_player(1), 2);
         assert_eq!(game.next_player(2), 1);
+        // Player zero's dice changed but zero is eliminated, so the other player in the
+        // exchange opens instead.
+        assert_eq!(game.current(), 1);
     }
 
     #[test]
