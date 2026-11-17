@@ -15,7 +15,9 @@
 - If composition roots need behavior, used composition pipeline that alternates composition and behavior, similar to how a reader monad operates
 - Consolidate all non-determinism into a single pluggable abstraction, so that all application logic can be tested within a simulated environment
 - Rendering and behavior should not know about each other, a higher level coordinator should manage them
-- Floating point rounding and transcendental functions should be isolated to rendering only, and only when necessary, the model should be protected from this
+- A value that determines the content of an event is computed exactly, with integer or rational arithmetic only
+- A value that is only displayed to a person may use floating point and transcendental functions freely
+- No value crosses from the floating point side to the exact side
 
 ## State
 - The event log is the only state

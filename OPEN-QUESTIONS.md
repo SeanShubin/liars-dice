@@ -135,8 +135,10 @@ they are.
   process identity, environment? The list belongs in the specification, because
   "all non-determinism" is only testable if the set is closed.
 - **T11 — Determinism requirements for Rust specifically.** Iteration order of hash
-  maps, integer overflow behavior, and any float in the model are all ways determinism
-  silently breaks. Is there a stated prohibition?
+  maps and integer overflow behavior are both ways determinism silently breaks. Is there
+  a stated prohibition? *Partly answered:* floating point is settled. A value determining
+  the content of an event is computed exactly, a value only displayed to a person may
+  round, and nothing crosses from the second to the first. The other two are still open.
 - **T12 — Collusion.** *Answered:* out of scope. Not prevented, not detected.
 - **T13 — Server authority over claims.** Can a malicious client send an illegal claim,
   a claim out of turn, or a claim on behalf of another player? Where is that rejected?

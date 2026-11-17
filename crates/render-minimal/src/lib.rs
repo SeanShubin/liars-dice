@@ -5,4 +5,4 @@
 
 pub mod palette;
 
-pub use palette::{PALETTE, Swatch, assign, distance};
+pub use palette::{PALETTE, Swatch, assign, distance, ink, lightness};

@@ -210,8 +210,9 @@ project may upgrade. A forty-line camera is cheaper than that.
 - Mesh generation is a pure function of the settings. The same settings produce the same
   mesh, byte for byte.
 - Noise is seeded explicitly, never from the clock or from an unseeded default.
-- Floating point appears throughout, which is where the architecture statements say it
-  belongs. Nothing here is shared with a model, so nothing has to agree across machines.
+- Floating point appears throughout, which the architecture statements allow: nothing here
+  decides the content of an event, it is only looked at. No value computed here reaches the
+  exact side, so nothing has to agree across machines.
 
 ## Testing
 - The mesh is watertight: every edge is shared by exactly two triangles.

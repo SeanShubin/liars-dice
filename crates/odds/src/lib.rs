@@ -1,4 +1,4 @@
-//! The probability model. Pure, and knows nothing of rules or turns.
+//! The probability model. Pure, exact, and knows nothing of rules or turns.
 //!
 //! Every probability in the game is one question: given the dice I can see, how likely is
 //! it that at least so many of the dice I cannot see show a particular face?
@@ -6,16 +6,26 @@
 //! Realizes /specification/game-minimal.md — a probability accounts only for how many dice
 //! are unknown and how faces are distributed.
 //!
-//! Only addition, subtraction, multiplication and division are used. IEEE 754 specifies
-//! those exactly, so the same inputs give bit-identical results on every platform. Nothing
-//! here calls a transcendental function, and binomial coefficients are accumulated with
-//! integer arithmetic rather than computed from factorials — see
-//! /specification/architecture.md, which keeps both out of the model.
+//! Nothing here rounds and nothing here approximates. /specification/architecture.md says
+//! that a value deciding the content of an event is computed exactly, and the claim an
+//! opponent makes is such a value, so a probability is an integer count of outcomes over
+//! an integer count of outcomes, unbounded on both sides. Every comparison the decision
+//! rule needs is then an integer comparison that cannot disagree with the arithmetic that
+//! produced it. Turning one of these into a number for a person to read belongs to
+//! `crates/readout`, on the display side of that boundary; the dependency only runs that
+//! way, so a decision cannot be made from a rounded value even by accident.
 
-/// How likely one unseen die counts toward a face, as a fraction.
+mod natural;
+
+pub use natural::Natural;
+
+use std::cmp::Ordering;
+
+/// How likely one unseen die counts toward a face: how many of its faces do, out of how
+/// many it has.
 ///
-/// A fraction rather than a float so the exact oracle and the shipping path share one
-/// definition of the chance rather than two that might drift.
+/// A pair of counts rather than a quotient, so the chance per die is exact for the same
+/// reason everything else here is.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Chance {
     pub hits: u32,
@@ -31,12 +41,85 @@ impl Chance {
         Self { hits, faces: 6 }
     }
 
-    fn hit(&self) -> f64 {
-        self.hits as f64 / self.faces as f64
+    fn misses(&self) -> u32 {
+        self.faces - self.hits
+    }
+}
+
+/// An exact probability: how many equally likely outcomes answer the question, over how
+/// many outcomes there are.
+///
+/// Ordering is by cross multiplication, so two of these compare correctly whatever
+/// denominators they were built with, and equality is defined by that same ordering rather
+/// than by how the fraction happens to be written. Within a single decision every
+/// probability carries the same denominator and the comparison costs only a digit walk.
+#[derive(Clone, Debug)]
+pub struct Odds {
+    numerator: Natural,
+    denominator: Natural,
+}
+
+impl Odds {
+    /// A probability written as the fraction `numerator` over `denominator`.
+    ///
+    /// # Panics
+    /// If `denominator` is zero.
+    pub fn ratio(numerator: u64, denominator: u64) -> Self {
+        assert!(denominator != 0, "a probability needs outcomes to count");
+        Self {
+            numerator: Natural::new(numerator),
+            denominator: Natural::new(denominator),
+        }
     }
 
-    fn miss(&self) -> f64 {
-        (self.faces - self.hits) as f64 / self.faces as f64
+    pub fn certain() -> Self {
+        Self::ratio(1, 1)
+    }
+
+    pub fn impossible() -> Self {
+        Self::ratio(0, 1)
+    }
+
+    pub fn numerator(&self) -> &Natural {
+        &self.numerator
+    }
+
+    pub fn denominator(&self) -> &Natural {
+        &self.denominator
+    }
+
+    /// How likely the question is answered the other way.
+    pub fn complement(&self) -> Self {
+        Self {
+            numerator: self.denominator.sub(&self.numerator),
+            denominator: self.denominator.clone(),
+        }
+    }
+}
+
+impl PartialEq for Odds {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for Odds {}
+
+impl Ord for Odds {
+    fn cmp(&self, other: &Self) -> Ordering {
+        if self.denominator == other.denominator {
+            self.numerator.cmp(&other.numerator)
+        } else {
+            self.numerator
+                .mul(&other.denominator)
+                .cmp(&other.numerator.mul(&self.denominator))
+        }
+    }
+}
+
+impl PartialOrd for Odds {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -44,96 +127,72 @@ impl Chance {
 ///
 /// `needed` is what the claim asks for beyond what the asker can already see, so zero or
 /// less means the claim is already true.
-pub fn at_least(unknown: u32, needed: i64, chance: Chance) -> f64 {
+pub fn at_least(unknown: u32, needed: i64, chance: Chance) -> Odds {
+    let denominator = Natural::power(chance.faces, unknown);
     if needed <= 0 {
-        return 1.0;
+        return Odds {
+            numerator: denominator.clone(),
+            denominator,
+        };
     }
     let needed = needed as u32;
     if needed > unknown {
-        return 0.0;
+        return Odds {
+            numerator: Natural::zero(),
+            denominator,
+        };
     }
-    (needed..=unknown)
-        .map(|hits| term(unknown, hits, chance))
-        .sum()
+    let mut numerator = Natural::zero();
+    for hits in needed..=unknown {
+        numerator = numerator.add(&outcomes(unknown, hits, chance));
+    }
+    Odds {
+        numerator,
+        denominator,
+    }
 }
 
 /// The chance that exactly `needed` of `unknown` dice count toward the face.
-pub fn exactly(unknown: u32, needed: i64, chance: Chance) -> f64 {
-    if needed < 0 {
-        return 0.0;
+pub fn exactly(unknown: u32, needed: i64, chance: Chance) -> Odds {
+    let denominator = Natural::power(chance.faces, unknown);
+    if needed < 0 || needed > unknown as i64 {
+        return Odds {
+            numerator: Natural::zero(),
+            denominator,
+        };
     }
-    let needed = needed as u32;
-    if needed > unknown {
-        return 0.0;
+    Odds {
+        numerator: outcomes(unknown, needed as u32, chance),
+        denominator,
     }
-    term(unknown, needed, chance)
 }
 
-/// One term of the binomial: the chance of exactly `hits` out of `trials`.
-///
-/// The coefficient is accumulated by alternating multiplication and division so the
-/// running value stays small, rather than building a factorial that would overflow.
-fn term(trials: u32, hits: u32, chance: Chance) -> f64 {
-    let hit = chance.hit();
-    let miss = chance.miss();
-    let mut value = 1.0f64;
-    for step in 0..hits {
-        value = value * (trials - step) as f64 / (step + 1) as f64;
-    }
+/// How many of the `faces` to the power of `trials` equally likely outcomes have exactly
+/// `hits` dice counting toward the face.
+fn outcomes(trials: u32, hits: u32, chance: Chance) -> Natural {
+    let mut value = binomial(trials, hits);
     for _ in 0..hits {
-        value *= hit;
+        value = value.times(chance.hits);
     }
     for _ in 0..(trials - hits) {
-        value *= miss;
+        value = value.times(chance.misses());
     }
     value
 }
 
-/// The same answer in exact integers, as a numerator over a denominator.
+/// `trials` choose `hits`.
 ///
-/// `None` when it would overflow, which happens at fifty unknown dice. Ten players holding
-/// five dice each is fifty dice and the asker holds at least one, so this covers the
-/// opening position of every match — enough to be the oracle the floating point path is
-/// tested against.
-pub fn at_least_exact(unknown: u32, needed: i64, chance: Chance) -> Option<(u128, u128)> {
-    let denominator = checked_pow(chance.faces as u128, unknown)?;
-    if needed <= 0 {
-        return Some((denominator, denominator));
-    }
-    let needed = needed as u32;
-    if needed > unknown {
-        return Some((0, denominator));
-    }
-    let mut total: u128 = 0;
-    for hits in needed..=unknown {
-        total = total.checked_add(exact_term(unknown, hits, chance)?)?;
-    }
-    Some((total, denominator))
-}
-
-/// One term as an exact integer numerator over `faces` to the power of `trials`.
-pub fn exact_term(trials: u32, hits: u32, chance: Chance) -> Option<u128> {
-    let coefficient = binomial(trials, hits)?;
-    let hit_part = checked_pow(chance.hits as u128, hits)?;
-    let miss_part = checked_pow((chance.faces - chance.hits) as u128, trials - hits)?;
-    coefficient.checked_mul(hit_part)?.checked_mul(miss_part)
-}
-
-fn binomial(trials: u32, hits: u32) -> Option<u128> {
+/// Built one row at a time rather than from factorials. Each step multiplies before it
+/// divides, and the product of a binomial coefficient with the next row's numerator is
+/// always divisible by that row's denominator, so every step lands on a whole number and
+/// nothing is ever discarded.
+fn binomial(trials: u32, hits: u32) -> Natural {
     let hits = hits.min(trials - hits);
-    let mut value: u128 = 1;
+    let mut value = Natural::one();
     for step in 0..hits {
-        value = value.checked_mul((trials - step) as u128)? / (step + 1) as u128;
+        value = value.times(trials - step).divided_by(step + 1);
     }
-    Some(value)
-}
-
-fn checked_pow(base: u128, exponent: u32) -> Option<u128> {
-    let mut value: u128 = 1;
-    for _ in 0..exponent {
-        value = value.checked_mul(base)?;
-    }
-    Some(value)
+    value
 }
 
 #[cfg(test)]
@@ -145,21 +204,41 @@ mod tests {
 
     #[test]
     fn a_claim_already_satisfied_is_certain() {
-        assert_eq!(at_least(10, 0, PLAIN), 1.0);
-        assert_eq!(at_least(10, -3, PLAIN), 1.0);
-        assert_eq!(at_least(0, 0, PLAIN), 1.0);
+        assert_eq!(at_least(10, 0, PLAIN), Odds::certain());
+        assert_eq!(at_least(10, -3, PLAIN), Odds::certain());
+        assert_eq!(at_least(0, 0, PLAIN), Odds::certain());
     }
 
     #[test]
     fn a_claim_beyond_the_unknown_dice_is_impossible() {
-        assert_eq!(at_least(3, 4, PLAIN), 0.0);
-        assert_eq!(at_least(0, 1, PLAIN), 0.0);
+        assert_eq!(at_least(3, 4, PLAIN), Odds::impossible());
+        assert_eq!(at_least(0, 1, PLAIN), Odds::impossible());
+        assert_eq!(exactly(3, 4, PLAIN), Odds::impossible());
+        assert_eq!(exactly(3, -1, PLAIN), Odds::impossible());
     }
 
     #[test]
     fn one_die_matches_the_chance_per_die() {
-        assert!((at_least(1, 1, PLAIN) - 1.0 / 6.0).abs() < 1e-12);
-        assert!((at_least(1, 1, WILD) - 1.0 / 3.0).abs() < 1e-12);
+        assert_eq!(at_least(1, 1, PLAIN), Odds::ratio(1, 6));
+        assert_eq!(at_least(1, 1, WILD), Odds::ratio(1, 3));
+    }
+
+    #[test]
+    fn a_fraction_compares_by_value_rather_than_by_how_it_is_written() {
+        assert_eq!(Odds::ratio(1, 6), Odds::ratio(6, 36));
+        assert_eq!(Odds::ratio(36, 36), Odds::certain());
+        assert_eq!(Odds::ratio(0, 36), Odds::impossible());
+        assert!(Odds::ratio(1, 3) > Odds::ratio(6, 36));
+        assert!(Odds::ratio(1, 1_000_000_007) > Odds::impossible());
+    }
+
+    #[test]
+    fn the_complement_is_the_other_way_round() {
+        assert_eq!(Odds::certain().complement(), Odds::impossible());
+        assert_eq!(Odds::impossible().complement(), Odds::certain());
+        assert_eq!(Odds::ratio(1, 6).complement(), Odds::ratio(5, 6));
+        let value = at_least(20, 4, WILD);
+        assert_eq!(value.complement().complement(), value);
     }
 
     #[test]
@@ -173,12 +252,12 @@ mod tests {
     fn a_probability_never_rises_as_the_quantity_rises() {
         for unknown in 0..30u32 {
             for chance in [PLAIN, WILD] {
-                let mut previous = 1.0;
+                let mut previous = Odds::certain();
                 for needed in 0..=(unknown as i64 + 2) {
                     let value = at_least(unknown, needed, chance);
                     assert!(
-                        value <= previous + 1e-12,
-                        "unknown {unknown} needed {needed} rose from {previous} to {value}"
+                        value <= previous,
+                        "unknown {unknown} needed {needed} rose above the step before it"
                     );
                     previous = value;
                 }
@@ -188,43 +267,70 @@ mod tests {
 
     #[test]
     fn every_outcome_accounts_for_all_the_probability() {
-        for unknown in 0..25u32 {
+        for unknown in 0..40u32 {
             for chance in [PLAIN, WILD] {
-                let total: f64 = (0..=unknown)
-                    .map(|hits| exactly(unknown, hits as i64, chance))
-                    .sum();
-                assert!(
-                    (total - 1.0).abs() < 1e-9,
-                    "unknown {unknown} summed to {total}"
+                let mut total = Natural::zero();
+                for hits in 0..=unknown {
+                    let term = exactly(unknown, hits as i64, chance);
+                    assert_eq!(term.denominator(), &Natural::power(chance.faces, unknown));
+                    total = total.add(term.numerator());
+                }
+                assert_eq!(
+                    total,
+                    Natural::power(chance.faces, unknown),
+                    "unknown {unknown} did not account for every outcome"
                 );
             }
         }
     }
 
-    /// The reason the floating point path is allowed to ship: it agrees with exact integer
-    /// arithmetic everywhere the exact path can reach.
+    /// The reason the model can afford to be exact everywhere: there is no size at which
+    /// it stops working, so no state in any match has to fall back on anything.
     #[test]
-    fn floating_point_agrees_with_exact_integers() {
+    fn the_exact_path_has_no_ceiling() {
+        for unknown in [49u32, 50, 100, 250] {
+            let value = at_least(unknown, unknown as i64 / 2, PLAIN);
+            assert!(value > Odds::impossible(), "{unknown} dice gave up");
+            assert!(value < Odds::certain(), "{unknown} dice gave up");
+            assert_eq!(value.denominator(), &Natural::power(6, unknown));
+        }
+    }
+
+    fn natural_from(value: u128) -> Natural {
+        Natural::new((value >> 64) as u64)
+            .mul(&Natural::power(2, 64))
+            .add(&Natural::new(value as u64))
+    }
+
+    /// Cross-checks the unbounded arithmetic against the machine integers, over the whole
+    /// range where the machine integers still hold the answer. Six to the fiftieth is
+    /// where they stop; the model carries on past it, which is what the test above covers.
+    #[test]
+    fn the_counts_agree_with_machine_integers_wherever_those_reach() {
         for unknown in 0..=49u32 {
             for chance in [PLAIN, WILD] {
-                for needed in 0..=unknown as i64 {
-                    let (numerator, denominator) =
-                        at_least_exact(unknown, needed, chance).expect("fits");
-                    let exact = numerator as f64 / denominator as f64;
-                    let approximate = at_least(unknown, needed, chance);
-                    assert!(
-                        (exact - approximate).abs() < 1e-9,
-                        "unknown {unknown} needed {needed}: exact {exact} against {approximate}"
+                let denominator = (chance.faces as u128).pow(unknown);
+                for hits in 0..=unknown {
+                    let mut expected = 1u128;
+                    for step in 0..hits.min(unknown - hits) {
+                        expected = expected * (unknown - step) as u128 / (step + 1) as u128;
+                    }
+                    expected *= (chance.hits as u128).pow(hits);
+                    expected *= (chance.misses() as u128).pow(unknown - hits);
+                    let term = exactly(unknown, hits as i64, chance);
+                    assert_eq!(
+                        term.numerator(),
+                        &natural_from(expected),
+                        "unknown {unknown} hits {hits}"
+                    );
+                    assert_eq!(
+                        term.denominator(),
+                        &natural_from(denominator),
+                        "unknown {unknown} hits {hits}"
                     );
                 }
             }
         }
-    }
-
-    #[test]
-    fn the_exact_path_reaches_the_opening_position_and_no_further() {
-        assert!(at_least_exact(49, 10, PLAIN).is_some());
-        assert!(at_least_exact(50, 10, PLAIN).is_none());
     }
 
     #[test]

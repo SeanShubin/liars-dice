@@ -3921,6 +3921,8 @@ dependencies = [
  "bevy",
  "bevy_egui",
  "odds",
+ "protocol",
+ "readout",
  "render-minimal",
  "rules",
 ]
@@ -4951,6 +4953,13 @@ dependencies = [
  "bytemuck",
  "font-types",
  "once_cell",
+]
+
+[[package]]
+name = "readout"
+version = "0.0.0"
+dependencies = [
+ "odds",
 ]
 
 [[package]]

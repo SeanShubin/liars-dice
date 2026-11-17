@@ -8,8 +8,16 @@
 //! An opponent is handed only its own dice and what is public. It cannot reach another
 //! player's dice, so the knowledge statements are enforced by the signature rather than by
 //! discipline.
+//!
+//! What this crate decides becomes a claim, and a claim becomes an event, so by
+//! /specification/architecture.md every value here is exact. The probabilities are integer
+//! counts of outcomes and the comparisons between them are integer comparisons, which is
+//! what lets step three's tie break mean anything: two claims that are equally likely
+//! compare equal, rather than being separated by rounding that has nothing to do with the
+//! game. It also means a change to how the arithmetic is arranged cannot change what an
+//! opponent plays, so a recorded match stays a usable test.
 
-use odds::{Chance, at_least, exactly};
+use odds::{Chance, Odds, at_least, exactly};
 use rules::{Call, Claim, Variants, count_face};
 
 /// Everything an AI opponent is allowed to see.
@@ -27,17 +35,20 @@ pub struct View<'a> {
 
 impl View<'_> {
     /// How likely a claim is true, given the dice this opponent holds.
-    pub fn chance_of(&self, claim: Claim) -> f64 {
-        let seen = count_face(self.own_dice, claim.face, self.variants.ones_wild) as i64;
-        let needed = claim.quantity as i64 - seen;
-        at_least(self.unknown, needed, self.chance(claim.face))
+    pub fn chance_of(&self, claim: Claim) -> Odds {
+        at_least(self.unknown, self.needed(claim), self.chance(claim.face))
     }
 
     /// How likely a claim is exactly right.
-    pub fn chance_exactly(&self, claim: Claim) -> f64 {
+    pub fn chance_exactly(&self, claim: Claim) -> Odds {
+        exactly(self.unknown, self.needed(claim), self.chance(claim.face))
+    }
+
+    /// How many of the dice this opponent cannot see a claim still needs. Negative when
+    /// its own dice already settle the claim.
+    fn needed(&self, claim: Claim) -> i64 {
         let seen = count_face(self.own_dice, claim.face, self.variants.ones_wild) as i64;
-        let needed = claim.quantity as i64 - seen;
-        exactly(self.unknown, needed, self.chance(claim.face))
+        claim.quantity as i64 - seen
     }
 
     fn chance(&self, face: u8) -> Chance {
@@ -50,20 +61,46 @@ impl View<'_> {
 /// The most probable legal claim given its own dice. Among equally probable claims, the
 /// lowest — face value does not change a claim's probability on its own, so only the
 /// opponent's own holdings break the tie.
-pub fn best_raise(view: &View) -> Option<(Claim, f64)> {
-    view.legal_raises
-        .iter()
-        .map(|&claim| (claim, view.chance_of(claim)))
-        .fold(None, |best, (claim, chance)| match best {
-            None => Some((claim, chance)),
-            Some((best_claim, best_chance)) => {
-                let better = chance > best_chance + f64::EPSILON;
-                let equal = (chance - best_chance).abs() <= f64::EPSILON;
-                let lower = (claim.quantity, claim.face) < (best_claim.quantity, best_claim.face);
-                if better || (equal && lower) {
-                    Some((claim, chance))
-                } else {
-                    Some((best_claim, best_chance))
+///
+/// Claims are first reduced to one candidate per chance per die. Once the unknown dice and
+/// the chance per die are fixed, a claim's probability depends on nothing but how many of
+/// those dice it still needs, and it never rises as that number rises, so the best claim in
+/// such a group is the one needing fewest — found by comparing two integers rather than by
+/// counting outcomes. Grouping instead of assuming one chance per die keeps this right
+/// whatever the rules allow: with ones wild a claim on the one face would carry a different
+/// chance, and the rules make such a claim illegal, but nothing here leans on that.
+pub fn best_raise(view: &View) -> Option<(Claim, Odds)> {
+    let mut leaders: Vec<(Chance, Claim, i64)> = Vec::new();
+    for &claim in view.legal_raises {
+        let chance = view.chance(claim.face);
+        let needed = view.needed(claim);
+        match leaders.iter_mut().find(|(known, _, _)| *known == chance) {
+            Some(leader) => {
+                if (needed, claim.quantity, claim.face)
+                    < (leader.2, leader.1.quantity, leader.1.face)
+                {
+                    leader.1 = claim;
+                    leader.2 = needed;
+                }
+            }
+            None => leaders.push((chance, claim, needed)),
+        }
+    }
+
+    leaders
+        .into_iter()
+        .fold(None, |best, (chance, claim, needed)| {
+            let value = at_least(view.unknown, needed, chance);
+            match best {
+                None => Some((claim, value)),
+                Some((leading_claim, leading_value)) => {
+                    let lower =
+                        (claim.quantity, claim.face) < (leading_claim.quantity, leading_claim.face);
+                    if value > leading_value || (value == leading_value && lower) {
+                        Some((claim, value))
+                    } else {
+                        Some((leading_claim, leading_value))
+                    }
                 }
             }
         })
@@ -78,10 +115,12 @@ pub fn choose(view: &View) -> Call {
         return Call::Raise(raise.expect("an opening turn always has a legal raise").0);
     };
 
-    let truth_of_previous = view.chance_of(previous);
-    let liar = 1.0 - truth_of_previous;
+    let liar = view.chance_of(previous).complement();
     let spot_on = view.chance_exactly(previous);
-    let raise_chance = raise.map(|(_, chance)| chance).unwrap_or(0.0);
+    let raise_chance = raise
+        .as_ref()
+        .map(|(_, chance)| chance.clone())
+        .unwrap_or_else(Odds::impossible);
 
     if spot_on > liar && spot_on > raise_chance {
         Call::SpotOn
@@ -171,7 +210,7 @@ mod tests {
                 quantity: 3,
                 face: 5
             }),
-            1.0
+            Odds::certain()
         );
     }
 
@@ -185,7 +224,7 @@ mod tests {
         let chosen = choose(&view(&[1, 2, 3], 3, &[], Some(previous)));
         assert!(matches!(chosen, Call::Liar | Call::SpotOn));
         let seen = view(&[1, 2, 3], 3, &[], Some(previous));
-        assert_eq!(seen.chance_of(previous), 0.0);
+        assert_eq!(seen.chance_of(previous), Odds::impossible());
     }
 
     #[test]
@@ -227,6 +266,34 @@ mod tests {
                 quantity: 1,
                 face: 3
             }
+        );
+    }
+
+    /// Equally likely means equal, not nearly equal. Exact arithmetic is what makes the
+    /// stated tie break reachable at all: a rounded comparison would separate these by an
+    /// amount that has nothing to do with the game, and whichever claim came first in the
+    /// enumeration would win instead.
+    #[test]
+    fn equally_likely_claims_compare_equal_however_they_are_ordered() {
+        let own = [2u8, 4, 6];
+        let mut legal: Vec<Claim> = (1..=6).map(|face| Claim { quantity: 4, face }).collect();
+        let held = view(&own, 12, &legal, None);
+        let five = held.chance_of(Claim {
+            quantity: 4,
+            face: 5,
+        });
+        let three = held.chance_of(Claim {
+            quantity: 4,
+            face: 3,
+        });
+        assert_eq!(five, three, "two faces held equally often differ in chance");
+
+        let forwards = best_raise(&view(&own, 12, &legal, None)).unwrap().0;
+        legal.reverse();
+        let backwards = best_raise(&view(&own, 12, &legal, None)).unwrap().0;
+        assert_eq!(
+            forwards, backwards,
+            "the choice depended on the order the claims arrived in"
         );
     }
 

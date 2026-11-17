@@ -88,6 +88,36 @@ fn oklab(rgb: [u8; 3]) -> [f32; 3] {
     ]
 }
 
+/// Oklab lightness, which is how light a colour looks rather than how large its channel
+/// values are.
+pub fn lightness(swatch: Swatch) -> f32 {
+    oklab(swatch.rgb)[0]
+}
+
+/// The colour to draw on top of a swatch: whichever of black or white is further from it.
+///
+/// Without this a navy die carries navy-black lettering and a black die disappears into
+/// the background. The choice is made from perceived lightness rather than guessed at.
+pub fn ink(swatch: Swatch) -> [u8; 3] {
+    const BLACK: [u8; 3] = [16, 16, 18];
+    const WHITE: [u8; 3] = [250, 250, 250];
+    let black = distance(
+        swatch,
+        Swatch {
+            name: "ink",
+            rgb: BLACK,
+        },
+    );
+    let white = distance(
+        swatch,
+        Swatch {
+            name: "ink",
+            rgb: WHITE,
+        },
+    );
+    if white > black { WHITE } else { BLACK }
+}
+
 /// How different two palette entries look.
 pub fn distance(left: Swatch, right: Swatch) -> f32 {
     let a = oklab(left.rgb);
@@ -181,6 +211,54 @@ fn search(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_swatch_has_readable_ink() {
+        for swatch in PALETTE {
+            let chosen = Swatch {
+                name: "ink",
+                rgb: ink(swatch),
+            };
+            let gap = distance(swatch, chosen);
+            assert!(
+                gap > 0.35,
+                "{} and its ink are only {gap} apart",
+                swatch.name
+            );
+        }
+    }
+
+    #[test]
+    fn the_ink_chosen_is_always_the_further_of_the_two() {
+        for swatch in PALETTE {
+            let chosen = Swatch {
+                name: "ink",
+                rgb: ink(swatch),
+            };
+            let rejected = Swatch {
+                name: "ink",
+                rgb: if ink(swatch)[0] == 250 {
+                    [16, 16, 18]
+                } else {
+                    [250, 250, 250]
+                },
+            };
+            assert!(
+                distance(swatch, chosen) >= distance(swatch, rejected),
+                "{} took the nearer ink",
+                swatch.name
+            );
+        }
+    }
+
+    #[test]
+    fn the_darkest_swatches_take_light_ink() {
+        // Black lettering on black dice was the reported defect.
+        for name in ["black", "navy", "maroon", "purple", "dark green", "teal"] {
+            let swatch = PALETTE.iter().find(|s| s.name == name).copied().unwrap();
+            assert_eq!(ink(swatch)[0], 250, "{name} should take light ink");
+        }
+    }
 
     #[test]
     fn the_palette_is_the_six_hues_in_three_variants_plus_black_and_white() {

@@ -9,12 +9,61 @@
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 
+use std::io::Write;
+
 use ai::View;
-use render_minimal::palette::{PALETTE, assign};
+use protocol::Event;
+use render_minimal::palette::{PALETTE, assign, ink};
 use rules::{Call, Claim, Entry, Match, Outcome, Rolls, Variants};
 
 const DICE_EACH: u32 = 5;
 const MAX_PLAYERS: usize = 10;
+/// Every die is drawn in a box this size, shown or not, so the dice line up in a grid.
+const DIE: f32 = 32.0;
+/// Where the audit logs go.
+const LOGS: &str = "logs";
+
+/// The match's audit log: one file per match, one event per line.
+///
+/// Writing is an effect, so it lives in the composition root. What an event is and how it
+/// reads belongs to `protocol`.
+struct Audit {
+    file: Option<std::fs::File>,
+}
+
+impl Audit {
+    fn open(directory: &std::path::Path, stamp: u64) -> Self {
+        let opened = std::fs::create_dir_all(directory).and_then(|()| {
+            std::fs::File::create(directory.join(format!("match-{stamp:016x}.log")))
+        });
+        match opened {
+            Ok(file) => Self { file: Some(file) },
+            Err(reason) => {
+                warn!("no audit log: {reason}");
+                Self { file: None }
+            }
+        }
+    }
+
+    fn record(&mut self, event: Event) {
+        if let Some(file) = self.file.as_mut() {
+            if let Err(reason) = writeln!(file, "{event}") {
+                warn!("audit log write failed: {reason}");
+                self.file = None;
+            }
+        }
+    }
+
+    /// All players roll their dice, so all of them are recorded.
+    fn record_roll(&mut self, game: &Match, players: usize) {
+        for player in 0..players {
+            let dice = game.dice_of(player).to_vec();
+            if !dice.is_empty() {
+                self.record(Event::Rolled { player, dice });
+            }
+        }
+    }
+}
 
 /// The only non-determinism in the game, and it lives in the composition root.
 ///
@@ -60,6 +109,7 @@ struct Playing {
     /// Dice as they were when the round ended, for the reveal.
     revealed: Vec<Vec<u8>>,
     verdict: Option<String>,
+    audit: Audit,
 }
 
 /// The human is always player zero. Turn order is a shuffled permutation, so where they
@@ -78,15 +128,7 @@ enum Screen {
 #[derive(Resource, Default)]
 struct Table(Option<Playing>);
 
-#[derive(Resource)]
-struct Seed(u64);
-
 fn main() {
-    let seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.as_nanos() as u64)
-        .unwrap_or(0x2545_F491_4F6C_DD1D);
-
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
@@ -96,7 +138,6 @@ fn main() {
             ..default()
         }))
         .add_plugins(EguiPlugin::default())
-        .insert_resource(Seed(seed))
         .insert_resource(Screen::Setup {
             colour: 1,
             opponents: 3,
@@ -123,10 +164,20 @@ fn tap(ui: &mut egui::Ui, label: &str, enabled: bool) -> bool {
     .clicked()
 }
 
-fn start(colour: usize, opponents: usize, seed: u64) -> Playing {
+/// Reading the clock is the one piece of non-determinism outside the dice, and it happens
+/// here so that each match differs from the last and names its own log.
+fn stamp() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_nanos() as u64)
+        .unwrap_or(0x2545_F491_4F6C_DD1D)
+}
+
+fn start(colour: usize, opponents: usize) -> Playing {
     let players = opponents + 1;
     let colours = assign(colour, players);
 
+    let seed = stamp();
     let mut dice = Dice::new(seed);
 
     // Turn order is chosen at random when the match starts.
@@ -136,8 +187,23 @@ fn start(colour: usize, opponents: usize, seed: u64) -> Playing {
         order.swap(position, swap);
     }
 
-    let game = Match::start(order, DICE_EACH, Variants::default(), &mut dice);
+    let variants = Variants::default();
+    let game = Match::start(order.clone(), DICE_EACH, variants, &mut dice);
     let pending = first_legal(&game);
+
+    let mut audit = Audit::open(std::path::Path::new(LOGS), seed);
+    audit.record(Event::MatchStarted {
+        players,
+        order,
+        colours: colours
+            .iter()
+            .map(|&index| PALETTE[index].name.to_string())
+            .collect(),
+        dice_each: DICE_EACH,
+        ones_wild: variants.ones_wild,
+    });
+    audit.record_roll(&game, players);
+
     Playing {
         game,
         colours,
@@ -145,6 +211,7 @@ fn start(colour: usize, opponents: usize, seed: u64) -> Playing {
         pending,
         revealed: Vec::new(),
         verdict: None,
+        audit,
     }
 }
 
@@ -167,7 +234,6 @@ fn screen(
     mut contexts: EguiContexts,
     mut screen: ResMut<Screen>,
     mut table: ResMut<Table>,
-    seed: Res<Seed>,
 ) -> Result {
     let context = contexts.ctx_mut()?.clone();
     let mut next: Option<Screen> = None;
@@ -179,7 +245,7 @@ fn screen(
             let mut current = *screen;
             match &mut current {
                 Screen::Setup { colour, opponents } => {
-                    if let Some(started) = setup(ui, colour, opponents, seed.0) {
+                    if let Some(started) = setup(ui, colour, opponents) {
                         table.0 = Some(started);
                         next = Some(Screen::Play);
                     } else {
@@ -213,12 +279,7 @@ fn screen(
     Ok(())
 }
 
-fn setup(
-    ui: &mut egui::Ui,
-    colour: &mut usize,
-    opponents: &mut usize,
-    seed: u64,
-) -> Option<Playing> {
+fn setup(ui: &mut egui::Ui, colour: &mut usize, opponents: &mut usize) -> Option<Playing> {
     ui.heading("Your dice");
     ui.label(PALETTE[*colour].name);
 
@@ -260,72 +321,112 @@ fn setup(
 
     ui.separator();
     if tap(ui, "Start", true) {
-        return Some(start(*colour, *opponents, seed));
+        return Some(start(*colour, *opponents));
     }
     None
 }
 
-fn table(ui: &mut egui::Ui, playing: &Playing) {
+fn ink_of(index: usize) -> egui::Color32 {
+    let [r, g, b] = ink(PALETTE[index]);
+    egui::Color32::from_rgb(r, g, b)
+}
+
+/// One die: a fixed size box in its owner's colour, with a border and a value in whichever
+/// ink contrasts with that colour.
+///
+/// The border is what makes a black die visible against a dark background and a white one
+/// visible against a light one, whatever the theme does. `face` is `None` for a die whose
+/// value is not revealed; the box is the same size either way, so the dice line up in a
+/// grid whether they are shown or not.
+fn die(ui: &mut egui::Ui, swatch: usize, face: Option<u8>) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(DIE, DIE), egui::Sense::hover());
+    let ink = ink_of(swatch);
+    let painter = ui.painter();
+    painter.rect_filled(rect, 5.0, colour_of(swatch));
+    painter.rect_stroke(
+        rect,
+        5.0,
+        egui::Stroke::new(1.5, ink),
+        egui::StrokeKind::Inside,
+    );
+    match face {
+        Some(value) => {
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                value,
+                egui::FontId::proportional(17.0),
+                ink,
+            );
+        }
+        // An unrevealed die still shows whose it is and that it is there.
+        None => {
+            painter.circle_filled(rect.center(), 3.5, ink);
+        }
+    }
+}
+
+/// Every player and their dice, in a grid so the columns line up across players.
+///
+/// Only the human's values are shown while a round is live; everyone else's dice occupy
+/// their slots unrevealed.
+fn table(ui: &mut egui::Ui, playing: &Playing, revealed: bool) {
     let game = &playing.game;
-    ui.horizontal_wrapped(|ui| {
+    egui::Grid::new("table").spacing([5.0, 5.0]).show(ui, |ui| {
         for player in 0..playing.colours.len() {
             let out = game.eliminated(player);
-            let mut text = egui::RichText::new(format!(
-                "  {}  {}  ",
-                name_of(player),
-                if out {
-                    "out".to_string()
-                } else {
-                    format!("{} dice", game.count(player))
-                }
-            ))
-            .background_color(colour_of(playing.colours[player]))
-            .color(egui::Color32::BLACK)
-            .size(15.0);
+            let mut name = egui::RichText::new(name_of(player)).size(15.0);
             if out {
-                text = text.strikethrough();
+                name = name.strikethrough();
             }
-            ui.label(text);
+            ui.label(name);
+
+            let dice: Vec<u8> = if revealed {
+                playing.revealed.get(player).cloned().unwrap_or_default()
+            } else {
+                game.dice_of(player).to_vec()
+            };
+            let show = revealed || player == HUMAN;
+            if dice.is_empty() && out {
+                ui.label(egui::RichText::new("out").size(14.0).weak());
+            }
+            for value in dice {
+                die(ui, playing.colours[player], show.then_some(value));
+            }
+            ui.end_row();
         }
     });
 }
 
+/// This round's claims: the claim, then the claimer's dice.
+///
+/// The dice carry both who claimed and how many they held, so neither has to be written
+/// out.
 fn history(ui: &mut egui::Ui, playing: &Playing) {
     ui.label(egui::RichText::new("This round").strong());
     if playing.game.history().is_empty() {
         ui.label("no claims yet");
         return;
     }
-    for Entry {
-        player,
-        dice_held,
-        claim,
-    } in playing.game.history()
-    {
-        ui.label(
-            egui::RichText::new(format!(
-                "  {} dice   at least {} × {}  ",
-                dice_held, claim.quantity, claim.face
-            ))
-            .background_color(colour_of(playing.colours[*player]))
-            .color(egui::Color32::BLACK)
-            .size(15.0),
-        );
-    }
-}
-
-fn my_dice(ui: &mut egui::Ui, playing: &Playing) {
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("Your dice").strong());
-        for die in playing.game.dice_of(HUMAN) {
-            ui.label(
-                egui::RichText::new(format!("  {die}  "))
-                    .background_color(colour_of(playing.colours[HUMAN]))
-                    .color(egui::Color32::BLACK)
-                    .size(22.0),
-            );
-        }
-    });
+    egui::Grid::new("history")
+        .spacing([5.0, 5.0])
+        .show(ui, |ui| {
+            for Entry {
+                player,
+                dice_held,
+                claim,
+            } in playing.game.history()
+            {
+                ui.label(
+                    egui::RichText::new(format!("at least {} × {}", claim.quantity, claim.face))
+                        .size(15.0),
+                );
+                for _ in 0..*dice_held {
+                    die(ui, playing.colours[*player], None);
+                }
+                ui.end_row();
+            }
+        });
 }
 
 /// Advance every opponent's turn until it is the human's, or the round ends.
@@ -358,13 +459,24 @@ fn apply(playing: &mut Playing, call: Call) -> Option<Screen> {
         .map(|player| playing.game.dice_of(player).to_vec())
         .collect();
 
+    let held = playing.game.count(actor);
     let outcome = playing
         .game
         .apply(call, &mut playing.dice)
         .expect("only legal calls are offered");
 
     match outcome {
-        Outcome::Continues => None,
+        Outcome::Continues => {
+            if let Call::Raise(claim) = call {
+                playing.audit.record(Event::Claimed {
+                    player: actor,
+                    dice_held: held,
+                    quantity: claim.quantity,
+                    face: claim.face,
+                });
+            }
+            None
+        }
         Outcome::Resolved {
             lost,
             gained,
@@ -393,11 +505,44 @@ fn apply(playing: &mut Playing, call: Call) -> Option<Screen> {
                 said.push_str(&format!(" {} is out.", name_of(player)));
             }
 
+            playing.audit.record(Event::Called {
+                player: actor,
+                call: match call {
+                    Call::Liar => "liar",
+                    Call::SpotOn => "spot on",
+                    Call::Raise(_) => unreachable!("a raise does not resolve a round"),
+                },
+                quantity: claim.quantity,
+                face: claim.face,
+                truth,
+            });
+            if let Some(player) = gained {
+                playing.audit.record(Event::GainedDie {
+                    player,
+                    remaining: playing.game.count(player),
+                });
+            }
+            if let Some(player) = lost {
+                playing.audit.record(Event::LostDie {
+                    player,
+                    remaining: playing.game.count(player),
+                });
+            }
+            if let Some(player) = eliminated {
+                playing.audit.record(Event::Eliminated { player });
+            }
+
             playing.revealed = snapshot;
             playing.verdict = Some(said);
             if over {
+                playing.audit.record(Event::MatchEnded {
+                    ranking: playing.game.ranking(),
+                });
                 Some(Screen::Over)
             } else {
+                // A resolution rolls again, so the new round's dice are recorded here.
+                let players = playing.colours.len();
+                playing.audit.record_roll(&playing.game, players);
                 Some(Screen::Reveal)
             }
         }
@@ -412,9 +557,7 @@ fn play(ui: &mut egui::Ui, playing: &mut Playing) -> Option<Screen> {
         }
     }
 
-    table(ui, playing);
-    ui.separator();
-    my_dice(ui, playing);
+    table(ui, playing, false);
     ui.separator();
     history(ui, playing);
     ui.separator();
@@ -489,13 +632,11 @@ fn play(ui: &mut egui::Ui, playing: &mut Playing) -> Option<Screen> {
     });
     playing.pending = dialled;
 
-    let chance = view.chance_of(playing.pending);
+    let chance = readout::percent(&view.chance_of(playing.pending));
     ui.label(
         egui::RichText::new(format!(
             "at least {} × {} is {:.1}% likely",
-            playing.pending.quantity,
-            playing.pending.face,
-            chance * 100.0
+            playing.pending.quantity, playing.pending.face, chance
         ))
         .size(17.0),
     );
@@ -530,25 +671,7 @@ fn reveal(ui: &mut egui::Ui, playing: &mut Playing) -> Option<Screen> {
         ui.label(egui::RichText::new(verdict).size(17.0));
     }
     ui.separator();
-    for player in 0..playing.colours.len() {
-        let dice = playing.revealed.get(player).cloned().unwrap_or_default();
-        if dice.is_empty() {
-            continue;
-        }
-        ui.horizontal(|ui| {
-            ui.label(format!("{:<12}", name_of(player)));
-            for die in dice {
-                ui.label(
-                    egui::RichText::new(format!("  {die}  "))
-                        .background_color(colour_of(playing.colours[player]))
-                        .color(egui::Color32::BLACK)
-                        .size(20.0),
-                );
-            }
-        });
-    }
-    ui.separator();
-    table(ui, playing);
+    table(ui, playing, true);
     ui.separator();
     if tap(ui, "Next round", true) {
         playing.revealed.clear();
@@ -565,15 +688,20 @@ fn over(ui: &mut egui::Ui, playing: &mut Playing) -> Option<Screen> {
         ui.label(egui::RichText::new(verdict).size(17.0));
     }
     ui.separator();
+    table(ui, playing, true);
+    ui.separator();
     ui.label(egui::RichText::new("Finishing order").strong());
-    for (place, player) in playing.game.ranking().iter().enumerate() {
-        ui.label(
-            egui::RichText::new(format!("  {}. {}  ", place + 1, name_of(*player)))
-                .background_color(colour_of(playing.colours[*player]))
-                .color(egui::Color32::BLACK)
-                .size(17.0),
-        );
-    }
+    egui::Grid::new("ranking")
+        .spacing([5.0, 5.0])
+        .show(ui, |ui| {
+            for (place, player) in playing.game.ranking().iter().enumerate() {
+                ui.label(
+                    egui::RichText::new(format!("{}. {}", place + 1, name_of(*player))).size(16.0),
+                );
+                die(ui, playing.colours[*player], None);
+                ui.end_row();
+            }
+        });
     ui.separator();
     if tap(ui, "New match", true) {
         return Some(Screen::Setup {
@@ -582,4 +710,86 @@ fn over(ui: &mut egui::Ui, playing: &mut Playing) -> Option<Screen> {
         });
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every face is equally likely, so no face is favoured by the rejection sampling.
+    #[test]
+    fn the_dice_are_fair() {
+        let mut dice = Dice::new(0x1234_5678_9abc_def0);
+        let mut counts = [0u32; 7];
+        for _ in 0..600_000 {
+            counts[dice.face() as usize] += 1;
+        }
+        assert_eq!(counts[0], 0, "a face below one was rolled");
+        for face in 1..=6 {
+            let share = counts[face] as f64 / 600_000.0;
+            assert!(
+                (share - 1.0 / 6.0).abs() < 0.005,
+                "face {face} came up {share} of the time"
+            );
+        }
+    }
+
+    #[test]
+    fn a_seed_always_rolls_the_same_dice() {
+        let mut first = Dice::new(99);
+        let mut second = Dice::new(99);
+        let rolled: Vec<u8> = (0..200).map(|_| first.face()).collect();
+        let again: Vec<u8> = (0..200).map(|_| second.face()).collect();
+        assert_eq!(rolled, again);
+    }
+
+    #[test]
+    fn an_audit_log_is_one_file_per_match_with_one_event_per_line() {
+        let directory = std::env::temp_dir().join("liars-dice-audit-test");
+        let _ = std::fs::remove_dir_all(&directory);
+
+        for stamp in [1u64, 2] {
+            let mut audit = Audit::open(&directory, stamp);
+            audit.record(Event::MatchStarted {
+                players: 2,
+                order: vec![0, 1],
+                colours: vec!["red".into(), "navy".into()],
+                dice_each: 5,
+                ones_wild: false,
+            });
+            audit.record(Event::Rolled {
+                player: 0,
+                dice: vec![1, 2, 3, 4, 5],
+            });
+            audit.record(Event::MatchEnded {
+                ranking: vec![0, 1],
+            });
+        }
+
+        let mut files: Vec<_> = std::fs::read_dir(&directory)
+            .expect("the log directory was created")
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        files.sort();
+        assert_eq!(files.len(), 2, "each match should have its own file");
+
+        for file in &files {
+            let text = std::fs::read_to_string(file).unwrap();
+            let lines: Vec<&str> = text.lines().collect();
+            assert_eq!(lines.len(), 3, "one line per event");
+            assert!(lines[0].starts_with("match-started "));
+            assert!(lines[1].starts_with("rolled "));
+            assert!(lines[2].starts_with("match-ended "));
+        }
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// A directory that cannot be opened must not take the game down with it.
+    #[test]
+    fn a_log_that_cannot_be_written_is_survivable() {
+        let impossible = std::path::Path::new("logs").join(" ");
+        let mut audit = Audit::open(&impossible, 7);
+        audit.record(Event::Eliminated { player: 1 });
+    }
 }
