@@ -105,6 +105,24 @@ quarter of the face width from the middle:
 
 Pip radius is a setting, defaulting to roughly a tenth of the face width.
 
+Face arrangement follows the Western convention: opposite faces sum to seven, and the die
+is right-handed, meaning that with the one face up and the two face toward the viewer the
+three face is on the right.
+
+Pip orientation is not standardised across manufactured dice, so it is taken from a
+physical die rather than chosen. Only three faces carry orientation; the one, four and
+five faces are rotationally symmetric.
+
+- The six face's columns run parallel to the edges it shares with the five and two faces
+- The three face's diagonal runs from the corner where three, five and six meet to the
+  corner where three, one and two meet
+- The two face's diagonal runs from the corner where two, four and six meet to the corner
+  where two, one and three meet
+
+Expressed by which faces meet at a corner rather than by a viewing direction, so the
+statements hold however the die is oriented. None is exposed as a setting; they affect
+nothing a player can act on.
+
 Pips are rendered into the glyph texture and given depth by normal perturbation rather
 than by geometry. Real dice have drilled pips, but modelling them would mean eight
 hundred extra surfaces per die and would put the pips outside the glyph texture the

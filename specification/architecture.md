@@ -5,6 +5,11 @@
 - Bevy rendering engine
 - Amazon Web Services
 
+## Dependencies
+- Dependencies are kept at their latest released versions
+- A broken upgrade is discovered automatically
+- An upgrade that breaks the build is fixed before other work
+
 ## Module Structure
 - Thin module at top acts composition root, no behavior mixed in
 - If composition roots need behavior, used composition pipeline that alternates composition and behavior, similar to how a reader monad operates

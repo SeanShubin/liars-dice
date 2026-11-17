@@ -4,6 +4,8 @@
 - A die has six faces
 - The faces are numbered one through six
 - A die is a cube intersected with a sphere
+- Opposite faces sum to seven
+- A die is right-handed
 
 ## Appearance
 - A die has a face texture
