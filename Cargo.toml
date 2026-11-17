@@ -1,0 +1,23 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/rules",
+    "crates/model",
+    "crates/protocol",
+    "crates/integrity",
+    "crates/render",
+    "crates/render-minimal",
+    "crates/render-pretty",
+    "crates/dice-render",
+    "crates/coordinator",
+    "apps/web",
+    "apps/local",
+    "apps/relay",
+    "apps/admin",
+    "apps/prototype",
+]
+
+[workspace.package]
+edition = "2024"
+version = "0.0.0"
+publish = false
