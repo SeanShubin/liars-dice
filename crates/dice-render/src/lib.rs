@@ -6,6 +6,7 @@
 
 pub mod geometry;
 pub mod noise;
+pub mod palette;
 pub mod settings;
 pub mod texture;
 

@@ -3,7 +3,7 @@
 //! Explicitly seeded. Never reads the clock, so the same settings always produce the
 //! same texture.
 
-fn hash(mut x: u32) -> u32 {
+pub(crate) fn hash(mut x: u32) -> u32 {
     x ^= x >> 16;
     x = x.wrapping_mul(0x7feb_352d);
     x ^= x >> 15;

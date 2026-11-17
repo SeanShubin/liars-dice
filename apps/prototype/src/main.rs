@@ -10,6 +10,7 @@ use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 
+use dice_render::palette;
 use dice_render::settings::{Glyph, Settings, Surface};
 use dice_render::texture::{BEVEL_PIXELS, GROUND_PIXELS};
 use dice_render::{
@@ -20,6 +21,11 @@ use dice_render::{
 /// The settings the panel edits.
 #[derive(Resource, Clone, Copy)]
 struct Appearance(Settings);
+
+/// The seed the current appearance was generated from, when it was generated rather
+/// than hand-edited. Shown so an appearance can be returned to.
+#[derive(Resource, Default)]
+struct PaletteSeed(u32);
 
 /// What the panel last reported about the pointer, so the camera does not fight it.
 #[derive(Resource, Default)]
@@ -63,6 +69,7 @@ fn main() {
         .add_plugins(EguiPlugin::default())
         .insert_resource(Appearance(Settings::default()))
         .insert_resource(PanelHasPointer::default())
+        .insert_resource(PaletteSeed::default())
         .insert_resource(Orbit {
             yaw: 0.6,
             pitch: 0.45,
@@ -187,6 +194,7 @@ fn panel(
     mut contexts: EguiContexts,
     mut appearance: ResMut<Appearance>,
     mut pointer: ResMut<PanelHasPointer>,
+    mut seed: ResMut<PaletteSeed>,
 ) -> Result {
     let context = contexts.ctx_mut()?;
     egui::Window::new("Appearance")
@@ -194,9 +202,25 @@ fn panel(
         .default_pos([16.0, 16.0])
         .show(context, |ui| {
             ui.label("Drag outside this window to rotate. Scroll to zoom.");
-            ui.separator();
 
             let set = &mut appearance.0;
+
+            ui.horizontal(|ui| {
+                if ui.button("Random").clicked() {
+                    seed.0 = seed.0.wrapping_add(1);
+                    palette::random(seed.0, set);
+                }
+                if ui
+                    .add(egui::DragValue::new(&mut seed.0).prefix("seed "))
+                    .changed()
+                {
+                    palette::random(seed.0, set);
+                }
+                if ui.button("Reset").clicked() {
+                    *set = Settings::default();
+                }
+            });
+            ui.separator();
 
             ui.collapsing("Shape", |ui| {
                 ui.add(
@@ -214,11 +238,6 @@ fn panel(
             ui.collapsing("Pips", |ui| glyph_controls(ui, &mut set.glyph));
             ui.collapsing("Bevel", |ui| surface_controls(ui, &mut set.bevel));
             ui.collapsing("Ground", |ui| surface_controls(ui, &mut set.ground));
-
-            ui.separator();
-            if ui.button("Reset").clicked() {
-                *set = Settings::default();
-            }
         });
     pointer.0 = context.is_pointer_over_egui();
     Ok(())
