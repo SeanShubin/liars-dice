@@ -477,6 +477,57 @@ fn standing(ui: &mut egui::Ui, playing: &Playing) {
     );
 }
 
+/// The chance that each claim the human could make is true.
+///
+/// Three rows, one per button. The standing claim's own chance is shown rather than the
+/// chance that calling liar is right, because those are complements and the claim is the
+/// thing on the table — but it is the number the liar decision turns on.
+fn odds(ui: &mut egui::Ui, view: &View, dialled: Claim, previous: Option<Claim>) {
+    ui.label(egui::RichText::new("Odds").strong());
+    egui::Grid::new("odds").spacing([10.0, 4.0]).show(ui, |ui| {
+        let row = |ui: &mut egui::Ui, what: &str, claim: String, chance: Option<f64>| {
+            ui.label(egui::RichText::new(what).size(15.0));
+            ui.label(egui::RichText::new(claim).size(15.0));
+            ui.label(
+                egui::RichText::new(match chance {
+                    Some(percent) => format!("{percent:.1}%"),
+                    None => "-".to_string(),
+                })
+                .size(16.0)
+                .strong(),
+            );
+            ui.end_row();
+        };
+
+        match previous {
+            Some(claim) => row(
+                ui,
+                "their claim",
+                format!("at least {} x {}", claim.quantity, claim.face),
+                Some(readout::percent(&view.chance_of(claim))),
+            ),
+            None => row(ui, "their claim", "none yet".to_string(), None),
+        }
+
+        row(
+            ui,
+            "your raise",
+            format!("at least {} x {}", dialled.quantity, dialled.face),
+            Some(readout::percent(&view.chance_of(dialled))),
+        );
+
+        match previous {
+            Some(claim) => row(
+                ui,
+                "spot on",
+                format!("exactly {} x {}", claim.quantity, claim.face),
+                Some(readout::percent(&view.chance_exactly(claim))),
+            ),
+            None => row(ui, "spot on", "not available".to_string(), None),
+        }
+    });
+}
+
 /// A dialled number, centred in a box the height of a tap target.
 ///
 /// Fixed width, so a two digit quantity does not shift the button beside it, and the same
@@ -789,14 +840,7 @@ fn play(ui: &mut egui::Ui, playing: &mut Playing) -> Option<Screen> {
         });
     playing.pending = dialled;
 
-    let chance = readout::percent(&view.chance_of(playing.pending));
-    ui.label(
-        egui::RichText::new(format!(
-            "at least {} × {} is {:.1}% likely",
-            playing.pending.quantity, playing.pending.face, chance
-        ))
-        .size(17.0),
-    );
+    odds(ui, &view, playing.pending, game.previous_claim());
 
     ui.separator();
     let has_previous = game.previous_claim().is_some();
