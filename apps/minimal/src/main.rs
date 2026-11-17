@@ -22,6 +22,11 @@ const MAX_PLAYERS: usize = 10;
 const DIE: f32 = 32.0;
 /// Where the audit logs go.
 const LOGS: &str = "logs";
+/// Opponents get names rather than numbers, so a log line reads as a sentence and so the
+/// screen does too. One token each, because the log is space separated.
+const OPPONENTS: [&str; 9] = [
+    "Alice", "Bob", "Carol", "Dave", "Erin", "Frank", "Grace", "Heidi", "Ivan",
+];
 
 /// The match's audit log: one file per match, one event per line.
 ///
@@ -59,7 +64,10 @@ impl Audit {
         for player in 0..players {
             let dice = game.dice_of(player).to_vec();
             if !dice.is_empty() {
-                self.record(Event::Rolled { player, dice });
+                self.record(Event::Roll {
+                    player: name_of(player),
+                    dice,
+                });
             }
         }
     }
@@ -192,15 +200,18 @@ fn start(colour: usize, opponents: usize) -> Playing {
     let pending = first_legal(&game);
 
     let mut audit = Audit::open(std::path::Path::new(LOGS), seed);
-    audit.record(Event::MatchStarted {
-        players,
-        order,
-        colours: colours
-            .iter()
-            .map(|&index| PALETTE[index].name.to_string())
-            .collect(),
-        dice_each: DICE_EACH,
-        ones_wild: variants.ones_wild,
+    for player in 0..players {
+        audit.record(Event::AddPlayer {
+            name: name_of(player),
+            colour: PALETTE[colours[player]].name.to_string(),
+        });
+    }
+    audit.record(Event::PlayerOrder(
+        order.iter().map(|&player| name_of(player)).collect(),
+    ));
+    audit.record(Event::Variant {
+        name: "ones-wild",
+        on: variants.ones_wild,
     });
     audit.record_roll(&game, players);
 
@@ -224,9 +235,12 @@ fn first_legal(game: &Match) -> Claim {
 
 fn name_of(player: usize) -> String {
     if player == HUMAN {
-        "you".to_string()
+        "You".to_string()
     } else {
-        format!("opponent {player}")
+        OPPONENTS
+            .get(player - 1)
+            .map(|name| name.to_string())
+            .unwrap_or_else(|| format!("Player{player}"))
     }
 }
 
@@ -459,7 +473,6 @@ fn apply(playing: &mut Playing, call: Call) -> Option<Screen> {
         .map(|player| playing.game.dice_of(player).to_vec())
         .collect();
 
-    let held = playing.game.count(actor);
     let outcome = playing
         .game
         .apply(call, &mut playing.dice)
@@ -468,9 +481,8 @@ fn apply(playing: &mut Playing, call: Call) -> Option<Screen> {
     match outcome {
         Outcome::Continues => {
             if let Call::Raise(claim) = call {
-                playing.audit.record(Event::Claimed {
-                    player: actor,
-                    dice_held: held,
+                playing.audit.record(Event::Claim {
+                    player: name_of(actor),
                     quantity: claim.quantity,
                     face: claim.face,
                 });
@@ -478,12 +490,12 @@ fn apply(playing: &mut Playing, call: Call) -> Option<Screen> {
             None
         }
         Outcome::Resolved {
+            opens,
             lost,
             gained,
             eliminated,
             truth,
             over,
-            ..
         } => {
             let claim = disputed.expect("a resolution always disputes a claim");
             let mut said = match call {
@@ -505,41 +517,42 @@ fn apply(playing: &mut Playing, call: Call) -> Option<Screen> {
                 said.push_str(&format!(" {} is out.", name_of(player)));
             }
 
-            playing.audit.record(Event::Called {
-                player: actor,
-                call: match call {
-                    Call::Liar => "liar",
-                    Call::SpotOn => "spot on",
-                    Call::Raise(_) => unreachable!("a raise does not resolve a round"),
+            playing.audit.record(match call {
+                Call::Liar => Event::Liar {
+                    player: name_of(actor),
                 },
-                quantity: claim.quantity,
-                face: claim.face,
-                truth,
+                Call::SpotOn => Event::SpotOn {
+                    player: name_of(actor),
+                },
+                Call::Raise(_) => unreachable!("a raise does not resolve a round"),
             });
             if let Some(player) = gained {
-                playing.audit.record(Event::GainedDie {
-                    player,
-                    remaining: playing.game.count(player),
+                playing.audit.record(Event::GainDie {
+                    player: name_of(player),
                 });
             }
             if let Some(player) = lost {
-                playing.audit.record(Event::LostDie {
-                    player,
-                    remaining: playing.game.count(player),
+                playing.audit.record(Event::LoseDie {
+                    player: name_of(player),
                 });
             }
             if let Some(player) = eliminated {
-                playing.audit.record(Event::Eliminated { player });
+                playing.audit.record(Event::Eliminate {
+                    player: name_of(player),
+                });
             }
 
             playing.revealed = snapshot;
             playing.verdict = Some(said);
             if over {
-                playing.audit.record(Event::MatchEnded {
-                    ranking: playing.game.ranking(),
+                playing.audit.record(Event::Winner {
+                    player: name_of(*playing.game.ranking().first().expect("a survivor")),
                 });
                 Some(Screen::Over)
             } else {
+                playing.audit.record(Event::NextTurn {
+                    player: name_of(opens),
+                });
                 // A resolution rolls again, so the new round's dice are recorded here.
                 let players = playing.colours.len();
                 playing.audit.record_roll(&playing.game, players);
@@ -750,19 +763,16 @@ mod tests {
 
         for stamp in [1u64, 2] {
             let mut audit = Audit::open(&directory, stamp);
-            audit.record(Event::MatchStarted {
-                players: 2,
-                order: vec![0, 1],
-                colours: vec!["red".into(), "navy".into()],
-                dice_each: 5,
-                ones_wild: false,
+            audit.record(Event::AddPlayer {
+                name: "You".into(),
+                colour: "red".into(),
             });
-            audit.record(Event::Rolled {
-                player: 0,
+            audit.record(Event::Roll {
+                player: "You".into(),
                 dice: vec![1, 2, 3, 4, 5],
             });
-            audit.record(Event::MatchEnded {
-                ranking: vec![0, 1],
+            audit.record(Event::Winner {
+                player: "You".into(),
             });
         }
 
@@ -776,10 +786,10 @@ mod tests {
         for file in &files {
             let text = std::fs::read_to_string(file).unwrap();
             let lines: Vec<&str> = text.lines().collect();
-            assert_eq!(lines.len(), 3, "one line per event");
-            assert!(lines[0].starts_with("match-started "));
-            assert!(lines[1].starts_with("rolled "));
-            assert!(lines[2].starts_with("match-ended "));
+            assert_eq!(
+                lines,
+                vec!["add-player You red", "roll You 1 2 3 4 5", "winner You"]
+            );
         }
 
         let _ = std::fs::remove_dir_all(&directory);
@@ -790,6 +800,8 @@ mod tests {
     fn a_log_that_cannot_be_written_is_survivable() {
         let impossible = std::path::Path::new("logs").join(" ");
         let mut audit = Audit::open(&impossible, 7);
-        audit.record(Event::Eliminated { player: 1 });
+        audit.record(Event::Eliminate {
+            player: "Alice".into(),
+        });
     }
 }
