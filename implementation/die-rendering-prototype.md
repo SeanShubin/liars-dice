@@ -148,9 +148,15 @@ generator puts it.
 
 ### Settings panel
 
-`bevy_egui`. An immediate-mode panel is the right shape for a screen that is nothing but
-live-editable parameters, and it costs one dependency. Its version is coupled to the Bevy
-version, so the two are pinned together.
+`bevy_egui`. An immediate-mode interface is the right shape for a screen that is nothing
+but live-editable parameters, and it costs one dependency. Its version is coupled to the
+Bevy version, so the two move together.
+
+A movable window rather than a docked panel. In egui 0.36 a panel is shown into a `Ui`
+rather than into a context, so a docked panel requires building a root `Ui` over the
+viewport and then adjusting the camera viewport to avoid drawing under it. A window takes
+the context directly, and being able to drag it out of the way suits a screen whose whole
+purpose is looking at the thing behind it.
 
 ## Boundaries
 - **`crates/dice-render`** — SDF, meshing, classification, UV assignment, procedural
@@ -187,6 +193,11 @@ settings statements imply, and nothing has to be drawn before the prototype is u
 but it fights Bevy's lighting and shadowing, and the Pretty renderer will want ordinary
 meshes.
 
+**The orbit camera and the noise function are written here rather than taken from
+crates.** Both are small, and both would otherwise be dependencies that lag Bevy
+releases — which under the dependency policy would mean a third party deciding when this
+project may upgrade. A forty-line camera is cheaper than that.
+
 ## Determinism
 - Mesh generation is a pure function of the settings. The same settings produce the same
   mesh, byte for byte.
@@ -218,4 +229,7 @@ version-coupled to Bevy, so the pair moves together and an upgrade waits on whic
 lags.
 
 ## Status
-Not started.
+Built. `crates/dice-render` and `apps/prototype`, run with `scripts/run-prototype`.
+
+Bevy 0.20 requires rustc 1.97.1 or later; the toolchain was upgraded rather than Bevy
+held back, per the dependency policy.

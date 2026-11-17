@@ -21,3 +21,8 @@ members = [
 edition = "2024"
 version = "0.0.0"
 publish = false
+
+[workspace.dependencies]
+bevy = "0.20"
+bevy_egui = "0.43"
+dice-render = { path = "crates/dice-render" }

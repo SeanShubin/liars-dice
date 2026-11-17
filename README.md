@@ -4,9 +4,19 @@ A networked implementation of the dice game Liar's Dice, written in Rust with Be
 for rendering and AWS for hosting. The game model is deterministic and
 fully auditable; clients are thin and cannot see or influence hidden state.
 
-**Status:** pre-implementation. This repository currently contains documentation only.
-No code has been written yet, and no code should be written until the specification
-and the implementation documents for the piece being built are settled.
+**Status:** the die rendering prototype is built. Everything else is documentation.
+No code is written for a piece of work until its specification and its implementation
+document are settled.
+
+## Running
+
+One named script per runnable thing, in [`scripts/`](/scripts/README.md). Each exists as
+both a PowerShell and a POSIX shell version.
+
+```
+scripts/run-prototype.ps1    the die rendering prototype
+scripts/verify.ps1           format check, build everything, run every test
+```
 
 ## The Specification
 - The specification is a set of statements
@@ -28,6 +38,9 @@ and the implementation documents for the piece being built are settled.
 | `implementation/`   | Shared   | How the specification will be realized. Written before code.           |
 | `ai-managed-notes/` | AI       | Working memory for AI assistants. Not authoritative.                   |
 | `OPEN-QUESTIONS.md` | Shared   | Questions the AI needs the user to answer. AI asks, user answers.      |
+| `scripts/`          | Shared   | One named script per runnable thing.                                   |
+| `crates/`           | Shared   | Library crates. No entry points.                                       |
+| `apps/`             | Shared   | Binaries. Each is a composition root with no behavior.                 |
 
 Each directory is indexed by its own `README.md`, which explains the rules for that
 directory and links to every document inside it. Directory indexes are kept current:
