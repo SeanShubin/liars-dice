@@ -77,11 +77,11 @@ impl Audit {
     }
 
     fn record(&mut self, event: Event) {
-        if let Some(file) = self.file.as_mut() {
-            if let Err(reason) = writeln!(file, "{event}") {
-                warn!("audit log write failed: {reason}");
-                self.file = None;
-            }
+        if let Some(file) = self.file.as_mut()
+            && let Err(reason) = writeln!(file, "{event}")
+        {
+            warn!("audit log write failed: {reason}");
+            self.file = None;
         }
     }
 
@@ -863,12 +863,11 @@ fn apply(playing: &mut Playing, call: Call) -> Option<Screen> {
             // the unknown count did not change during the round, so recomputing it now
             // gives the chance they had in front of them.
             let held = truth >= claim.quantity;
-            if let Some(maker) = previous_player {
-                if let Some(event) =
+            if let Some(maker) = previous_player
+                && let Some(event) =
                     luck(maker, claimant_odds_for(&before, maker, claim, false), held)
-                {
-                    playing.audit.record(event);
-                }
+            {
+                playing.audit.record(event);
             }
             // The call that ended the round, judged the same way.
             let call_held = match call {
@@ -903,10 +902,10 @@ fn apply(playing: &mut Playing, call: Call) -> Option<Screen> {
 
 fn play(ui: &mut egui::Ui, playing: &mut Playing) -> Option<Screen> {
     // Opponents act before the human on the first visit to this screen.
-    if playing.game.current() != HUMAN {
-        if let Some(screen) = run_opponents(playing) {
-            return Some(screen);
-        }
+    if playing.game.current() != HUMAN
+        && let Some(screen) = run_opponents(playing)
+    {
+        return Some(screen);
     }
 
     table(ui, playing, false);
@@ -1080,8 +1079,8 @@ mod tests {
             counts[dice.face() as usize] += 1;
         }
         assert_eq!(counts[0], 0, "a face below one was rolled");
-        for face in 1..=6 {
-            let share = counts[face] as f64 / 600_000.0;
+        for (face, count) in counts.iter().enumerate().skip(1) {
+            let share = *count as f64 / 600_000.0;
             assert!(
                 (share - 1.0 / 6.0).abs() < 0.005,
                 "face {face} came up {share} of the time"

@@ -68,6 +68,16 @@ fn to_linear(channel: u8) -> f32 {
 
 /// sRGB to Oklab, which is near enough perceptually uniform that euclidean distance in it
 /// tracks how different two colours look.
+///
+/// The matrix constants are kept at the precision Bjorn Ottosson publishes them at, so
+/// they can be compared against the source by eye. `f32` rounds each one at compile time;
+/// writing the rounded values here would hide where they came from to no effect. These
+/// are a displayed colour, which /specification/architecture.md allows to be floating
+/// point, and nothing derived from them reaches an event.
+#[expect(
+    clippy::excessive_precision,
+    reason = "published constants, kept comparable to their source"
+)]
 fn oklab(rgb: [u8; 3]) -> [f32; 3] {
     let r = to_linear(rgb[0]);
     let g = to_linear(rgb[1]);
@@ -275,13 +285,13 @@ mod tests {
 
     #[test]
     fn every_palette_entry_is_distinct() {
-        for left in 0..PALETTE.len() {
-            for right in (left + 1)..PALETTE.len() {
+        for (left, first) in PALETTE.iter().enumerate() {
+            for second in PALETTE.iter().skip(left + 1) {
                 assert!(
-                    distance(PALETTE[left], PALETTE[right]) > 0.0,
+                    distance(*first, *second) > 0.0,
                     "{} and {} are the same colour",
-                    PALETTE[left].name,
-                    PALETTE[right].name
+                    first.name,
+                    second.name
                 );
             }
         }
