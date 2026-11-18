@@ -11,11 +11,11 @@ use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 
 use std::io::Write;
 
-use ai::View;
+use ai::Seen;
 use integrity::{Secret, Seed};
 use protocol::{Account, Event, Moment, PROTOCOL_VERSION, Seat};
 use render_minimal::palette::{PALETTE, assign, ink};
-use rules::{Call, Claim, DICE_LIMIT, Deals, Entry, Match, Outcome, Variants};
+use rules::{Call, Claim, Claimed, Entry, Game, Resolution, SEAT, Variants};
 
 const MAX_PLAYERS: usize = 10;
 /// Every die is drawn in a box this size, shown or not, so the dice line up in a grid.
@@ -97,16 +97,19 @@ impl Audit {
     /// The commitment to the round, then the round. The commitment comes first because
     /// every die in a round is fixed before any claim in that round, and its position in
     /// the log is what says so.
-    fn record_deal(&mut self, game: &Match, dealer: &Dealer, players: usize) {
+    fn record_deal(&mut self, game: &Game, dealer: &Dealer, players: usize) {
         self.record(Event::Commit {
-            digest: integrity::commit(&dealer.seed(game.round())).to_hex(),
+            digest: integrity::commit(&dealer.seed(game.public().round())).to_hex(),
         });
         self.record_deal_lines(game, players);
     }
 
-    fn record_deal_lines(&mut self, game: &Match, players: usize) {
+    fn record_deal_lines(&mut self, game: &Game, players: usize) {
         for player in 0..players {
-            let dice = game.dealt_of(player).to_vec();
+            let dice = game
+                .dealt(player)
+                .map(|seat| seat.to_vec())
+                .unwrap_or_default();
             if !dice.is_empty() {
                 self.record(Event::Deal {
                     seat: seat_of(player),
@@ -168,16 +171,26 @@ impl Dealer {
     }
 }
 
-impl Deals for Dealer {
-    fn seat(&mut self, round: u32, seat: usize) -> [u8; DICE_LIMIT as usize] {
-        let dealt = integrity::deal(&self.seed(round), seat as u8, DICE_LIMIT as usize);
+impl Dealer {
+    /// Every face for one seat of one round. The rules take no dealer now: a composition
+    /// root deals and installs, which is what keeps `rules` free of non-determinism.
+    fn seat(&self, round: u32, seat: usize) -> [u8; SEAT] {
+        let dealt = integrity::deal(&self.seed(round), seat as u8, SEAT);
         dealt.try_into().expect("the dice limit of faces")
+    }
+
+    /// Deal every seat of the round the game is in.
+    fn deal(&self, game: &mut Game) {
+        let round = game.public().round();
+        for seat in 0..game.public().players() {
+            let _ = game.install(seat, self.seat(round, seat));
+        }
     }
 }
 
 /// A match in progress, with everything the screens need.
 struct Playing {
-    game: Match,
+    game: Game,
     colours: Vec<usize>,
     dealer: Dealer,
     /// The claim the human is dialling in. Always legal.
@@ -258,7 +271,7 @@ fn start(colour: usize, opponents: usize) -> Playing {
     let seed = stamp();
     let at = Moment::from_unix_nanos(seed);
     let mut dice = Dice::new(seed);
-    let mut dealer = Dealer {
+    let dealer = Dealer {
         secret: dice.secret(),
         match_id: at.file_stem(),
     };
@@ -271,7 +284,8 @@ fn start(colour: usize, opponents: usize) -> Playing {
     }
 
     let variants = Variants::default();
-    let game = Match::start(order.clone(), variants, &mut dealer);
+    let mut game = Game::start(order.clone(), variants);
+    dealer.deal(&mut game);
     let pending = first_legal(&game);
 
     let mut audit = Audit::open(std::path::Path::new(LOGS), at);
@@ -308,11 +322,15 @@ fn start(colour: usize, opponents: usize) -> Playing {
     }
 }
 
-fn first_legal(game: &Match) -> Claim {
-    game.legal_raises().first().copied().unwrap_or(Claim {
-        quantity: 1,
-        face: 1,
-    })
+fn first_legal(game: &Game) -> Claim {
+    game.public()
+        .legal_raises()
+        .first()
+        .copied()
+        .unwrap_or(Claim {
+            quantity: 1,
+            face: 1,
+        })
 }
 
 /// A player's seat. The minimal desktop game seats players in index order, so the two
@@ -490,11 +508,11 @@ fn die(ui: &mut egui::Ui, swatch: usize, face: Option<u8>) {
 /// their slots unrevealed.
 fn table(ui: &mut egui::Ui, playing: &Playing, revealed: bool) {
     let game = &playing.game;
-    let turn = (!game.over()).then(|| game.current());
+    let turn = (!game.public().over()).then(|| game.public().current());
     egui::Grid::new("table").spacing([5.0, 5.0]).show(ui, |ui| {
         // Turn order rather than player number, so who attacks whom is visible.
-        for &player in game.order() {
-            let out = game.eliminated(player);
+        for &player in game.public().order() {
+            let out = game.public().eliminated(player);
             let mut name = egui::RichText::new(name_of(player)).size(15.0);
             if out {
                 name = name.strikethrough();
@@ -512,7 +530,10 @@ fn table(ui: &mut egui::Ui, playing: &Playing, revealed: bool) {
             let dice: Vec<u8> = if revealed {
                 playing.revealed.get(player).cloned().unwrap_or_default()
             } else {
-                game.dice_of(player).to_vec()
+                game.view(HUMAN)
+                    .dice_of(player)
+                    .map(|dice| dice.to_vec())
+                    .unwrap_or_default()
             };
             let show = revealed || player == HUMAN;
             if dice.is_empty() && out {
@@ -529,21 +550,21 @@ fn table(ui: &mut egui::Ui, playing: &Playing, revealed: bool) {
 /// Whose turn it is, what there is to beat, and how many dice are in play.
 fn standing(ui: &mut egui::Ui, playing: &Playing) {
     let game = &playing.game;
-    let whose = if game.over() {
+    let whose = if game.public().over() {
         "match over".to_string()
-    } else if game.current() == HUMAN {
+    } else if game.public().current() == HUMAN {
         "Your turn".to_string()
     } else {
-        format!("{}'s turn", name_of(game.current()))
+        format!("{}'s turn", name_of(game.public().current()))
     };
-    let beat = match game.previous_claim() {
+    let beat = match game.public().previous_claim() {
         Some(claim) => format!("to beat: at least {} x {}", claim.quantity, claim.face),
         None => "nothing to beat yet".to_string(),
     };
     ui.label(
         egui::RichText::new(format!(
             "{whose}   -   {beat}   -   {} dice in play",
-            game.dice_in_play()
+            game.public().dice_in_play()
         ))
         .size(16.0),
     );
@@ -554,7 +575,7 @@ fn standing(ui: &mut egui::Ui, playing: &Playing) {
 /// Three rows, one per button. The standing claim's own chance is shown rather than the
 /// chance that calling liar is right, because those are complements and the claim is the
 /// thing on the table — but it is the number the liar decision turns on.
-fn odds(ui: &mut egui::Ui, view: &View, dialled: Claim, previous: Option<Claim>) {
+fn odds(ui: &mut egui::Ui, view: &impl Seen, dialled: Claim, previous: Option<Claim>) {
     ui.label(egui::RichText::new("Odds").strong());
     egui::Grid::new("odds").spacing([10.0, 4.0]).show(ui, |ui| {
         let row = |ui: &mut egui::Ui, what: &str, claim: String, chance: Option<f64>| {
@@ -664,7 +685,7 @@ fn history(ui: &mut egui::Ui, playing: &Playing, entries: &[Entry]) {
     }
     let trips = claims.iter().map(Vec::len).max().unwrap_or(0);
 
-    let order = playing.game.order();
+    let order = playing.game.public().order();
     let opener = entries[0].player;
     let from = order
         .iter()
@@ -687,7 +708,7 @@ fn history(ui: &mut egui::Ui, playing: &Playing, entries: &[Entry]) {
 
             for &player in &rotated {
                 // A player who never claimed and is out of the match has nothing to show.
-                if claims[player].is_empty() && playing.game.eliminated(player) {
+                if claims[player].is_empty() && playing.game.public().eliminated(player) {
                     continue;
                 }
                 ui.label(egui::RichText::new(name_of(player)).size(14.0));
@@ -709,14 +730,14 @@ fn history(ui: &mut egui::Ui, playing: &Playing, entries: &[Entry]) {
 /// Computed here rather than passed in, so it is the same calculation whoever claimed —
 /// an opponent's line and the human's line mean the same thing. The complement for a liar
 /// call is taken exactly and only then rounded for writing.
-fn claimant_odds(game: &Match, actor: usize, call: Call) -> f64 {
+fn claimant_odds(game: &Game, actor: usize, call: Call) -> f64 {
     match call {
         Call::Raise(claim) => claimant_odds_for(game, actor, claim, false),
-        Call::Liar => match game.previous_claim() {
+        Call::Liar => match game.public().previous_claim() {
             Some(claim) => 100.0 - claimant_odds_for(game, actor, claim, false),
             None => 0.0,
         },
-        Call::SpotOn => match game.previous_claim() {
+        Call::SpotOn => match game.public().previous_claim() {
             Some(claim) => claimant_odds_for(game, actor, claim, true),
             None => 0.0,
         },
@@ -724,16 +745,9 @@ fn claimant_odds(game: &Match, actor: usize, call: Call) -> f64 {
 }
 
 /// How likely one claim is, from what one player can see.
-fn claimant_odds_for(game: &Match, player: usize, claim: Claim, exactly: bool) -> f64 {
-    let own = game.dice_of(player).to_vec();
-    let unknown = game.dice_in_play() - game.count(player);
-    let view = View {
-        own_dice: &own,
-        unknown,
-        legal_raises: &[],
-        previous: game.previous_claim(),
-        variants: game.variants(),
-    };
+fn claimant_odds_for(game: &Game, player: usize, claim: Claim, exactly: bool) -> f64 {
+    // The claimant's own view: their dice, and the count of what they cannot see.
+    let view = game.view(player);
     if exactly {
         readout::percent(&view.chance_exactly(claim))
     } else {
@@ -776,18 +790,9 @@ fn luck(player: usize, chance_true: f64, came_true: bool) -> Option<Event> {
 
 /// Advance every opponent's turn until it is the human's, or the round ends.
 fn run_opponents(playing: &mut Playing) -> Option<Screen> {
-    while !playing.game.over() && playing.game.current() != HUMAN {
-        let player = playing.game.current();
-        let legal = playing.game.legal_raises();
-        let own = playing.game.dice_of(player).to_vec();
-        let unknown = playing.game.dice_in_play() - playing.game.count(player);
-        let call = ai::choose(&View {
-            own_dice: &own,
-            unknown,
-            legal_raises: &legal,
-            previous: playing.game.previous_claim(),
-            variants: playing.game.variants(),
-        });
+    while !playing.game.public().over() && playing.game.public().current() != HUMAN {
+        let player = playing.game.public().current();
+        let call = ai::choose(&playing.game.view(player));
         if let Some(screen) = apply(playing, call) {
             return Some(screen);
         }
@@ -798,25 +803,22 @@ fn run_opponents(playing: &mut Playing) -> Option<Screen> {
 
 /// Apply a call and move to the reveal if the round ended.
 fn apply(playing: &mut Playing, call: Call) -> Option<Screen> {
-    let disputed = playing.game.previous_claim();
-    let actor = playing.game.current();
-    let snapshot: Vec<Vec<u8>> = (0..playing.colours.len())
-        .map(|player| playing.game.dice_of(player).to_vec())
-        .collect();
+    let disputed = playing.game.public().previous_claim();
+    let actor = playing.game.public().current();
     // Resolving a round clears its claims from the match, so they are kept here first.
-    let round: Vec<Entry> = playing.game.history().to_vec();
+    let round: Vec<Entry> = playing.game.public().history().to_vec();
     let odds = claimant_odds(&playing.game, actor, call);
-    let previous_player = playing.game.previous_player();
-    // Judging luck needs the round's dice, which resolving the round rolls away.
+    let previous_player = playing.game.public().previous_player();
+    // Judging luck needs the round's dice, which beginning the next round forgets.
     let before = playing.game.clone();
 
-    let outcome = playing
+    let claimed = playing
         .game
-        .apply(call, &mut playing.dealer)
+        .claim(call)
         .expect("only legal calls are offered");
 
-    match outcome {
-        Outcome::Continues => {
+    match claimed {
+        Claimed::Continues => {
             if let Call::Raise(claim) = call {
                 playing.audit.record(Event::Claim {
                     seat: seat_of(actor),
@@ -827,17 +829,34 @@ fn apply(playing: &mut Playing, call: Call) -> Option<Screen> {
             }
             None
         }
-        Outcome::Resolved {
-            opens,
-            affected: _,
-            lost,
-            gained,
-            shield_gained,
-            shield_spent,
-            eliminated,
-            truth,
-            over,
-        } => {
+        Claimed::RoundEnded => {
+            // A desktop game holds every die, so the round settles on the first ask. A
+            // networked client gets `None` here until the relay reveals the round.
+            let Resolution {
+                opens,
+                affected: _,
+                lost,
+                gained,
+                shield_gained,
+                shield_spent,
+                eliminated,
+                truth,
+                over,
+            } = playing
+                .game
+                .resolve()
+                .expect("a desktop game knows every die");
+            // Now that the round is revealed, every seat's dice may be shown.
+            let snapshot: Vec<Vec<u8>> = (0..playing.colours.len())
+                .map(|player| {
+                    playing
+                        .game
+                        .view(HUMAN)
+                        .dice_of(player)
+                        .map(|dice| dice.to_vec())
+                        .unwrap_or_default()
+                })
+                .collect();
             let claim = disputed.expect("a resolution always disputes a claim");
             let mut said = match call {
                 Call::Liar => format!("{} called liar", name_of(actor)),
@@ -930,21 +949,25 @@ fn apply(playing: &mut Playing, call: Call) -> Option<Screen> {
             if over {
                 playing
                     .audit
-                    .record_reveal(&playing.dealer, playing.game.round());
+                    .record_reveal(&playing.dealer, playing.game.public().round());
                 playing.audit.record(Event::Winner {
-                    seat: seat_of(*playing.game.ranking().first().expect("a survivor")),
+                    seat: seat_of(*playing.game.public().ranking().first().expect("a survivor")),
                 });
                 Some(Screen::Over)
             } else {
                 playing.audit.record(Event::NextTurn {
                     seat: seat_of(opens),
                 });
-                // A resolution rolls again. The round that just ended is revealed
-                // first, then the next round is committed to and dealt.
+                // The round that just ended is revealed, then the next one is begun,
+                // dealt, and committed to. Settling a round no longer deals the next:
+                // a client is dealt by the relay, and a desktop game by its own dealer,
+                // so both do it here rather than inside the rules.
                 let players = playing.colours.len();
                 playing
                     .audit
-                    .record_reveal(&playing.dealer, playing.game.round() - 1);
+                    .record_reveal(&playing.dealer, playing.game.public().round());
+                playing.game.next_round(opens);
+                playing.dealer.deal(&mut playing.game);
                 playing
                     .audit
                     .record_deal(&playing.game, &playing.dealer, players);
@@ -956,7 +979,7 @@ fn apply(playing: &mut Playing, call: Call) -> Option<Screen> {
 
 fn play(ui: &mut egui::Ui, playing: &mut Playing) -> Option<Screen> {
     // Opponents act before the human on the first visit to this screen.
-    if playing.game.current() != HUMAN
+    if playing.game.public().current() != HUMAN
         && let Some(screen) = run_opponents(playing)
     {
         return Some(screen);
@@ -965,24 +988,15 @@ fn play(ui: &mut egui::Ui, playing: &mut Playing) -> Option<Screen> {
     table(ui, playing, false);
     ui.separator();
     standing(ui, playing);
-    history(ui, playing, playing.game.history());
+    history(ui, playing, playing.game.public().history());
     ui.separator();
 
     let game = &playing.game;
-    let unknown = game.dice_in_play() - game.count(HUMAN);
-    let own = game.dice_of(HUMAN).to_vec();
-    let legal = game.legal_raises();
-    let view = View {
-        own_dice: &own,
-        unknown,
-        legal_raises: &legal,
-        previous: game.previous_claim(),
-        variants: game.variants(),
-    };
+    let view = game.view(HUMAN);
 
     ui.label(egui::RichText::new("Your claim").strong());
     let pending = playing.pending;
-    let step = |claim: Claim| game.check_raise(claim).is_ok();
+    let step = |claim: Claim| game.public().check_raise(claim).is_ok();
 
     let mut dialled = pending;
     egui::Grid::new("dialler")
@@ -1041,10 +1055,10 @@ fn play(ui: &mut egui::Ui, playing: &mut Playing) -> Option<Screen> {
         });
     playing.pending = dialled;
 
-    odds(ui, &view, playing.pending, game.previous_claim());
+    odds(ui, &view, playing.pending, game.public().previous_claim());
 
     ui.separator();
-    let has_previous = game.previous_claim().is_some();
+    let has_previous = game.public().previous_claim().is_some();
     let mut call = None;
     ui.horizontal(|ui| {
         if tap(ui, "Raise", step(playing.pending)) {
@@ -1102,7 +1116,7 @@ fn over(ui: &mut egui::Ui, playing: &mut Playing) -> Option<Screen> {
     egui::Grid::new("ranking")
         .spacing([5.0, 5.0])
         .show(ui, |ui| {
-            for (place, player) in playing.game.ranking().iter().enumerate() {
+            for (place, player) in playing.game.public().ranking().iter().enumerate() {
                 ui.label(
                     egui::RichText::new(format!("{}. {}", place + 1, name_of(*player))).size(16.0),
                 );
@@ -1146,7 +1160,7 @@ mod tests {
     #[test]
     fn a_revealed_seed_recomputes_the_dice_it_was_committed_to() {
         let mut dice = Dice::new(1234);
-        let mut dealer = Dealer {
+        let dealer = Dealer {
             secret: dice.secret(),
             match_id: "1970-01-01T00-00-00-000".to_string(),
         };
@@ -1154,7 +1168,7 @@ mod tests {
         let dealt = dealer.seat(0, 2);
         assert!(integrity::verify(&digest, &dealer.seed(0)));
         assert_eq!(
-            integrity::deal(&dealer.seed(0), 2, DICE_LIMIT as usize),
+            integrity::deal(&dealer.seed(0), 2, SEAT),
             dealt.to_vec(),
             "the revealed seed must recompute what was dealt"
         );
@@ -1216,13 +1230,14 @@ mod tests {
 
         let at = Moment::from_unix_nanos(1_700_000_000_000_000_000);
         let mut dice = Dice::new(20_261_118);
-        let mut dealer = Dealer {
+        let dealer = Dealer {
             secret: dice.secret(),
             match_id: at.file_stem(),
         };
         let players = 3;
         let order: Vec<usize> = (0..players).collect();
-        let mut game = Match::start(order, Variants::default(), &mut dealer);
+        let mut game = Game::start(order, Variants::default());
+        dealer.deal(&mut game);
 
         let mut audit = Audit::open(&directory, at);
         audit.record(Event::Version {
@@ -1232,29 +1247,28 @@ mod tests {
         audit.record_deal(&game, &dealer, players);
 
         let mut turn = 0;
-        while !game.over() && turn < 2_000 {
-            let call = if turn % 4 == 3 && game.previous_claim().is_some() {
+        while !game.public().over() && turn < 2_000 {
+            let call = if turn % 4 == 3 && game.public().previous_claim().is_some() {
                 Call::Liar
             } else {
-                match game.legal_raises().first() {
+                match game.public().legal_raises().first() {
                     Some(&claim) => Call::Raise(claim),
                     None => Call::Liar,
                 }
             };
-            let before = game.round();
-            for seat in 0..players {
-                let _ = game.dice_of(seat);
-            }
-            let outcome = game.apply(call, &mut dealer).expect("a legal call");
-            if let Outcome::Resolved { over, .. } = outcome {
-                audit.record_reveal(&dealer, before);
-                if !over {
+            if game.claim(call).expect("a legal call") == Claimed::RoundEnded {
+                let round = game.public().round();
+                let resolution = game.resolve().expect("a complete game settles at once");
+                audit.record_reveal(&dealer, round);
+                if !resolution.over {
+                    game.next_round(resolution.opens);
+                    dealer.deal(&mut game);
                     audit.record_deal(&game, &dealer, players);
                 }
             }
             turn += 1;
         }
-        assert!(game.over(), "the match should have ended");
+        assert!(game.public().over(), "the match should have ended");
 
         let file = std::fs::read_dir(&directory)
             .expect("the log directory was created")

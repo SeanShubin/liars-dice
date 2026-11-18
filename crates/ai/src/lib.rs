@@ -18,41 +18,74 @@
 //! opponent plays, so a recorded match stays a usable test.
 
 use odds::{Chance, Odds, at_least, exactly};
-use rules::{Call, Claim, Variants, count_face};
+use rules::{Call, Claim, Variants, View, count_face};
 
-/// Everything an AI opponent is allowed to see.
-pub struct View<'a> {
-    /// The opponent's own dice.
-    pub own_dice: &'a [u8],
+/// Everything a decision is allowed to see, and what follows from it.
+///
+/// In production the implementation is [`rules::View`], which hides every other seat's
+/// dice whether or not the game holds them — so an opponent cannot reach another player's
+/// dice, and the knowledge statements in /specification/ai-players.md are enforced by the
+/// signature rather than by discipline.
+///
+/// It is a trait rather than a struct so a test can state a position directly. A fixture
+/// can of course say anything; a fixture that lies only misleads its own test, while the
+/// one implementation that ships is the lens.
+///
+/// The probabilities live here rather than in `rules`, which keeps that crate depending
+/// on nothing.
+pub trait Seen {
+    /// This seat's own dice.
+    fn own_dice(&self) -> &[u8];
     /// How many dice it cannot see.
-    pub unknown: u32,
-    /// Every legal raise, which the rules already bound.
-    pub legal_raises: &'a [Claim],
+    fn unknown(&self) -> u32;
+    /// Every legal raise, which the rules have already bounded.
+    fn legal_raises(&self) -> Vec<Claim>;
     /// The claim to beat, if there is one this round.
-    pub previous: Option<Claim>,
-    pub variants: Variants,
-}
+    fn previous(&self) -> Option<Claim>;
+    fn variants(&self) -> Variants;
 
-impl View<'_> {
-    /// How likely a claim is true, given the dice this opponent holds.
-    pub fn chance_of(&self, claim: Claim) -> Odds {
-        at_least(self.unknown, self.needed(claim), self.chance(claim.face))
+    /// How likely a claim is true, given the dice this seat holds.
+    fn chance_of(&self, claim: Claim) -> Odds {
+        at_least(self.unknown(), self.needed(claim), self.chance(claim.face))
     }
 
     /// How likely a claim is exactly right.
-    pub fn chance_exactly(&self, claim: Claim) -> Odds {
-        exactly(self.unknown, self.needed(claim), self.chance(claim.face))
+    fn chance_exactly(&self, claim: Claim) -> Odds {
+        exactly(self.unknown(), self.needed(claim), self.chance(claim.face))
     }
 
-    /// How many of the dice this opponent cannot see a claim still needs. Negative when
-    /// its own dice already settle the claim.
+    /// How many of the dice this seat cannot see a claim still needs. Negative when its
+    /// own dice already settle the claim.
     fn needed(&self, claim: Claim) -> i64 {
-        let seen = count_face(self.own_dice, claim.face, self.variants.ones_wild) as i64;
+        let seen = count_face(self.own_dice(), claim.face, self.variants().ones_wild) as i64;
         claim.quantity as i64 - seen
     }
 
+    /// The chance a single unknown die counts toward a face.
     fn chance(&self, face: u8) -> Chance {
-        Chance::per_die(self.variants.ones_wild, face)
+        Chance::per_die(self.variants().ones_wild, face)
+    }
+}
+
+impl Seen for View<'_> {
+    fn own_dice(&self) -> &[u8] {
+        View::own_dice(self).unwrap_or(&[])
+    }
+
+    fn unknown(&self) -> u32 {
+        View::unknown(self)
+    }
+
+    fn legal_raises(&self) -> Vec<Claim> {
+        View::legal_raises(self)
+    }
+
+    fn previous(&self) -> Option<Claim> {
+        View::previous_claim(self)
+    }
+
+    fn variants(&self) -> Variants {
+        View::variants(self)
     }
 }
 
@@ -69,9 +102,9 @@ impl View<'_> {
 /// counting outcomes. Grouping instead of assuming one chance per die keeps this right
 /// whatever the rules allow: with ones wild a claim on the one face would carry a different
 /// chance, and the rules make such a claim illegal, but nothing here leans on that.
-pub fn best_raise(view: &View) -> Option<(Claim, Odds)> {
+pub fn best_raise(view: &impl Seen) -> Option<(Claim, Odds)> {
     let mut leaders: Vec<(Chance, Claim, i64)> = Vec::new();
-    for &claim in view.legal_raises {
+    for claim in view.legal_raises() {
         let chance = view.chance(claim.face);
         let needed = view.needed(claim);
         match leaders.iter_mut().find(|(known, _, _)| *known == chance) {
@@ -90,7 +123,7 @@ pub fn best_raise(view: &View) -> Option<(Claim, Odds)> {
     leaders
         .into_iter()
         .fold(None, |best, (chance, claim, needed)| {
-            let value = at_least(view.unknown, needed, chance);
+            let value = at_least(view.unknown(), needed, chance);
             match best {
                 None => Some((claim, value)),
                 Some((leading_claim, leading_value)) => {
@@ -107,10 +140,10 @@ pub fn best_raise(view: &View) -> Option<(Claim, Odds)> {
 }
 
 /// What this opponent does on its turn.
-pub fn choose(view: &View) -> Call {
+pub fn choose(view: &impl Seen) -> Call {
     let raise = best_raise(view);
 
-    let Some(previous) = view.previous else {
+    let Some(previous) = view.previous() else {
         // Nothing to dispute on an opening turn, so the only call is a raise.
         return Call::Raise(raise.expect("an opening turn always has a legal raise").0);
     };
@@ -144,23 +177,59 @@ pub fn choose(view: &View) -> Call {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rules::{Deals, Match};
+    use rules::{Claimed, Game, Variants};
 
-    struct Fixed(u8);
+    /// A position stated directly, so a test can say "this seat holds these dice and
+    /// cannot see that many" without playing a match into that shape.
+    struct Position<'a> {
+        own_dice: &'a [u8],
+        unknown: u32,
+        legal_raises: &'a [Claim],
+        previous: Option<Claim>,
+        variants: Variants,
+    }
 
-    impl Deals for Fixed {
-        fn seat(&mut self, _round: u32, _seat: usize) -> [u8; 5] {
-            [self.0; 5]
+    impl Seen for Position<'_> {
+        fn own_dice(&self) -> &[u8] {
+            self.own_dice
+        }
+        fn unknown(&self) -> u32 {
+            self.unknown
+        }
+        fn legal_raises(&self) -> Vec<Claim> {
+            self.legal_raises.to_vec()
+        }
+        fn previous(&self) -> Option<Claim> {
+            self.previous
+        }
+        fn variants(&self) -> Variants {
+            self.variants
         }
     }
 
-    struct Cycling {
+    /// Dice a test says, dealt a seat at a time. The composition root deals in the real
+    /// thing; here it is two lines.
+    struct Faces {
         faces: Vec<u8>,
         at: usize,
     }
 
-    impl Deals for Cycling {
-        fn seat(&mut self, _round: u32, _seat: usize) -> [u8; 5] {
+    impl Faces {
+        fn fixed(face: u8) -> Self {
+            Self {
+                faces: vec![face],
+                at: 0,
+            }
+        }
+
+        fn cycling(faces: &[u8]) -> Self {
+            Self {
+                faces: faces.to_vec(),
+                at: 0,
+            }
+        }
+
+        fn seat(&mut self) -> [u8; 5] {
             let mut dealt = [0u8; 5];
             for face in dealt.iter_mut() {
                 *face = self.faces[self.at % self.faces.len()];
@@ -168,6 +237,45 @@ mod tests {
             }
             dealt
         }
+
+        fn deal(&mut self, game: &mut Game) {
+            for seat in 0..game.public().players() {
+                let _ = game.install(seat, self.seat());
+            }
+        }
+    }
+
+    /// Play a match out with every seat deciding for itself, checking each call as it is
+    /// chosen. Returns the finished game.
+    fn play(
+        players: usize,
+        variants: Variants,
+        faces: &mut Faces,
+        limit: usize,
+        inspect: &mut impl FnMut(&Game, Call),
+    ) -> Game {
+        let mut game = Game::start((0..players).collect(), variants);
+        faces.deal(&mut game);
+        for _ in 0..limit {
+            if game.public().over() {
+                break;
+            }
+            let seat = game.public().current();
+            let chosen = choose(&game.view(seat));
+            inspect(&game, chosen);
+            match game.claim(chosen).expect("a legal call") {
+                Claimed::Continues => {}
+                Claimed::RoundEnded => {
+                    let resolution = game.resolve().expect("a complete game settles");
+                    if resolution.over {
+                        break;
+                    }
+                    game.next_round(resolution.opens);
+                    faces.deal(&mut game);
+                }
+            }
+        }
+        game
     }
 
     fn view<'a>(
@@ -175,8 +283,8 @@ mod tests {
         unknown: u32,
         legal: &'a [Claim],
         previous: Option<Claim>,
-    ) -> View<'a> {
-        View {
+    ) -> Position<'a> {
+        Position {
             own_dice: own,
             unknown,
             legal_raises: legal,
@@ -302,84 +410,50 @@ mod tests {
 
     #[test]
     fn an_opponent_never_names_the_one_face_when_ones_are_wild() {
-        let mut rolls = Cycling {
-            faces: vec![1, 3, 5, 2, 6, 4],
-            at: 0,
-        };
-        let mut game = Match::start(vec![0, 1, 2], Variants { ones_wild: true }, &mut rolls);
-        for _ in 0..200 {
-            if game.over() {
-                break;
-            }
-            let player = game.current();
-            let legal = game.legal_raises();
-            let own = game.dice_of(player).to_vec();
-            let unknown = game.dice_in_play() - game.count(player);
-            let chosen = choose(&View {
-                own_dice: &own,
-                unknown,
-                legal_raises: &legal,
-                previous: game.previous_claim(),
-                variants: game.variants(),
-            });
-            if let Call::Raise(claim) = chosen {
-                assert_ne!(claim.face, 1, "named the one face while ones were wild");
-            }
-            game.apply(chosen, &mut rolls).expect("a legal call");
-        }
+        let mut faces = Faces::cycling(&[1, 3, 5, 2, 6, 4]);
+        play(
+            3,
+            Variants { ones_wild: true },
+            &mut faces,
+            200,
+            &mut |_, chosen| {
+                if let Call::Raise(claim) = chosen {
+                    assert_ne!(claim.face, 1, "named the one face while ones were wild");
+                }
+            },
+        );
     }
 
+    /// `play` unwraps every call, so an illegal one fails the test where it is made.
     #[test]
     fn an_opponent_never_produces_an_illegal_call() {
-        for seed in 1..=6u8 {
-            let mut rolls = Fixed(seed);
-            let mut game = Match::start(vec![0, 1, 2, 3], Variants::default(), &mut rolls);
-            for _ in 0..500 {
-                if game.over() {
-                    break;
-                }
-                let player = game.current();
-                let legal = game.legal_raises();
-                let own = game.dice_of(player).to_vec();
-                let unknown = game.dice_in_play() - game.count(player);
-                let chosen = choose(&View {
-                    own_dice: &own,
-                    unknown,
-                    legal_raises: &legal,
-                    previous: game.previous_claim(),
-                    variants: game.variants(),
-                });
-                game.apply(chosen, &mut rolls).expect("a legal call");
-            }
+        for face in 1..=6u8 {
+            let mut faces = Faces::fixed(face);
+            play(4, Variants::default(), &mut faces, 500, &mut |_, _| {});
         }
     }
 
     #[test]
     fn a_match_between_opponents_ends_with_one_survivor() {
-        let mut rolls = Cycling {
-            faces: vec![3, 1, 6, 2, 5, 4, 2, 6, 1, 3],
-            at: 0,
-        };
-        let mut game = Match::start(vec![0, 1, 2, 3, 4], Variants::default(), &mut rolls);
-        let mut turns = 0;
-        while !game.over() && turns < 20_000 {
-            let player = game.current();
-            let legal = game.legal_raises();
-            let own = game.dice_of(player).to_vec();
-            let unknown = game.dice_in_play() - game.count(player);
-            let chosen = choose(&View {
-                own_dice: &own,
-                unknown,
-                legal_raises: &legal,
-                previous: game.previous_claim(),
-                variants: game.variants(),
-            });
-            game.apply(chosen, &mut rolls).expect("a legal call");
-            turns += 1;
-        }
-        assert!(game.over(), "the match did not end in {turns} turns");
-        assert_eq!(game.alive().len(), 1);
-        assert_eq!(game.ranking().len(), 5);
+        let mut faces = Faces::cycling(&[3, 1, 6, 2, 5, 4, 2, 6, 1, 3]);
+        let game = play(5, Variants::default(), &mut faces, 20_000, &mut |_, _| {});
+        assert!(game.public().over(), "the match did not end");
+        assert_eq!(game.public().alive().len(), 1);
+        assert_eq!(game.public().ranking().len(), 5);
+    }
+
+    /// An opponent decides from a `rules::View`, which hides every other seat even when
+    /// the game knows them. The knowledge statements are enforced by the type the
+    /// decision rule is handed.
+    #[test]
+    fn an_opponent_cannot_reach_another_players_dice() {
+        let mut faces = Faces::cycling(&[2, 4, 6]);
+        let mut game = Game::start((0..3).collect(), Variants::default());
+        faces.deal(&mut game);
+        let view = game.view(1);
+        assert!(view.own_dice().is_some());
+        assert_eq!(view.dice_of(0), None);
+        assert_eq!(view.dice_of(2), None);
     }
 
     #[test]

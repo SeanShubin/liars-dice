@@ -48,6 +48,8 @@ Not started | In progress | Built
 - [Die Rendering Prototype](/implementation/die-rendering-prototype.md) — mesh, materials, glyphs, settings panel
 - [Minimal Desktop Game](/implementation/game-minimal.md) — probability model, AI decision rule, colour assignment, interaction
 - [Rules Engine](/implementation/rules-engine.md) — the dice limit, shield tokens, the affected player
+- [Game State](/implementation/game-state.md) — the whole game, one player's view, the operations
+- [Coordinator](/implementation/coordinator.md) — the client, and whatever drives it
 - [Relay and Lobby](/implementation/relay.md) — hosting, joining, dealing, fan-out, reconnection
 - [Dice Integrity](/implementation/integrity.md) — commitment, seed derivation, reveal
 - [Protocol](/implementation/protocol.md) — seats, the version line, shield events
