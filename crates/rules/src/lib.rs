@@ -1,7 +1,7 @@
 //! Game rules. Pure and deterministic. No input, no output, no rendering.
 //!
 //! Realizes /specification/game-rules.md. Rolling is the only non-determinism and it
-//! arrives through [`Rolls`], which is the single pluggable abstraction
+//! arrives through [`Deals`], which is the single pluggable abstraction
 //! /specification/architecture.md asks for.
 
 /// Variant settings, fixed for a whole match.
@@ -58,10 +58,16 @@ pub enum Outcome {
     },
 }
 
-/// The source of every roll. The only non-determinism in the model.
-pub trait Rolls {
-    /// A face value from one to six.
-    fn face(&mut self) -> u8;
+/// The source of every die. The only non-determinism in the model.
+///
+/// A whole seat at a time, and told which round and which seat it is dealing. A source
+/// that hands out one face at a time would have to produce them in whatever order `roll`
+/// happens to ask — a coupling nothing states and a refactor could break in silence. The
+/// integrity scheme keys its derivation on the round and the seat, so those are the two
+/// things it is given.
+pub trait Deals {
+    /// Every face dealt to one seat: the dice limit, whatever that seat's player holds.
+    fn seat(&mut self, round: u32, seat: usize) -> [u8; DICE_LIMIT as usize];
 }
 
 /// Why a call was rejected.
@@ -88,6 +94,7 @@ pub const DICE_LIMIT: u32 = 5;
 pub struct Match {
     counts: Vec<u32>,
     shields: Vec<u32>,
+    round: u32,
     rolled: Vec<Vec<u8>>,
     order: Vec<usize>,
     variants: Variants,
@@ -99,11 +106,12 @@ pub struct Match {
 impl Match {
     /// `order` is the turn order, which is chosen at random when the match starts and not
     /// reordered afterwards. Players are identified by their index into it.
-    pub fn start(order: Vec<usize>, variants: Variants, rolls: &mut impl Rolls) -> Self {
+    pub fn start(order: Vec<usize>, variants: Variants, deals: &mut impl Deals) -> Self {
         let players = order.len();
         let mut game = Self {
             counts: vec![DICE_LIMIT; players],
             shields: vec![0; players],
+            round: 0,
             rolled: vec![Vec::new(); players],
             current: order[0],
             order,
@@ -111,8 +119,14 @@ impl Match {
             history: Vec::new(),
             eliminated: Vec::new(),
         };
-        game.roll(rolls);
+        game.roll(deals);
         game
+    }
+
+    /// Which round the match is in, counting from zero. The dealer is keyed on this,
+    /// so it is part of the model rather than a detail of whoever is logging.
+    pub fn round(&self) -> u32 {
+        self.round
     }
 
     pub fn variants(&self) -> Variants {
@@ -277,7 +291,7 @@ impl Match {
 
     /// Apply a call. A raise passes the turn; liar and spot on end the round, resolve it,
     /// and roll again.
-    pub fn apply(&mut self, call: Call, rolls: &mut impl Rolls) -> Result<Outcome, Rejected> {
+    pub fn apply(&mut self, call: Call, deals: &mut impl Deals) -> Result<Outcome, Rejected> {
         self.check(call)?;
         match call {
             Call::Raise(claim) => {
@@ -301,7 +315,7 @@ impl Match {
                     previous.player
                 };
                 let pair = (self.current, previous.player);
-                Ok(self.resolve(pair, Some(lost), None, truth, rolls))
+                Ok(self.resolve(pair, Some(lost), None, truth, deals))
             }
             Call::SpotOn => {
                 let previous = *self.history.last().expect("checked");
@@ -309,9 +323,9 @@ impl Match {
                 let exact = truth == previous.claim.quantity;
                 let pair = (self.current, previous.player);
                 if exact {
-                    Ok(self.resolve(pair, None, Some(self.current), truth, rolls))
+                    Ok(self.resolve(pair, None, Some(self.current), truth, deals))
                 } else {
-                    Ok(self.resolve(pair, Some(self.current), None, truth, rolls))
+                    Ok(self.resolve(pair, Some(self.current), None, truth, deals))
                 }
             }
         }
@@ -325,7 +339,7 @@ impl Match {
         mut lost: Option<usize>,
         mut gained: Option<usize>,
         truth: u32,
-        rolls: &mut impl Rolls,
+        deals: &mut impl Deals,
     ) -> Outcome {
         let mut shield_gained = None;
         let mut shield_spent = None;
@@ -380,7 +394,8 @@ impl Match {
         let over = self.over();
         if !over {
             self.current = opens;
-            self.roll(rolls);
+            self.round += 1;
+            self.roll(deals);
         } else {
             self.rolled = vec![Vec::new(); self.counts.len()];
         }
@@ -401,9 +416,9 @@ impl Match {
     /// Deal the dice limit to every seat, regardless of how many dice its player holds.
     /// A relay can do this without knowing the rules, which it would otherwise have to
     /// replay every resolution to learn. A player uses the prefix; see `dice_of`.
-    fn roll(&mut self, rolls: &mut impl Rolls) {
+    fn roll(&mut self, deals: &mut impl Deals) {
         for player in 0..self.counts.len() {
-            self.rolled[player] = (0..DICE_LIMIT).map(|_| rolls.face()).collect();
+            self.rolled[player] = deals.seat(self.round, player).to_vec();
         }
     }
 }
@@ -426,11 +441,14 @@ mod tests {
         at: usize,
     }
 
-    impl Rolls for Scripted {
-        fn face(&mut self) -> u8 {
-            let face = self.faces[self.at % self.faces.len()];
-            self.at += 1;
-            face
+    impl Deals for Scripted {
+        fn seat(&mut self, _round: u32, _seat: usize) -> [u8; DICE_LIMIT as usize] {
+            let mut dealt = [0u8; DICE_LIMIT as usize];
+            for face in dealt.iter_mut() {
+                *face = self.faces[self.at % self.faces.len()];
+                self.at += 1;
+            }
+            dealt
         }
     }
 
@@ -445,12 +463,12 @@ mod tests {
     /// not about the twenty turns it would take to play a player down to their last die.
     /// A child module may reach the parent's private fields, so no production seam is
     /// opened to make this possible.
-    fn holding(game: &mut Match, counts: &[u32], shields: &[u32], rolls: &mut impl Rolls) {
+    fn holding(game: &mut Match, counts: &[u32], shields: &[u32], deals: &mut impl Deals) {
         assert_eq!(counts.len(), game.counts.len());
         assert_eq!(shields.len(), game.counts.len());
         game.counts = counts.to_vec();
         game.shields = shields.to_vec();
-        game.roll(rolls);
+        game.roll(deals);
     }
 
     #[test]
@@ -763,7 +781,7 @@ mod tests {
 
     /// Drive a round to a resolution in which the raiser is punished: the current player
     /// raises something false, the next player calls liar, and the raiser is affected.
-    fn false_claim_punished(game: &mut Match, rolls: &mut impl Rolls) -> Outcome {
+    fn false_claim_punished(game: &mut Match, deals: &mut impl Deals) -> Outcome {
         // Every die is a two in these tests, so no fives exist and any claim of fives is
         // false. One five is always within the dice in play.
         game.apply(
@@ -771,10 +789,10 @@ mod tests {
                 quantity: 1,
                 face: 5,
             }),
-            rolls,
+            deals,
         )
         .expect("a legal raise");
-        game.apply(Call::Liar, rolls).expect("a legal call")
+        game.apply(Call::Liar, deals).expect("a legal call")
     }
 
     #[test]

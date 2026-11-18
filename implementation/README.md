@@ -48,6 +48,7 @@ Not started | In progress | Built
 - [Die Rendering Prototype](/implementation/die-rendering-prototype.md) — mesh, materials, glyphs, settings panel
 - [Minimal Desktop Game](/implementation/game-minimal.md) — probability model, AI decision rule, colour assignment, interaction
 - [Rules Engine](/implementation/rules-engine.md) — the dice limit, shield tokens, the affected player
+- [Dice Integrity](/implementation/integrity.md) — commitment, seed derivation, reveal
 - [Protocol](/implementation/protocol.md) — seats, the version line, shield events
 - [Deployment](/implementation/deployment.md) — the GitHub pipeline, AWS wiring, Discord OAuth
 

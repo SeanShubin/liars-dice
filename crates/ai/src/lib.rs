@@ -144,13 +144,13 @@ pub fn choose(view: &View) -> Call {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rules::{Match, Rolls};
+    use rules::{Deals, Match};
 
     struct Fixed(u8);
 
-    impl Rolls for Fixed {
-        fn face(&mut self) -> u8 {
-            self.0
+    impl Deals for Fixed {
+        fn seat(&mut self, _round: u32, _seat: usize) -> [u8; 5] {
+            [self.0; 5]
         }
     }
 
@@ -159,11 +159,14 @@ mod tests {
         at: usize,
     }
 
-    impl Rolls for Cycling {
-        fn face(&mut self) -> u8 {
-            let face = self.faces[self.at % self.faces.len()];
-            self.at += 1;
-            face
+    impl Deals for Cycling {
+        fn seat(&mut self, _round: u32, _seat: usize) -> [u8; 5] {
+            let mut dealt = [0u8; 5];
+            for face in dealt.iter_mut() {
+                *face = self.faces[self.at % self.faces.len()];
+                self.at += 1;
+            }
+            dealt
         }
     }
 

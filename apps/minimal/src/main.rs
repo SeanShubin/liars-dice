@@ -12,9 +12,10 @@ use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 use std::io::Write;
 
 use ai::View;
+use integrity::{Secret, Seed};
 use protocol::{Account, Event, Moment, PROTOCOL_VERSION, Seat};
 use render_minimal::palette::{PALETTE, assign, ink};
-use rules::{Call, Claim, Entry, Match, Outcome, Rolls, Variants};
+use rules::{Call, Claim, DICE_LIMIT, Deals, Entry, Match, Outcome, Variants};
 
 const MAX_PLAYERS: usize = 10;
 /// Every die is drawn in a box this size, shown or not, so the dice line up in a grid.
@@ -85,9 +86,25 @@ impl Audit {
         }
     }
 
-    /// Every seat is dealt the dice limit, and the whole seat is recorded: what a player
-    /// holds is the prefix, which a replay derives from the counts it is already keeping.
-    fn record_deal(&mut self, game: &Match, players: usize) {
+    /// The seed of the round that just ended, so a reader can recompute every die of it
+    /// and check them against the deal lines above.
+    fn record_reveal(&mut self, dealer: &Dealer, round: u32) {
+        self.record(Event::Reveal {
+            seed: dealer.seed(round).to_hex(),
+        });
+    }
+
+    /// The commitment to the round, then the round. The commitment comes first because
+    /// every die in a round is fixed before any claim in that round, and its position in
+    /// the log is what says so.
+    fn record_deal(&mut self, game: &Match, dealer: &Dealer, players: usize) {
+        self.record(Event::Commit {
+            digest: integrity::commit(&dealer.seed(game.round())).to_hex(),
+        });
+        self.record_deal_lines(game, players);
+    }
+
+    fn record_deal_lines(&mut self, game: &Match, players: usize) {
         for player in 0..players {
             let dice = game.dealt_of(player).to_vec();
             if !dice.is_empty() {
@@ -102,7 +119,9 @@ impl Audit {
 
 /// The only non-determinism in the game, and it lives in the composition root.
 ///
-/// Rejection sampling rather than a modulo, so every face is equally likely.
+/// It no longer deals: the dice come from the integrity scheme, which commits to them
+/// before any claim and reveals them when the round resolves. What is left is the two
+/// things a match needs decided once — the turn order and the match secret.
 struct Dice {
     state: u64,
 }
@@ -122,15 +141,37 @@ impl Dice {
     }
 }
 
-impl Rolls for Dice {
-    fn face(&mut self) -> u8 {
-        let limit = u64::MAX - (u64::MAX % 6) - 1;
-        loop {
-            let draw = self.next();
-            if draw <= limit {
-                return (draw % 6) as u8 + 1;
-            }
+impl Dice {
+    /// A match secret, which every round's seed derives from.
+    fn secret(&mut self) -> Secret {
+        let mut bytes = [0u8; 32];
+        for chunk in bytes.chunks_mut(8) {
+            chunk.copy_from_slice(&self.next().to_be_bytes());
         }
+        Secret::from_bytes(bytes)
+    }
+}
+
+/// Deals a seat at a time from the match secret, as the relay will.
+///
+/// A desktop game has no relay, so it keeps the secret itself. The point of running the
+/// same path here is that the log of a desktop match verifies by the same procedure as a
+/// networked one, and the scheme is exercised constantly rather than only in production.
+struct Dealer {
+    secret: Secret,
+    match_id: String,
+}
+
+impl Dealer {
+    fn seed(&self, round: u32) -> Seed {
+        integrity::seed_for(&self.secret, &self.match_id, round)
+    }
+}
+
+impl Deals for Dealer {
+    fn seat(&mut self, round: u32, seat: usize) -> [u8; DICE_LIMIT as usize] {
+        let dealt = integrity::deal(&self.seed(round), seat as u8, DICE_LIMIT as usize);
+        dealt.try_into().expect("the dice limit of faces")
     }
 }
 
@@ -138,7 +179,7 @@ impl Rolls for Dice {
 struct Playing {
     game: Match,
     colours: Vec<usize>,
-    dice: Dice,
+    dealer: Dealer,
     /// The claim the human is dialling in. Always legal.
     pending: Claim,
     /// Dice as they were when the round ended, for the reveal.
@@ -217,6 +258,10 @@ fn start(colour: usize, opponents: usize) -> Playing {
     let seed = stamp();
     let at = Moment::from_unix_nanos(seed);
     let mut dice = Dice::new(seed);
+    let mut dealer = Dealer {
+        secret: dice.secret(),
+        match_id: at.file_stem(),
+    };
 
     // Turn order is chosen at random when the match starts.
     let mut order: Vec<usize> = (0..players).collect();
@@ -226,7 +271,7 @@ fn start(colour: usize, opponents: usize) -> Playing {
     }
 
     let variants = Variants::default();
-    let game = Match::start(order.clone(), variants, &mut dice);
+    let game = Match::start(order.clone(), variants, &mut dealer);
     let pending = first_legal(&game);
 
     let mut audit = Audit::open(std::path::Path::new(LOGS), at);
@@ -249,12 +294,12 @@ fn start(colour: usize, opponents: usize) -> Playing {
         name: "ones-wild",
         on: variants.ones_wild,
     });
-    audit.record_deal(&game, players);
+    audit.record_deal(&game, &dealer, players);
 
     Playing {
         game,
         colours,
-        dice,
+        dealer,
         pending,
         revealed: Vec::new(),
         round: Vec::new(),
@@ -767,7 +812,7 @@ fn apply(playing: &mut Playing, call: Call) -> Option<Screen> {
 
     let outcome = playing
         .game
-        .apply(call, &mut playing.dice)
+        .apply(call, &mut playing.dealer)
         .expect("only legal calls are offered");
 
     match outcome {
@@ -883,6 +928,9 @@ fn apply(playing: &mut Playing, call: Call) -> Option<Screen> {
             playing.round = round;
             playing.verdict = Some(said);
             if over {
+                playing
+                    .audit
+                    .record_reveal(&playing.dealer, playing.game.round());
                 playing.audit.record(Event::Winner {
                     seat: seat_of(*playing.game.ranking().first().expect("a survivor")),
                 });
@@ -891,9 +939,15 @@ fn apply(playing: &mut Playing, call: Call) -> Option<Screen> {
                 playing.audit.record(Event::NextTurn {
                     seat: seat_of(opens),
                 });
-                // A resolution rolls again, so the new round's dice are recorded here.
+                // A resolution rolls again. The round that just ended is revealed
+                // first, then the next round is committed to and dealt.
                 let players = playing.colours.len();
-                playing.audit.record_deal(&playing.game, players);
+                playing
+                    .audit
+                    .record_reveal(&playing.dealer, playing.game.round() - 1);
+                playing
+                    .audit
+                    .record_deal(&playing.game, &playing.dealer, players);
                 Some(Screen::Reveal)
             }
         }
@@ -1070,31 +1124,45 @@ fn over(ui: &mut egui::Ui, playing: &mut Playing) -> Option<Screen> {
 mod tests {
     use super::*;
 
-    /// Every face is equally likely, so no face is favoured by the rejection sampling.
+    /// Face fairness belongs to the integrity crate now, which does the dealing and
+    /// tests its own rejection sampling against a deliberately biased implementation.
+    /// What is left here is that the same seed decides the same match.
     #[test]
-    fn the_dice_are_fair() {
-        let mut dice = Dice::new(0x1234_5678_9abc_def0);
-        let mut counts = [0u32; 7];
-        for _ in 0..600_000 {
-            counts[dice.face() as usize] += 1;
-        }
-        assert_eq!(counts[0], 0, "a face below one was rolled");
-        for (face, count) in counts.iter().enumerate().skip(1) {
-            let share = *count as f64 / 600_000.0;
-            assert!(
-                (share - 1.0 / 6.0).abs() < 0.005,
-                "face {face} came up {share} of the time"
-            );
-        }
-    }
-
-    #[test]
-    fn a_seed_always_rolls_the_same_dice() {
+    fn a_seed_always_produces_the_same_match() {
         let mut first = Dice::new(99);
         let mut second = Dice::new(99);
-        let rolled: Vec<u8> = (0..200).map(|_| first.face()).collect();
-        let again: Vec<u8> = (0..200).map(|_| second.face()).collect();
-        assert_eq!(rolled, again);
+        let drawn: Vec<u64> = (0..200).map(|_| first.next()).collect();
+        let again: Vec<u64> = (0..200).map(|_| second.next()).collect();
+        assert_eq!(drawn, again, "the turn order would not be reproducible");
+        assert_eq!(
+            first.secret().0,
+            second.secret().0,
+            "the same seed must deal the same match"
+        );
+    }
+
+    /// The commitment is to the round that is about to be dealt, and the reveal lets a
+    /// reader recompute it. This is the property the whole scheme exists for.
+    #[test]
+    fn a_revealed_seed_recomputes_the_dice_it_was_committed_to() {
+        let mut dice = Dice::new(1234);
+        let mut dealer = Dealer {
+            secret: dice.secret(),
+            match_id: "1970-01-01T00-00-00-000".to_string(),
+        };
+        let digest = integrity::commit(&dealer.seed(0));
+        let dealt = dealer.seat(0, 2);
+        assert!(integrity::verify(&digest, &dealer.seed(0)));
+        assert_eq!(
+            integrity::deal(&dealer.seed(0), 2, DICE_LIMIT as usize),
+            dealt.to_vec(),
+            "the revealed seed must recompute what was dealt"
+        );
+        assert_ne!(
+            dealer.seat(1, 2),
+            dealt,
+            "a later round must not repeat the dice"
+        );
     }
 
     #[test]
@@ -1132,6 +1200,135 @@ mod tests {
                 lines,
                 vec!["join #0 You red local", "deal #0 1 2 3 4 5", "winner #0"]
             );
+        }
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// The property the integrity scheme exists for, end to end: play a match, write its
+    /// log, then verify it holding nothing but the file. Each round's revealed seed must
+    /// hash to the commitment published before any claim in that round, and must
+    /// recompute every face on every deal line.
+    #[test]
+    fn an_archived_match_verifies_from_the_log_alone() {
+        let directory = std::env::temp_dir().join("liars-dice-archive-test");
+        let _ = std::fs::remove_dir_all(&directory);
+
+        let at = Moment::from_unix_nanos(1_700_000_000_000_000_000);
+        let mut dice = Dice::new(20_261_118);
+        let mut dealer = Dealer {
+            secret: dice.secret(),
+            match_id: at.file_stem(),
+        };
+        let players = 3;
+        let order: Vec<usize> = (0..players).collect();
+        let mut game = Match::start(order, Variants::default(), &mut dealer);
+
+        let mut audit = Audit::open(&directory, at);
+        audit.record(Event::Version {
+            protocol: PROTOCOL_VERSION,
+        });
+        audit.record(Event::Started { at });
+        audit.record_deal(&game, &dealer, players);
+
+        let mut turn = 0;
+        while !game.over() && turn < 2_000 {
+            let call = if turn % 4 == 3 && game.previous_claim().is_some() {
+                Call::Liar
+            } else {
+                match game.legal_raises().first() {
+                    Some(&claim) => Call::Raise(claim),
+                    None => Call::Liar,
+                }
+            };
+            let before = game.round();
+            for seat in 0..players {
+                let _ = game.dice_of(seat);
+            }
+            let outcome = game.apply(call, &mut dealer).expect("a legal call");
+            if let Outcome::Resolved { over, .. } = outcome {
+                audit.record_reveal(&dealer, before);
+                if !over {
+                    audit.record_deal(&game, &dealer, players);
+                }
+            }
+            turn += 1;
+        }
+        assert!(game.over(), "the match should have ended");
+
+        let file = std::fs::read_dir(&directory)
+            .expect("the log directory was created")
+            .map(|entry| entry.unwrap().path())
+            .next()
+            .expect("one log file");
+        let text = std::fs::read_to_string(&file).expect("the log is readable");
+
+        // From here on, nothing but the text of the log.
+        struct Round {
+            digest: String,
+            seed: Option<String>,
+            deals: Vec<(u8, Vec<u8>)>,
+        }
+        let mut rounds: Vec<Round> = Vec::new();
+        for line in text.lines() {
+            let mut parts = line.split(' ');
+            match parts.next() {
+                Some("commit") => rounds.push(Round {
+                    digest: parts.next().expect("a digest").to_string(),
+                    seed: None,
+                    deals: Vec::new(),
+                }),
+                Some("deal") => {
+                    let seat: u8 = parts
+                        .next()
+                        .expect("a seat")
+                        .trim_start_matches('#')
+                        .parse()
+                        .expect("a seat number");
+                    let faces: Vec<u8> = parts.map(|face| face.parse().expect("a face")).collect();
+                    rounds
+                        .last_mut()
+                        .expect("a round")
+                        .deals
+                        .push((seat, faces));
+                }
+                Some("reveal") => {
+                    let seed = parts.next().expect("a seed").to_string();
+                    let open = rounds
+                        .iter_mut()
+                        .rev()
+                        .find(|round| round.seed.is_none())
+                        .expect("an unrevealed round");
+                    open.seed = Some(seed);
+                }
+                _ => {}
+            }
+        }
+
+        assert!(
+            rounds.len() > 1,
+            "the match should have taken more than one round"
+        );
+        for (number, round) in rounds.iter().enumerate() {
+            let seed = Seed::from_hex(round.seed.as_ref().expect("every round is revealed"))
+                .expect("the seed is hexadecimal");
+            let digest = integrity::Commitment::from_hex(&round.digest).expect("a digest");
+            assert!(
+                integrity::verify(&digest, &seed),
+                "round {number}: the revealed seed is not the one committed to"
+            );
+            assert_eq!(
+                round.deals.len(),
+                players,
+                "round {number}: a seat was not dealt"
+            );
+            for (seat, faces) in &round.deals {
+                assert_eq!(
+                    integrity::deal(&seed, *seat, faces.len()),
+                    *faces,
+                    "round {number} seat {seat}: the log disagrees with its own seed"
+                );
+            }
         }
 
         let _ = std::fs::remove_dir_all(&directory);

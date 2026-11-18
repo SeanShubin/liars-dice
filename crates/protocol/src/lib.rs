@@ -116,7 +116,7 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 ///
 /// A client cannot join a match or load a save whose version differs from its own, so no
 /// match spans two versions and no log holds two. The `version` line says which.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// A seat at a match.
 ///
@@ -187,6 +187,17 @@ pub enum Event {
     Variant {
         name: &'static str,
         on: bool,
+    },
+    /// The dealer's commitment to this round, published before any claim in it. The
+    /// digest of the round's seed, in lower case hexadecimal.
+    Commit {
+        digest: String,
+    },
+    /// The round's seed, published when the round resolves. Everything dealt in the
+    /// round derives from it, so a reader can recompute every die and check it against
+    /// the deal lines above.
+    Reveal {
+        seed: String,
     },
     /// Every seat is dealt the dice limit, whatever its player holds. The held dice are
     /// the prefix; the rest are not in play. One of these per seat per round.
@@ -325,6 +336,8 @@ impl fmt::Display for Event {
                     if *on { "on" } else { "off" }
                 )
             }
+            Event::Commit { digest } => write!(out, "commit {}", token(digest)),
+            Event::Reveal { seed } => write!(out, "reveal {}", token(seed)),
             Event::Deal { seat, dice } => write!(out, "deal {seat} {}", faces(dice)),
             Event::Claim {
                 seat,
@@ -519,7 +532,7 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                "version 1",
+                "version 2",
                 "started 2023-11-14T22:13:20.000Z",
                 "join #0 Alice red discord:450853396908343307",
                 "join #1 Bob blue ai",
@@ -710,6 +723,25 @@ mod tests {
             }
             .to_string(),
             "unlucky #0 3.70%"
+        );
+    }
+
+    /// The commitment comes before any claim in the round and the reveal after it
+    /// resolves. The format carries both as one token of hexadecimal.
+    #[test]
+    fn a_round_is_committed_to_and_then_revealed() {
+        let digest = "a".repeat(64);
+        let seed = "b".repeat(64);
+        assert_eq!(
+            Event::Commit {
+                digest: digest.clone()
+            }
+            .to_string(),
+            format!("commit {digest}")
+        );
+        assert_eq!(
+            Event::Reveal { seed: seed.clone() }.to_string(),
+            format!("reveal {seed}")
         );
     }
 
