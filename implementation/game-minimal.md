@@ -1,8 +1,9 @@
-# Minimal Game
+# Minimal Desktop Game
 
 ## Realizes
 /specification/game-minimal.md, in full.
-/specification/ai-opponents.md, in full.
+/specification/ai-players.md, in full.
+/specification/applications.md — the presentation statements, and the Desktop section.
 /specification/game-rules.md — the rules the match is played by.
 /specification/dice.md — values and identity.
 /specification/architecture.md — thin composition root, consolidated non-determinism, and
@@ -108,7 +109,7 @@ ships.
 
 ## The AI decision rule
 
-Realizes the AI statements, which say what an AI opponent knows and does not model. This is
+Realizes the AI statements, which say what an AI player knows and does not model. This is
 how it chooses, and it has no tuning knob.
 
 1. Enumerate every legal claim: quantities from the current one up to the dice in play,
@@ -135,7 +136,7 @@ allow one. Grouping rather than assuming that keeps the step correct if the rule
 two: with ones wild a claim on the one face would carry a different chance, and such a claim
 is illegal, but nothing in the implementation leans on that.
 
-An AI opponent is handed only its own dice and the public history. It cannot reach another
+An AI player is handed only its own dice and the public history. It cannot reach another
 player's dice, so the knowledge statements are enforced by the function signature rather
 than by discipline.
 
@@ -200,8 +201,8 @@ unreachable, not rejected after the fact.
 - **`crates/render-minimal`** — draws. Knows nothing of rules or probabilities; it is given
   what to show.
 - **`apps/minimal`** — composition root. Wires the above and owns the input.
-- **No dependency on** `protocol` or `integrity`. The minimal game has no network, and the
-  Out of Scope statements are enforced by the dependency graph.
+- **No dependency on** `protocol` or `integrity`. A desktop game has no network, and the
+  statements that say so are enforced by the dependency graph.
 
 ## Decisions
 
@@ -264,9 +265,9 @@ one is a product, the other a harness for the networked game.
 - A probability never rises as the quantity rises.
 - With ones wild, an unseen die is twice as likely to count toward a face that is not the
   one face.
-- An AI opponent never produces an illegal claim, over an exhaustive sweep of small states.
-- An AI opponent never names the one face when ones are wild.
-- A match played entirely by AI opponents terminates, and ends with exactly one player not
+- An AI player never produces an illegal claim, over an exhaustive sweep of small states.
+- An AI player never names the one face when ones are wild.
+- A match played entirely by AI players terminates, and ends with exactly one player not
   eliminated.
 - A match never has more than ten players.
 - No sequence of adjuster presses reaches an illegal claim, over an exhaustive sweep of
@@ -279,10 +280,9 @@ one is a product, the other a harness for the networked game.
 Deferred: how the touch build is delivered — a browser on a phone or a native mobile
 build. That is P9, still open for every application but this one's input model.
 
-/specification/game-rules.md says a match has a configurable time limit for taking a turn,
-and the minimal game does not implement one. A local single player game with a turn clock
-would be hostile, so the limit is presumed configurable to off — but no statement says the
-limit can be switched off, so this is a gap rather than a decision.
+Closed: the minimal game implemented no turn clock, which was a gap against a statement
+that a match has a configurable time limit. That statement is gone — nothing in the game
+is timed — so the absence is now correct rather than a gap.
 
 ## Status
 Built, apart from the presentation statements a renderer would carry. `crates/odds`,

@@ -1,7 +1,7 @@
 # Game Rules
 
 ## Design Principles
-- A player does not lose a die unless they make a false claim or fail to claim in time
+- A player does not lose a die unless they make a false claim
 - A true claim is always available to the current player
 - Every variant preserves the design principles
 
@@ -12,13 +12,21 @@
 ## Game Mechanics
 - A match requires two or more players to start
 - A match has at most ten players
-- each player starts with 5 dice
-- each player takes a turn until the round ends
-- new rounds continue until the match ends
+- Each player starts with five dice
+- A player holds at most five dice
+- Each player takes a turn until the round ends
+- New rounds continue until the match ends
 
 ## Match
 - Rounds continue until only one player remains
-- The last remaining player wins the match
+- A match in which only one player remains is complete
+- The last remaining player wins a complete match
+- A match has the same players from its first round to its last
+- A match cannot continue while any of its players is absent
+- A player that loses their connection is absent
+- A player who reconnects resumes their seat
+- The host can see which players are absent
+- The event log of a match is retained whether or not the match is completed
 
 ## Elimination
 - A player with no dice is eliminated
@@ -26,14 +34,14 @@
 - A player lasts longer than another player if the other is eliminated first
 
 ## Ranking
-- A match produces a ranking of its players
+- A complete match produces a ranking of its players
 - A player beats another player by lasting longer in the match
 
 ## Round
 - All players roll their dice
 - Players know their own dice
 - Players don't know their opponent's dice
-- Players take turns until a turn triggers round end
+- Players take turns until the round ends
 - Players reveal their dice
 - The round is resolved
 - Players start a new round
@@ -56,15 +64,11 @@
 - Players are not reordered during a match
 - The previous player is the player before the current player in turn order
 
-## Time Limit
-- A match has a configurable time limit for taking a turn
-- The time limit applies to turns only
-- A player that fails to claim within the time limit loses all of their dice
-
 ## Exchanges
 - A round ends with an exchange between the player who ends it and the previous player
-- The player whose dice count changed makes the first claim of the next round
-- If that player is eliminated, the other player in the exchange makes the first claim
+- Exactly one player in an exchange is affected by its resolution
+- The affected player makes the first claim of the next round
+- If the affected player is eliminated, the other player in the exchange makes the first claim
 
 ## Raise
 - Declare that at least a certain amount of a certain face value is present among all players
@@ -76,13 +80,21 @@
 ## Spot On
 - Ends the round
 - Declare that the previous claim is exact rather than at least
-- If player is correct, gains one die, otherwise loses 1 die
+- A correct claim below the dice limit gains one die
+- A correct claim at the dice limit gains a shield token
+- An incorrect claim loses one die
 
 ## Liar
 - Ends the round
 - Declare that the previous claim is false
 - If player is correct, previous player loses 1 die
 - If player is incorrect, loses 1 die
+
+## Shield Tokens
+- A shield token prevents its holder's next die loss
+- A shield token is spent when it prevents a die loss
+- A player may hold any number of shield tokens
+- Every player can see how many shield tokens each player holds
 
 ## Variants
 - Each variant is a single configurable boolean

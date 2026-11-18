@@ -1,4 +1,4 @@
-# Pretty Game
+# Pretty Presentation
 
 ## Scope
 

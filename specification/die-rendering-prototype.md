@@ -20,6 +20,7 @@
 - The prototype has no network
 - The prototype keeps no event log
 - The prototype does not animate a roll
+- No other application depends on the die rendering prototype
 
 ## Acceptance
 - Every dice appearance in the specification can be seen in the prototype
