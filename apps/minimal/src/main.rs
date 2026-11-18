@@ -12,11 +12,10 @@ use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 use std::io::Write;
 
 use ai::View;
-use protocol::{Event, Moment};
+use protocol::{Account, Event, Moment, PROTOCOL_VERSION, Seat};
 use render_minimal::palette::{PALETTE, assign, ink};
 use rules::{Call, Claim, Entry, Match, Outcome, Rolls, Variants};
 
-const DICE_EACH: u32 = 5;
 const MAX_PLAYERS: usize = 10;
 /// Every die is drawn in a box this size, shown or not, so the dice line up in a grid.
 const DIE: f32 = 32.0;
@@ -86,13 +85,14 @@ impl Audit {
         }
     }
 
-    /// All players roll their dice, so all of them are recorded.
-    fn record_roll(&mut self, game: &Match, players: usize) {
+    /// Every seat is dealt the dice limit, and the whole seat is recorded: what a player
+    /// holds is the prefix, which a replay derives from the counts it is already keeping.
+    fn record_deal(&mut self, game: &Match, players: usize) {
         for player in 0..players {
-            let dice = game.dice_of(player).to_vec();
+            let dice = game.dealt_of(player).to_vec();
             if !dice.is_empty() {
-                self.record(Event::Roll {
-                    player: name_of(player),
+                self.record(Event::Deal {
+                    seat: seat_of(player),
                     dice,
                 });
             }
@@ -226,25 +226,30 @@ fn start(colour: usize, opponents: usize) -> Playing {
     }
 
     let variants = Variants::default();
-    let game = Match::start(order.clone(), DICE_EACH, variants, &mut dice);
+    let game = Match::start(order.clone(), variants, &mut dice);
     let pending = first_legal(&game);
 
     let mut audit = Audit::open(std::path::Path::new(LOGS), at);
+    audit.record(Event::Version {
+        protocol: PROTOCOL_VERSION,
+    });
     audit.record(Event::Started { at });
     for player in 0..players {
-        audit.record(Event::AddPlayer {
+        audit.record(Event::Join {
+            seat: seat_of(player),
             name: name_of(player),
             colour: PALETTE[colours[player]].name.to_string(),
+            account: account_of(player),
         });
     }
     audit.record(Event::PlayerOrder(
-        order.iter().map(|&player| name_of(player)).collect(),
+        order.iter().map(|&player| seat_of(player)).collect(),
     ));
     audit.record(Event::Variant {
         name: "ones-wild",
         on: variants.ones_wild,
     });
-    audit.record_roll(&game, players);
+    audit.record_deal(&game, players);
 
     Playing {
         game,
@@ -263,6 +268,22 @@ fn first_legal(game: &Match) -> Claim {
         quantity: 1,
         face: 1,
     })
+}
+
+/// A player's seat. The minimal desktop game seats players in index order, so the two
+/// are the same number; the conversion lives here so no other place assumes it.
+fn seat_of(player: usize) -> Seat {
+    Seat(player as u8)
+}
+
+/// Who is behind a seat. A desktop game has no authentication, so the human has no
+/// account id and every opponent is an AI player.
+fn account_of(player: usize) -> Account {
+    if player == HUMAN {
+        Account::Local
+    } else {
+        Account::Ai
+    }
 }
 
 fn name_of(player: usize) -> String {
@@ -694,15 +715,15 @@ fn luck(player: usize, chance_true: f64, came_true: bool) -> Option<Event> {
     if chance_of_outcome > LUCK {
         return None;
     }
-    let player = name_of(player);
+    let seat = seat_of(player);
     Some(if came_true {
         Event::Lucky {
-            player,
+            seat,
             odds: chance_of_outcome,
         }
     } else {
         Event::Unlucky {
-            player,
+            seat,
             odds: chance_of_outcome,
         }
     })
@@ -753,7 +774,7 @@ fn apply(playing: &mut Playing, call: Call) -> Option<Screen> {
         Outcome::Continues => {
             if let Call::Raise(claim) = call {
                 playing.audit.record(Event::Claim {
-                    player: name_of(actor),
+                    seat: seat_of(actor),
                     quantity: claim.quantity,
                     face: claim.face,
                     odds,
@@ -763,8 +784,11 @@ fn apply(playing: &mut Playing, call: Call) -> Option<Screen> {
         }
         Outcome::Resolved {
             opens,
+            affected: _,
             lost,
             gained,
+            shield_gained,
+            shield_spent,
             eliminated,
             truth,
             over,
@@ -782,8 +806,17 @@ fn apply(playing: &mut Playing, call: Call) -> Option<Screen> {
             if let Some(player) = gained {
                 said.push_str(&format!(" {} gained a die.", name_of(player)));
             }
+            if let Some(player) = shield_gained {
+                said.push_str(&format!(" {} gained a shield token.", name_of(player)));
+            }
             if let Some(player) = lost {
                 said.push_str(&format!(" {} lost a die.", name_of(player)));
+            }
+            if let Some(player) = shield_spent {
+                said.push_str(&format!(
+                    " {} spent a shield token instead of losing a die.",
+                    name_of(player)
+                ));
             }
             if let Some(player) = eliminated {
                 said.push_str(&format!(" {} is out.", name_of(player)));
@@ -791,28 +824,38 @@ fn apply(playing: &mut Playing, call: Call) -> Option<Screen> {
 
             playing.audit.record(match call {
                 Call::Liar => Event::Liar {
-                    player: name_of(actor),
+                    seat: seat_of(actor),
                     odds,
                 },
                 Call::SpotOn => Event::SpotOn {
-                    player: name_of(actor),
+                    seat: seat_of(actor),
                     odds,
                 },
                 Call::Raise(_) => unreachable!("a raise does not resolve a round"),
             });
             if let Some(player) = gained {
                 playing.audit.record(Event::GainDie {
-                    player: name_of(player),
+                    seat: seat_of(player),
+                });
+            }
+            if let Some(player) = shield_gained {
+                playing.audit.record(Event::GainShield {
+                    seat: seat_of(player),
                 });
             }
             if let Some(player) = lost {
                 playing.audit.record(Event::LoseDie {
-                    player: name_of(player),
+                    seat: seat_of(player),
+                });
+            }
+            if let Some(player) = shield_spent {
+                playing.audit.record(Event::SpendShield {
+                    seat: seat_of(player),
                 });
             }
             if let Some(player) = eliminated {
                 playing.audit.record(Event::Eliminate {
-                    player: name_of(player),
+                    seat: seat_of(player),
                 });
             }
 
@@ -842,16 +885,16 @@ fn apply(playing: &mut Playing, call: Call) -> Option<Screen> {
             playing.verdict = Some(said);
             if over {
                 playing.audit.record(Event::Winner {
-                    player: name_of(*playing.game.ranking().first().expect("a survivor")),
+                    seat: seat_of(*playing.game.ranking().first().expect("a survivor")),
                 });
                 Some(Screen::Over)
             } else {
                 playing.audit.record(Event::NextTurn {
-                    player: name_of(opens),
+                    seat: seat_of(opens),
                 });
                 // A resolution rolls again, so the new round's dice are recorded here.
                 let players = playing.colours.len();
-                playing.audit.record_roll(&playing.game, players);
+                playing.audit.record_deal(&playing.game, players);
                 Some(Screen::Reveal)
             }
         }
@@ -1063,17 +1106,17 @@ mod tests {
         // A millisecond apart, so the two matches do not share a file name.
         for nanos in [1_000_000u64, 2_000_000] {
             let mut audit = Audit::open(&directory, Moment::from_unix_nanos(nanos));
-            audit.record(Event::AddPlayer {
+            audit.record(Event::Join {
+                seat: Seat(0),
                 name: "You".into(),
                 colour: "red".into(),
+                account: Account::Local,
             });
-            audit.record(Event::Roll {
-                player: "You".into(),
+            audit.record(Event::Deal {
+                seat: Seat(0),
                 dice: vec![1, 2, 3, 4, 5],
             });
-            audit.record(Event::Winner {
-                player: "You".into(),
-            });
+            audit.record(Event::Winner { seat: Seat(0) });
         }
 
         let mut files: Vec<_> = std::fs::read_dir(&directory)
@@ -1088,7 +1131,7 @@ mod tests {
             let lines: Vec<&str> = text.lines().collect();
             assert_eq!(
                 lines,
-                vec!["add-player You red", "roll You 1 2 3 4 5", "winner You"]
+                vec!["join #0 You red local", "deal #0 1 2 3 4 5", "winner #0"]
             );
         }
 
@@ -1100,8 +1143,6 @@ mod tests {
     fn a_log_that_cannot_be_written_is_survivable() {
         let impossible = std::path::Path::new("logs").join(" ");
         let mut audit = Audit::open(&impossible, Moment::from_unix_nanos(0));
-        audit.record(Event::Eliminate {
-            player: "Alice".into(),
-        });
+        audit.record(Event::Eliminate { seat: Seat(1) });
     }
 }

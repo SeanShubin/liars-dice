@@ -97,7 +97,7 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     } else {
         shifted - 146_096
     } / 146_097;
-    let day_of_era = (shifted - era * 146_097) as i64;
+    let day_of_era = shifted - era * 146_097;
     let year_of_era =
         (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
     let year = year_of_era + era * 400;
@@ -112,31 +112,86 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (year + i64::from(month <= 2), month, day)
 }
 
+/// The version of the log format and of the messages that carry it.
+///
+/// A client cannot join a match or load a save whose version differs from its own, so no
+/// match spans two versions and no log holds two. The `version` line says which.
+pub const PROTOCOL_VERSION: u32 = 1;
+
+/// A seat at a match.
+///
+/// Events refer to players by seat and never by name. A name is mutable — a Discord
+/// display name can change between two matches — and a log keyed on one would disagree
+/// with itself over time.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct Seat(pub u8);
+
+impl fmt::Display for Seat {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(out, "#{}", self.0)
+    }
+}
+
+/// Who is behind a seat.
+///
+/// Three cases because there are three kinds of player. A desktop game has no
+/// authentication, so the human at the keyboard has no account id; an AI player has no
+/// account at all; a web player has a Discord snowflake. An optional id would make the
+/// first two indistinguishable.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Account {
+    /// A web player, authenticated with Discord. The snowflake, not the display name.
+    Discord(String),
+    /// An AI player. Desktop games only.
+    Ai,
+    /// The human at the keyboard of a desktop game.
+    Local,
+}
+
+impl fmt::Display for Account {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Account::Discord(id) => write!(out, "discord:{}", token(id)),
+            Account::Ai => write!(out, "ai"),
+            Account::Local => write!(out, "local"),
+        }
+    }
+}
+
 /// One thing that happened, in the order it happened.
 ///
 /// Not `Eq`, because the odds on a claim are a float. That is a fair warning: a float does
 /// not belong in anything compared for equality, and these are only ever written out.
 #[derive(Clone, PartialEq, Debug)]
 pub enum Event {
+    /// The protocol version this log is written in. The first line of every log.
+    Version {
+        protocol: u32,
+    },
     /// When the match started, in UTC.
     Started {
         at: Moment,
     },
-    /// A player joins, with the colour that identifies them.
-    AddPlayer {
+    /// A player takes a seat, with the name and colour that identify them to a reader and
+    /// the account behind them. The only event carrying a name: a name is recorded once,
+    /// when a player joins, and no later line repeats it.
+    Join {
+        seat: Seat,
         name: String,
         colour: String,
+        account: Account,
     },
     /// Turn order, which is chosen at random when the match starts.
-    PlayerOrder(Vec<String>),
+    PlayerOrder(Vec<Seat>),
     /// One per variant, so a replay knows which rules were in force.
     Variant {
         name: &'static str,
         on: bool,
     },
-    /// All players roll. One of these per player per round.
-    Roll {
-        player: String,
+    /// Every seat is dealt the dice limit, whatever its player holds. The held dice are
+    /// the prefix; the rest are not in play. One of these per seat per round.
+    Deal {
+        seat: Seat,
         dice: Vec<u8>,
     },
     /// A raise: at least this quantity of this face.
@@ -144,52 +199,60 @@ pub enum Event {
     /// `odds` is the percentage chance the claim is true, from what the claimer could see
     /// when they made it.
     Claim {
-        player: String,
+        seat: Seat,
         quantity: u32,
         face: u8,
         odds: f64,
     },
     /// A claim that the previous claim is false. `odds` is the chance that is so.
     Liar {
-        player: String,
+        seat: Seat,
         odds: f64,
     },
     /// A claim that the previous claim is exact. `odds` is the chance that is so.
     SpotOn {
-        player: String,
+        seat: Seat,
         odds: f64,
     },
     LoseDie {
-        player: String,
+        seat: Seat,
     },
     GainDie {
-        player: String,
+        seat: Seat,
+    },
+    /// A correct spot on at the dice limit gains a token rather than a sixth die.
+    GainShield {
+        seat: Seat,
+    },
+    /// A token prevented a die loss and was spent doing so.
+    SpendShield {
+        seat: Seat,
     },
     Eliminate {
-        player: String,
+        seat: Seat,
     },
     /// A claim that came true against the odds. `odds` is how likely what happened was.
     ///
     /// Derivable from the claim's own odds and the resolution, and written anyway: a run
     /// of these is how a reader sees that a player has been riding their luck.
     Lucky {
-        player: String,
+        seat: Seat,
         odds: f64,
     },
     /// A claim that failed when it should have held. `odds` is how likely what happened
     /// was.
     Unlucky {
-        player: String,
+        seat: Seat,
         odds: f64,
     },
     /// Who makes the first claim of the next round.
     NextTurn {
-        player: String,
+        seat: Seat,
     },
     /// The last player remaining. Derivable, and written anyway: it is how a reader knows
     /// the log is a whole match rather than a truncated one.
     Winner {
-        player: String,
+        seat: Seat,
     },
 }
 
@@ -216,10 +279,10 @@ fn token(text: &str) -> String {
     }
 }
 
-fn tokens(values: &[String]) -> String {
+fn seats(values: &[Seat]) -> String {
     values
         .iter()
-        .map(|value| token(value))
+        .map(|seat| seat.to_string())
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -240,11 +303,20 @@ fn faces(values: &[u8]) -> String {
 impl fmt::Display for Event {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Event::Version { protocol } => write!(out, "version {protocol}"),
             Event::Started { at } => write!(out, "started {at}"),
-            Event::AddPlayer { name, colour } => {
-                write!(out, "add-player {} {}", token(name), token(colour))
-            }
-            Event::PlayerOrder(order) => write!(out, "player-order {}", tokens(order)),
+            Event::Join {
+                seat,
+                name,
+                colour,
+                account,
+            } => write!(
+                out,
+                "join {seat} {} {} {account}",
+                token(name),
+                token(colour)
+            ),
+            Event::PlayerOrder(order) => write!(out, "player-order {}", seats(order)),
             Event::Variant { name, on } => {
                 write!(
                     out,
@@ -253,37 +325,26 @@ impl fmt::Display for Event {
                     if *on { "on" } else { "off" }
                 )
             }
-            Event::Roll { player, dice } => {
-                write!(out, "roll {} {}", token(player), faces(dice))
-            }
+            Event::Deal { seat, dice } => write!(out, "deal {seat} {}", faces(dice)),
             Event::Claim {
-                player,
+                seat,
                 quantity,
                 face,
                 odds,
-            } => write!(
-                out,
-                "claim {} {quantity} {face} {}",
-                token(player),
-                percent(*odds)
-            ),
-            Event::Liar { player, odds } => {
-                write!(out, "claim {} liar {}", token(player), percent(*odds))
+            } => write!(out, "claim {seat} {quantity} {face} {}", percent(*odds)),
+            Event::Liar { seat, odds } => write!(out, "claim {seat} liar {}", percent(*odds)),
+            Event::SpotOn { seat, odds } => {
+                write!(out, "claim {seat} spot-on {}", percent(*odds))
             }
-            Event::SpotOn { player, odds } => {
-                write!(out, "claim {} spot-on {}", token(player), percent(*odds))
-            }
-            Event::Lucky { player, odds } => {
-                write!(out, "lucky {} {}", token(player), percent(*odds))
-            }
-            Event::Unlucky { player, odds } => {
-                write!(out, "unlucky {} {}", token(player), percent(*odds))
-            }
-            Event::LoseDie { player } => write!(out, "lose-die {}", token(player)),
-            Event::GainDie { player } => write!(out, "gain-die {}", token(player)),
-            Event::Eliminate { player } => write!(out, "eliminate {}", token(player)),
-            Event::NextTurn { player } => write!(out, "next-turn {}", token(player)),
-            Event::Winner { player } => write!(out, "winner {}", token(player)),
+            Event::Lucky { seat, odds } => write!(out, "lucky {seat} {}", percent(*odds)),
+            Event::Unlucky { seat, odds } => write!(out, "unlucky {seat} {}", percent(*odds)),
+            Event::LoseDie { seat } => write!(out, "lose-die {seat}"),
+            Event::GainDie { seat } => write!(out, "gain-die {seat}"),
+            Event::GainShield { seat } => write!(out, "gain-shield {seat}"),
+            Event::SpendShield { seat } => write!(out, "spend-shield {seat}"),
+            Event::Eliminate { seat } => write!(out, "eliminate {seat}"),
+            Event::NextTurn { seat } => write!(out, "next-turn {seat}"),
+            Event::Winner { seat } => write!(out, "winner {seat}"),
         }
     }
 }
@@ -294,6 +355,42 @@ mod tests {
 
     fn named(name: &str) -> String {
         name.to_string()
+    }
+
+    /// One of every variant that refers to a player, so a test over "all of them" cannot
+    /// silently miss one added later.
+    fn every_player_event() -> Vec<Event> {
+        let seat = Seat(3);
+        vec![
+            Event::Join {
+                seat,
+                name: named("Alice"),
+                colour: named("red"),
+                account: Account::Discord(named("450853396908343307")),
+            },
+            Event::PlayerOrder(vec![Seat(2), Seat(0), seat]),
+            Event::Deal {
+                seat,
+                dice: vec![1, 3, 2, 6, 6],
+            },
+            Event::Claim {
+                seat,
+                quantity: 3,
+                face: 6,
+                odds: 38.207,
+            },
+            Event::Liar { seat, odds: 61.793 },
+            Event::SpotOn { seat, odds: 0.004 },
+            Event::LoseDie { seat },
+            Event::GainDie { seat },
+            Event::GainShield { seat },
+            Event::SpendShield { seat },
+            Event::Eliminate { seat },
+            Event::Lucky { seat, odds: 1.2 },
+            Event::Unlucky { seat, odds: 3.704 },
+            Event::NextTurn { seat },
+            Event::Winner { seat },
+        ]
     }
 
     #[test]
@@ -378,108 +475,187 @@ mod tests {
     #[test]
     fn a_whole_round_reads_as_the_log_it_should() {
         let events = vec![
+            Event::Version {
+                protocol: PROTOCOL_VERSION,
+            },
             Event::Started {
                 at: Moment::from_unix_nanos(1_700_000_000_000_000_000),
             },
-            Event::AddPlayer {
+            Event::Join {
+                seat: Seat(0),
                 name: named("Alice"),
                 colour: named("red"),
+                account: Account::Discord(named("450853396908343307")),
             },
-            Event::PlayerOrder(vec![named("Alice"), named("Bob")]),
+            Event::Join {
+                seat: Seat(1),
+                name: named("Bob"),
+                colour: named("blue"),
+                account: Account::Ai,
+            },
+            Event::PlayerOrder(vec![Seat(0), Seat(1)]),
             Event::Variant {
                 name: "ones-wild",
                 on: false,
             },
-            Event::Roll {
-                player: named("Alice"),
+            Event::Deal {
+                seat: Seat(0),
                 dice: vec![1, 3, 2, 6, 6],
             },
             Event::Claim {
-                player: named("Alice"),
+                seat: Seat(0),
                 quantity: 3,
                 face: 6,
                 odds: 38.207,
             },
             Event::Liar {
-                player: named("Bob"),
+                seat: Seat(1),
                 odds: 61.793,
             },
-            Event::LoseDie {
-                player: named("Bob"),
-            },
-            Event::NextTurn {
-                player: named("Bob"),
-            },
+            Event::LoseDie { seat: Seat(1) },
+            Event::NextTurn { seat: Seat(1) },
         ];
         let lines: Vec<String> = events.iter().map(Event::to_string).collect();
         assert_eq!(
             lines,
             vec![
+                "version 1",
                 "started 2023-11-14T22:13:20.000Z",
-                "add-player Alice red",
-                "player-order Alice Bob",
+                "join #0 Alice red discord:450853396908343307",
+                "join #1 Bob blue ai",
+                "player-order #0 #1",
                 "variant ones-wild off",
-                "roll Alice 1 3 2 6 6",
-                "claim Alice 3 6 38.21%",
-                "claim Bob liar 61.79%",
-                "lose-die Bob",
-                "next-turn Bob",
+                "deal #0 1 3 2 6 6",
+                "claim #0 3 6 38.21%",
+                "claim #1 liar 61.79%",
+                "lose-die #1",
+                "next-turn #1",
             ]
         );
+    }
+
+    /// The test for `No value derives from a player's name`. A name belongs on a join
+    /// line and nowhere else, so every argument of every other event must be a seat, a
+    /// number, a percentage, or one of the two fixed claim keywords. A name field added
+    /// to any variant later fails here.
+    #[test]
+    fn a_name_appears_on_a_join_line_and_on_no_other_line() {
+        fn is_structural(argument: &str) -> bool {
+            argument.starts_with('#')
+                || argument == "liar"
+                || argument == "spot-on"
+                || argument.trim_end_matches('%').parse::<f64>().is_ok()
+        }
+        for event in every_player_event() {
+            let line = event.to_string();
+            if line.starts_with("join ") {
+                continue;
+            }
+            for argument in line.split(' ').skip(1) {
+                assert!(
+                    is_structural(argument),
+                    "{line} carries {argument}, which is neither a seat nor a number"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_event_that_refers_to_a_player_names_a_seat() {
+        for event in every_player_event() {
+            let line = event.to_string();
+            assert!(
+                line.contains('#'),
+                "{line} refers to a player without naming a seat"
+            );
+        }
+    }
+
+    #[test]
+    fn a_seat_is_distinguishable_from_a_quantity_or_a_face() {
+        assert_eq!(Seat(3).to_string(), "#3");
+        assert_eq!(
+            Event::Claim {
+                seat: Seat(3),
+                quantity: 1,
+                face: 3,
+                odds: 50.0,
+            }
+            .to_string(),
+            "claim #3 1 3 50.00%",
+            "the seat must not read as one more bare number"
+        );
+    }
+
+    #[test]
+    fn the_three_kinds_of_account_read_differently() {
+        let rendered: Vec<String> = [
+            Account::Discord(named("450853396908343307")),
+            Account::Ai,
+            Account::Local,
+        ]
+        .iter()
+        .map(Account::to_string)
+        .collect();
+        assert_eq!(rendered, vec!["discord:450853396908343307", "ai", "local"]);
     }
 
     #[test]
     fn the_three_kinds_of_claim_share_one_command() {
         assert_eq!(
             Event::Claim {
-                player: named("Carol"),
+                seat: Seat(2),
                 quantity: 5,
                 face: 2,
                 odds: 7.0,
             }
             .to_string(),
-            "claim Carol 5 2 7.00%"
+            "claim #2 5 2 7.00%"
         );
         assert_eq!(
             Event::Liar {
-                player: named("Dave"),
+                seat: Seat(4),
                 odds: 93.0
             }
             .to_string(),
-            "claim Dave liar 93.00%"
+            "claim #4 liar 93.00%"
         );
         assert_eq!(
             Event::SpotOn {
-                player: named("Dave"),
+                seat: Seat(4),
                 odds: 0.004
             }
             .to_string(),
-            "claim Dave spot-on 0.00%"
+            "claim #4 spot-on 0.00%"
+        );
+    }
+
+    #[test]
+    fn a_shield_token_gained_and_spent_each_read_as_their_own_line() {
+        assert_eq!(
+            Event::GainShield { seat: Seat(1) }.to_string(),
+            "gain-shield #1"
+        );
+        assert_eq!(
+            Event::SpendShield { seat: Seat(1) }.to_string(),
+            "spend-shield #1"
         );
     }
 
     #[test]
     fn every_event_is_one_line_of_whitespace_separated_tokens() {
-        let events = vec![
-            Event::AddPlayer {
-                name: named("light blue player"),
-                colour: named("light blue"),
-            },
-            Event::PlayerOrder(vec![named("dark green"), named("Bob")]),
-            Event::Roll {
-                player: named("a b"),
-                dice: vec![1],
-            },
-            Event::GainDie {
-                player: named("Dave"),
-            },
-            Event::Eliminate {
-                player: named("Dave"),
-            },
-            Event::Winner {
-                player: named("Alice"),
-            },
-        ];
+        let mut events = every_player_event();
+        events.push(Event::Version { protocol: 1 });
+        events.push(Event::Variant {
+            name: "ones-wild",
+            on: true,
+        });
+        events.push(Event::Join {
+            seat: Seat(0),
+            name: named("light blue player"),
+            colour: named("light blue"),
+            account: Account::Local,
+        });
         for event in events {
             let line = event.to_string();
             assert!(!line.contains('\n'), "{line} spans more than one line");
@@ -496,19 +672,24 @@ mod tests {
     #[test]
     fn a_name_that_would_break_a_line_is_collapsed_instead() {
         assert_eq!(
-            Event::AddPlayer {
+            Event::Join {
+                seat: Seat(0),
                 name: named("Mary Anne"),
                 colour: named("light blue"),
+                account: Account::Local,
             }
             .to_string(),
-            "add-player Mary-Anne light-blue"
+            "join #0 Mary-Anne light-blue local"
         );
         assert_eq!(
-            Event::NextTurn {
-                player: named("   ")
+            Event::Join {
+                seat: Seat(1),
+                name: named("   "),
+                colour: named("red"),
+                account: Account::Ai,
             }
             .to_string(),
-            "next-turn -"
+            "join #1 - red ai"
         );
     }
 
@@ -516,31 +697,31 @@ mod tests {
     fn luck_reads_as_the_chance_of_what_happened() {
         assert_eq!(
             Event::Lucky {
-                player: named("Dave"),
+                seat: Seat(4),
                 odds: 1.2
             }
             .to_string(),
-            "lucky Dave 1.20%"
+            "lucky #4 1.20%"
         );
         assert_eq!(
             Event::Unlucky {
-                player: named("Alice"),
+                seat: Seat(0),
                 odds: 3.704
             }
             .to_string(),
-            "unlucky Alice 3.70%"
+            "unlucky #0 3.70%"
         );
     }
 
     #[test]
-    fn a_roll_records_every_die_in_order() {
+    fn a_deal_records_the_whole_seat_in_order() {
         assert_eq!(
-            Event::Roll {
-                player: named("Dave"),
+            Event::Deal {
+                seat: Seat(4),
                 dice: vec![4, 5, 5, 1, 2]
             }
             .to_string(),
-            "roll Dave 4 5 5 1 2"
+            "deal #4 4 5 5 1 2"
         );
     }
 }

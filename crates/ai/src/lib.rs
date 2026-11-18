@@ -303,7 +303,7 @@ mod tests {
             faces: vec![1, 3, 5, 2, 6, 4],
             at: 0,
         };
-        let mut game = Match::start(vec![0, 1, 2], 4, Variants { ones_wild: true }, &mut rolls);
+        let mut game = Match::start(vec![0, 1, 2], Variants { ones_wild: true }, &mut rolls);
         for _ in 0..200 {
             if game.over() {
                 break;
@@ -330,7 +330,7 @@ mod tests {
     fn an_opponent_never_produces_an_illegal_call() {
         for seed in 1..=6u8 {
             let mut rolls = Fixed(seed);
-            let mut game = Match::start(vec![0, 1, 2, 3], 3, Variants::default(), &mut rolls);
+            let mut game = Match::start(vec![0, 1, 2, 3], Variants::default(), &mut rolls);
             for _ in 0..500 {
                 if game.over() {
                     break;
@@ -357,7 +357,7 @@ mod tests {
             faces: vec![3, 1, 6, 2, 5, 4, 2, 6, 1, 3],
             at: 0,
         };
-        let mut game = Match::start(vec![0, 1, 2, 3, 4], 3, Variants::default(), &mut rolls);
+        let mut game = Match::start(vec![0, 1, 2, 3, 4], Variants::default(), &mut rolls);
         let mut turns = 0;
         while !game.over() && turns < 20_000 {
             let player = game.current();

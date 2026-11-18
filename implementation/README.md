@@ -46,21 +46,23 @@ Not started | In progress | Built
 ## Documents
 
 - [Die Rendering Prototype](/implementation/die-rendering-prototype.md) — mesh, materials, glyphs, settings panel
-- [Minimal Game](/implementation/game-minimal.md) — probability model, AI decision rule, colour assignment, interaction
+- [Minimal Desktop Game](/implementation/game-minimal.md) — probability model, AI decision rule, colour assignment, interaction
+- [Rules Engine](/implementation/rules-engine.md) — the dice limit, shield tokens, the affected player
+- [Protocol](/implementation/protocol.md) — seats, the version line, shield events
+- [Deployment](/implementation/deployment.md) — the GitHub pipeline, AWS wiring, Discord OAuth
 
-## Suggested Order
+## Order
 
-The specification implies a build order, but has not stated one. A candidate sequence,
-for the user to confirm or replace:
+Confirmed by the user, answering A5 and A6:
 
-1. The logical model and rules engine, pure and deterministic, no rendering, no network.
-2. The non-determinism abstraction and the simulated environment that drives the above.
-3. The minimal application, driving the model locally.
-4. The event log and its storage format.
-5. The relay and the client/server protocol.
-6. The die rendering prototype.
-7. The pretty application.
-8. The data browser.
+1. The minimal web game, with everything it needs — the dice limit and shield tokens in
+   the rules engine, the event log, the relay, Discord authentication and saves. Because
+   there is no solo play on the web, none of these can be deferred behind the others.
+2. The minimal desktop game, which is the same presentation over the existing local
+   composition root. In the first release alongside the above.
+3. The pretty web game, once the minimal one works and W12 is answered.
+4. The data browser.
 
-This ordering is an AI suggestion, not specification. See
-[OPEN-QUESTIONS.md](/OPEN-QUESTIONS.md).
+The pretty desktop game falls out of the pretty presentation at no extra cost. The die
+rendering prototype is a throwaway spike that nothing else depends on, so it is not in
+this sequence.
