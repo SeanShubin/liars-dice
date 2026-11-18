@@ -1,0 +1,118 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  One-time bootstrap for liars-dice CI/CD. Creates the IAM role that GitHub
+  Actions assumes via OIDC, so no AWS access key exists in the repository, the
+  workflow, or on a developer's machine.
+
+  The GitHub OIDC identity provider is NOT created here. It is an account-wide
+  singleton and already exists in this account, put there by the bootstrap for
+  the sibling `vote` project. Creating a second one fails with
+  EntityAlreadyExists, so this template references it instead.
+
+Parameters:
+  GitHubRepo:
+    Type: String
+    Default: SeanShubin/liars-dice
+    Description: >-
+      owner/repo whose workflows may assume the role. The trust condition is
+      scoped to this repository alone, which is why vote's role cannot be
+      reused: its condition names repo:SeanShubin/vote:*.
+  RoleName:
+    Type: String
+    Default: liars-dice-github-deploy
+    Description: Name of the role the deploy workflow assumes.
+  ResourcePrefix:
+    Type: String
+    Default: liars-dice
+    Description: >-
+      Prefix the role is allowed to manage for the resource types scoped below.
+      Keeps this role away from the vote and arcade stacks in the same account.
+
+Resources:
+  DeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref RoleName
+      Description: !Sub "GitHub Actions deploy role for ${GitHubRepo}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub "arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubRepo}:*"
+      # Broad AWS-managed permissions on the services the deploy touches, as
+      # `vote` does. Scope down once the stack has settled and the actual set of
+      # calls is known from CloudTrail rather than guessed at.
+      #
+      # At the IAM quota of 10 managed policies per role. CloudWatchFullAccess
+      # is the legacy v1 policy covering cloudwatch:*, logs:* and sns:* in one,
+      # which is what keeps the count at 10 rather than 12.
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSCloudFormationFullAccess
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/CloudFrontFullAccess
+        - arn:aws:iam::aws:policy/AWSCertificateManagerFullAccess
+        - arn:aws:iam::aws:policy/AmazonRoute53FullAccess
+        - arn:aws:iam::aws:policy/AWSLambda_FullAccess
+        - arn:aws:iam::aws:policy/AmazonAPIGatewayAdministrator
+        - arn:aws:iam::aws:policy/IAMFullAccess
+        - arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
+        - arn:aws:iam::aws:policy/CloudWatchFullAccess
+      Policies:
+        # Inline policies do not count toward the managed-policy quota.
+        - PolicyName: PassRoleProjectScope
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Required when CloudFormation provisions a Lambda execution role
+              # and has to attach it. Scoped to project-prefixed roles.
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !Sub "arn:aws:iam::${AWS::AccountId}:role/${ResourcePrefix}-*"
+        - PolicyName: SsmParameterProjectScope
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # The Discord client id, client secret and redirect uri, and the
+              # administrator account id, all live under /liars-dice/. The
+              # deploy manages the parameters; the Lambda reads them at runtime
+              # through its own execution role.
+              - Effect: Allow
+                Action:
+                  - ssm:PutParameter
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:DeleteParameter
+                  - ssm:DescribeParameters
+                  - ssm:AddTagsToResource
+                Resource: !Sub "arn:aws:ssm:*:${AWS::AccountId}:parameter/${ResourcePrefix}/*"
+        - PolicyName: SecretsManagerProjectScope
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:CreateSecret
+                  - secretsmanager:UpdateSecret
+                  - secretsmanager:DeleteSecret
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:TagResource
+                  - secretsmanager:RestoreSecret
+                Resource: !Sub "arn:aws:secretsmanager:*:${AWS::AccountId}:secret:${ResourcePrefix}-*"
+              # GetRandomPassword has no resource-level scoping; AWS requires "*".
+              # CloudFormation calls it when materializing GenerateSecretString.
+              - Effect: Allow
+                Action: secretsmanager:GetRandomPassword
+                Resource: "*"
+
+Outputs:
+  DeployRoleArn:
+    Description: Set this as the GitHub Actions repository variable or secret.
+    Value: !GetAtt DeployRole.Arn
