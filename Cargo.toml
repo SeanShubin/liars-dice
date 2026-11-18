@@ -8,6 +8,7 @@ members = [
     "crates/model",
     "crates/protocol",
     "crates/integrity",
+    "crates/relay",
     "crates/render",
     "crates/render-minimal",
     "crates/render-pretty",

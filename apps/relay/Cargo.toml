@@ -1,5 +1,5 @@
 [package]
-name = "relay"
+name = "relay-service"
 edition.workspace = true
 version.workspace = true
 publish.workspace = true

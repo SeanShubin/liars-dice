@@ -116,7 +116,7 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 ///
 /// A client cannot join a match or load a save whose version differs from its own, so no
 /// match spans two versions and no log holds two. The `version` line says which.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// A seat at a match.
 ///
@@ -171,6 +171,28 @@ pub enum Event {
     /// When the match started, in UTC.
     Started {
         at: Moment,
+    },
+    /// A player created the match and may start it, bar from it, and save it.
+    Host {
+        seat: Seat,
+    },
+    /// The host barred a seat from joining. A barred player is not shown the match.
+    Bar {
+        seat: Seat,
+    },
+    /// The host lifted a bar.
+    Lift {
+        seat: Seat,
+    },
+    /// The host started the match. Nobody may join after this.
+    Start,
+    /// A seat has seen the round end and is ready for the reveal.
+    ///
+    /// The relay reveals a round's seed once every connected seat has said this. It is a
+    /// count of messages, not a judgement about the round, which is how the relay times
+    /// the reveal without knowing any game rule.
+    RoundOver {
+        seat: Seat,
     },
     /// A player takes a seat, with the name and colour that identify them to a reader and
     /// the account behind them. The only event carrying a name: a name is recorded once,
@@ -327,6 +349,11 @@ impl fmt::Display for Event {
                 token(name),
                 token(colour)
             ),
+            Event::Host { seat } => write!(out, "host {seat}"),
+            Event::Bar { seat } => write!(out, "bar {seat}"),
+            Event::Lift { seat } => write!(out, "lift {seat}"),
+            Event::Start => write!(out, "start"),
+            Event::RoundOver { seat } => write!(out, "round-over {seat}"),
             Event::PlayerOrder(order) => write!(out, "player-order {}", seats(order)),
             Event::Variant { name, on } => {
                 write!(
@@ -375,6 +402,10 @@ mod tests {
     fn every_player_event() -> Vec<Event> {
         let seat = Seat(3);
         vec![
+            Event::Host { seat },
+            Event::Bar { seat },
+            Event::Lift { seat },
+            Event::RoundOver { seat },
             Event::Join {
                 seat,
                 name: named("Alice"),
@@ -532,7 +563,7 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                "version 2",
+                "version 3",
                 "started 2023-11-14T22:13:20.000Z",
                 "join #0 Alice red discord:450853396908343307",
                 "join #1 Bob blue ai",
