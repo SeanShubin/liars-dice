@@ -102,13 +102,19 @@ impl Connections for GatewayConnections {
             .collect()
     }
 
-    /// A connection is in exactly one place, so attaching leaves anywhere else.
+    /// Puts this connection on this seat and clears both ways out of it.
     ///
-    /// Two writes, matching what the in-memory implementation does in one line. The
-    /// alternative is to let a socket hold two seats, which no client can produce and
-    /// every reader of the table would then have to allow for.
+    /// The socket leaves wherever else it was, and whoever else held this seat leaves it.
+    /// The second eviction is the one that matters: the relay sends a seat's deal to
+    /// every connection attached to that seat, so two rows on one seat is one player
+    /// reading another's dice.
     fn attach(&mut self, match_id: &MatchId, connection: ConnectionId, seat: Seat, role: Role) {
         self.detach(&connection);
+        for held in self.of(match_id) {
+            if held.seat == seat && held.connection != connection {
+                self.detach(&held.connection);
+            }
+        }
         let role = match role {
             Role::Player => "player",
         };

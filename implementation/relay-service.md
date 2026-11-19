@@ -354,7 +354,13 @@ place that decides who is sitting where.
 
 ## Open Items
 
-**Hosting races, and the conditional write does not save it.** `host` names a match
+**Fixed.** The position is the version now, and a match is named by
+`HMAC(secret, account, nonce)` rather than by a count — see `The position is the version`
+and `What a match is called` in `relay.md`. Hosting reads nothing, so the 38 ms scan is off
+that path; the lobby's own scan remains, below. What follows is kept as the record of what
+a deployment found that a single process could not.
+
+**Hosting raced, and the conditional write did not save it.** `host` names a match
 `match-{n}` where `n` is the number of matches the log holds, then appends through `write`,
 which retries a `Taken` position by moving to the next one. That is right for appending to
 a match you are already in: losing a race means your event goes after the winner's. It is
@@ -363,12 +369,8 @@ both see `n`, and both pick `match-n`; the loser's `Version` is refused at posit
 then *appended at position 1 of the winner's match*. Two hosts, two accounts, one log,
 nobody refused, and both told they created it.
 
-In one process this cannot happen, because `receive` is sequential — which is why the
-library's tests do not see it and why it took a deployment to find. The fix is in
-`crates/relay` and is small: `host` must claim position 0 or concede the id, retrying on
-the *match number* rather than the position. It needs a statement about what a match id is,
-and it is more urgent than any client, because it is a correctness bug rather than a
-missing feature.
+In one process this could not happen, because `receive` is sequential — which is why the
+library's tests did not see it and why it took a deployment to find.
 
 **Nothing asks for the lobby.** `Relay::open_matches` exists and no `Message` reaches it,
 so a client on a socket cannot list open matches — the in-process harness calls the method

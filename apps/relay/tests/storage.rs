@@ -26,7 +26,7 @@ use aws_sdk_dynamodb::types::{
 };
 use integrity::Secret;
 use protocol::{Account, Event, Seat};
-use relay::{ConnectionId, Connections, Log, MatchId, Message, Relay, Role, Taken};
+use relay::{ConnectionId, Connections, Log, MatchId, Message, Outcome, Relay, Role, Taken};
 use relay_service::connections::{BY_CONNECTION, CONNECTION};
 use relay_service::{DynamoLog, GatewayConnections, Meter, codec};
 use tokio::runtime::Runtime;
@@ -388,6 +388,7 @@ fn host_message(at: usize) -> Message {
         name: format!("Player {at}"),
         colour: ["red", "blue", "green", "white"][at].to_string(),
         version: protocol::PROTOCOL_VERSION,
+        nonce: format!("nonce-{at}"),
     }
 }
 
@@ -447,6 +448,105 @@ fn two_hosts_at_once_create_two_matches() {
     }
 }
 
+/// `A repeated request to host creates no second match`, with both sends at once.
+///
+/// The interesting version of a resend: the client gave up waiting and sent again while
+/// the first was still in flight. Two invocations derive the same name because the name
+/// is a function of the request, one wins the claim on position zero, and the loser finds
+/// the match is its own and answers with it.
+#[test]
+#[ignore = "needs DynamoDB Local; the gate runs it with --include-ignored"]
+fn the_same_request_sent_twice_at_once_creates_one_match() {
+    let (runtime, client) = arrange();
+    let log_table = log_table(&runtime, &client);
+    let connection_table = connection_table(&runtime, &client);
+
+    let answers: Vec<Outcome> = std::thread::scope(|scope| {
+        let threads: Vec<_> = (0..2)
+            .map(|at| {
+                let client = client.clone();
+                let log_table = log_table.clone();
+                let connection_table = connection_table.clone();
+                let handle = runtime.handle().clone();
+                scope.spawn(move || {
+                    let mut relay = relay_over(&client, &log_table, &connection_table, handle);
+                    // The same account and the same nonce: one request, sent twice.
+                    relay.receive(&ConnectionId(format!("socket-{at}")), host_message(0))
+                })
+            })
+            .collect();
+        threads
+            .into_iter()
+            .map(|thread| thread.join().expect("a host"))
+            .collect()
+    });
+
+    for answer in &answers {
+        assert_eq!(answer.refused, None, "a resend is not an error");
+    }
+    assert_eq!(
+        answers[0].created, answers[1].created,
+        "one request must name one match however often it is sent"
+    );
+
+    let log = DynamoLog::new(
+        client.clone(),
+        &log_table,
+        runtime.handle().clone(),
+        Meter::new(),
+    );
+    let match_id = answers[0].created.clone().expect("a match");
+    assert_eq!(log.matches(), vec![match_id.clone()]);
+    assert_eq!(
+        log.read(&match_id).len(),
+        3,
+        "the resend must not append a second version, join and host"
+    );
+
+    // And one socket holds the seat, not both. This is the assertion that matters: the
+    // relay sends a seat's deal to every connection on that seat.
+    let connections = GatewayConnections::new(client, &connection_table, runtime.handle().clone());
+    let held = connections.of(&match_id);
+    assert_eq!(
+        held.len(),
+        1,
+        "two sockets on one seat is one player reading another's dice: {held:?}"
+    );
+}
+
+/// A seat is held by one connection, and taking it evicts whoever had it.
+#[test]
+#[ignore = "needs DynamoDB Local; the gate runs it with --include-ignored"]
+fn taking_a_seat_evicts_whoever_was_on_it() {
+    let (runtime, client) = arrange();
+    let table = connection_table(&runtime, &client);
+    let mut connections = GatewayConnections::new(client, &table, runtime.handle().clone());
+    let match_id = MatchId("match-0".into());
+
+    connections.attach(
+        &match_id,
+        ConnectionId("first".into()),
+        Seat(1),
+        Role::Player,
+    );
+    connections.attach(
+        &match_id,
+        ConnectionId("second".into()),
+        Seat(1),
+        Role::Player,
+    );
+
+    assert_eq!(
+        connections.of(&match_id),
+        vec![relay::Connected {
+            connection: ConnectionId("second".into()),
+            seat: Seat(1),
+            role: Role::Player
+        }],
+        "the seat must be held by one socket"
+    );
+}
+
 /// `Two players never share a seat`, and the colour guard holds under a race too.
 ///
 /// Worse than the hosting race when it goes wrong: the hosting race leaves a match that
@@ -484,6 +584,7 @@ fn two_joins_at_once_take_two_seats() {
                     name,
                     colour,
                     version,
+                    ..
                 } = host_message(at)
                 else {
                     unreachable!("host_message makes a host message")

@@ -94,6 +94,15 @@ impl Commitment {
     }
 }
 
+fn hex_of(bytes: &[u8]) -> String {
+    let mut text = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        text.push(char::from_digit((byte >> 4) as u32, 16).expect("a nibble"));
+        text.push(char::from_digit((byte & 0x0f) as u32, 16).expect("a nibble"));
+    }
+    text
+}
+
 fn hex(bytes: &[u8; 32]) -> String {
     let mut text = String::with_capacity(64);
     for byte in bytes {
@@ -133,6 +142,32 @@ pub fn seed_for(secret: &Secret, match_id: &str, round: u32) -> Seed {
     message.push(0);
     message.extend_from_slice(&round.to_be_bytes());
     Seed(mac(&secret.0, &message))
+}
+
+/// The name of a match, derived from who asked for it and which request it was.
+///
+/// Not a counter. A count is a function of global history, so reading one to name a match
+/// means reading the whole log table, and resending a request that was never answered
+/// makes a second match. This is a function of the intent instead: the same account and
+/// the same nonce name the same match, every time, so a resend is recognisable rather
+/// than duplicative.
+///
+/// The nonce need not be secret or unpredictable, only distinct per request. Guessing a
+/// match id reveals nothing, because every seed is [`seed_for`] under a secret the client
+/// does not have.
+///
+/// Sixteen bytes, which is as collision-resistant as anything this will ever hold, and
+/// short enough to paste into a terminal.
+pub fn name_for(secret: &Secret, account: &str, nonce: &str) -> String {
+    // Tagged and NUL-separated, so this message space and `seed_for`'s cannot overlap and
+    // no pair of (account, nonce) can be rearranged into another.
+    let mut message = Vec::new();
+    message.extend_from_slice(b"match");
+    message.push(0);
+    message.extend_from_slice(account.as_bytes());
+    message.push(0);
+    message.extend_from_slice(nonce.as_bytes());
+    hex_of(&mac(&secret.0, &message)[..16])
 }
 
 /// What is published before any claim in the round.
@@ -216,6 +251,35 @@ mod tests {
     /// `assert!` rather than `assert_eq!` throughout: `Secret` implements no `Debug`, so
     /// a failing comparison cannot print it. That is the point of the type, and a test is
     /// not a reason to weaken it.
+    /// The same request names the same match; a different one names a different match.
+    #[test]
+    fn a_name_is_a_function_of_who_asked_and_which_request_it_was() {
+        let secret = Secret::from_bytes([7; 32]);
+        let name = name_for(&secret, "discord:1", "n");
+        assert_eq!(name, name_for(&secret, "discord:1", "n"), "not idempotent");
+        assert_eq!(name.len(), 32, "sixteen bytes of hexadecimal");
+        assert!(name.chars().all(|c| c.is_ascii_hexdigit()));
+
+        assert_ne!(name, name_for(&secret, "discord:2", "n"), "another account");
+        assert_ne!(name, name_for(&secret, "discord:1", "m"), "another request");
+        assert_ne!(
+            name,
+            name_for(&Secret::from_bytes([8; 32]), "discord:1", "n"),
+            "another secret"
+        );
+    }
+
+    /// The separator is what stops one pair being rearranged into another.
+    #[test]
+    fn the_account_and_the_nonce_cannot_be_run_together() {
+        let secret = Secret::from_bytes([7; 32]);
+        assert_ne!(
+            name_for(&secret, "ab", "c"),
+            name_for(&secret, "a", "bc"),
+            "the boundary between the account and the nonce must be unambiguous"
+        );
+    }
+
     #[test]
     fn a_secret_reads_back_from_its_hexadecimal() {
         let secret = Secret::from_bytes([7; 32]);

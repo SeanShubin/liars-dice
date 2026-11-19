@@ -113,6 +113,10 @@ impl Table {
                         name,
                         colour,
                         version: PROTOCOL_VERSION,
+                        // Fixed, not generated: the harness's whole value is that a
+                        // match replays exactly, and a random nonce would give the
+                        // same script a different match id every run.
+                        nonce: "table".to_string(),
                     },
                 ),
                 Some(id) => relay.receive(

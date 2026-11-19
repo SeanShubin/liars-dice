@@ -96,6 +96,7 @@ pub fn every_message() -> Vec<Message> {
             name: awkward_name(),
             colour: "dark red".to_string(),
             version: protocol::PROTOCOL_VERSION,
+            nonce: "a nonce with a space".to_string(),
         },
         Message::Join {
             match_id: match_id.clone(),
@@ -160,6 +161,7 @@ pub fn every_answer() -> Vec<Answer> {
         Answer::Refused(Refused::NotInThisMatch),
         Answer::Refused(Refused::SeatIsAbsent),
         Answer::Refused(Refused::NotYourSeat),
+        Answer::Refused(Refused::MatchIdTaken),
     ];
     answers.extend(every_event().into_iter().map(Answer::Event));
     answers

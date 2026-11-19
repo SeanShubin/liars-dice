@@ -147,7 +147,7 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
 ///
 /// A client cannot join a match or load a save whose version differs from its own, so no
 /// match spans two versions and no log holds two. The `version` line says which.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// A seat at a match.
 ///
@@ -318,6 +318,34 @@ pub enum Event {
     Winner {
         seat: Seat,
     },
+}
+
+/// An account as text, losslessly: `discord:<snowflake>`, `ai`, or `local`.
+///
+/// Not `Display`, which renders for the archive's line format and passes the id through
+/// [`token`]. This is the canonical form — the one a match id is derived from and the one
+/// a frame on the socket carries — so it must round-trip exactly. Here rather than in
+/// `wire` because the format is `protocol`'s business and more than one crate needs it:
+/// `relay` derives a match id from it and cannot depend on `wire`.
+pub fn account_text(account: &Account) -> String {
+    match account {
+        Account::Discord(id) => format!("discord:{id}"),
+        Account::Ai => "ai".to_string(),
+        Account::Local => "local".to_string(),
+    }
+}
+
+/// The inverse of [`account_text`]. `None` if the text names no account.
+pub fn account_from_text(text: &str) -> Option<Account> {
+    match text {
+        "ai" => Some(Account::Ai),
+        "local" => Some(Account::Local),
+        // Split once, so a colon inside an id cannot change who the account is.
+        other => match other.split_once(':') {
+            Some(("discord", id)) => Some(Account::Discord(id.to_string())),
+            _ => None,
+        },
+    }
 }
 
 /// Collapses anything that would split a line into a single token.
@@ -498,6 +526,23 @@ mod tests {
         }
     }
 
+    /// The canonical form round-trips, including the cases `Display` would flatten.
+    #[test]
+    fn an_account_reads_back_from_its_canonical_text() {
+        for account in [
+            Account::Discord("450853396908343307".to_string()),
+            // A colon in the id, which a split on every colon would mangle.
+            Account::Discord("a:b".to_string()),
+            Account::Ai,
+            Account::Local,
+        ] {
+            let text = account_text(&account);
+            assert_eq!(account_from_text(&text), Some(account), "{text}");
+        }
+        assert_eq!(account_from_text("steam:7"), None);
+        assert_eq!(account_from_text(""), None);
+    }
+
     #[test]
     fn the_epoch_is_zero_in_both_directions() {
         assert_eq!(Moment::from_unix_nanos(0).to_unix_nanos(), 0);
@@ -622,7 +667,8 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                "version 3",
+                // Not the literal, so bumping the version is not a line to edit here.
+                &format!("version {PROTOCOL_VERSION}"),
                 "started 2023-11-14T22:13:20.000Z",
                 "join #0 Alice red discord:450853396908343307",
                 "join #1 Bob blue ai",

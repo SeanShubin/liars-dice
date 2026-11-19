@@ -33,6 +33,7 @@ fn host<L: Log, C: Connections>(relay: &mut Relay<L, C>, who: &ConnectionId) -> 
             name: "Alice".to_string(),
             colour: "red".to_string(),
             version: PROTOCOL_VERSION,
+            nonce: "alice-hosts".to_string(),
         },
     );
     assert_eq!(outcome.refused, None);
@@ -427,6 +428,94 @@ fn a_seat_cannot_claim_as_another_seat() {
     );
 }
 
+/// `A repeated request to host creates no second match`.
+///
+/// The id is a function of the request, so the resend derives the same name, finds it
+/// taken, finds the match is its own, and is answered with it. Nothing is written twice.
+#[test]
+fn hosting_the_same_request_twice_creates_one_match() {
+    let mut relay = Relay::new(
+        MemoryLog::new(),
+        MemoryConnections::new(),
+        Secret::from_bytes(MEDDLED_SECRET),
+    );
+    let request = Message::Host {
+        account: meddled_host(),
+        name: "Host".to_string(),
+        colour: "red".to_string(),
+        version: PROTOCOL_VERSION,
+        nonce: HOST_NONCE.to_string(),
+    };
+
+    let first = relay.receive(&ConnectionId("socket-a".to_string()), request.clone());
+    // A different socket, because the usual reason to resend is that the answer never
+    // arrived — which often means the connection it would have arrived on is gone.
+    let again = relay.receive(&ConnectionId("socket-b".to_string()), request);
+
+    assert_eq!(again.refused, None, "a resend is not an error");
+    assert_eq!(first.created, again.created, "two names for one match");
+    let match_id = first.created.expect("a match");
+    assert_eq!(relay.log().matches(), vec![match_id.clone()], "one match");
+    assert_eq!(
+        relay.log().read(&match_id).len(),
+        3,
+        "the resend must not append a second version, join and host"
+    );
+    // The resend's socket is the one now holding the seat, which is the point of
+    // answering it rather than ignoring it.
+    assert_eq!(
+        relay.connections().of(&match_id),
+        vec![relay::Connected {
+            connection: ConnectionId("socket-b".to_string()),
+            seat: Seat(0),
+            role: relay::Role::Player
+        }]
+    );
+}
+
+/// A different request from the same account is a different match.
+#[test]
+fn hosting_twice_on_purpose_creates_two_matches() {
+    let mut relay = Relay::new(
+        MemoryLog::new(),
+        MemoryConnections::new(),
+        Secret::from_bytes(MEDDLED_SECRET),
+    );
+    let request = |nonce: &str| Message::Host {
+        account: meddled_host(),
+        name: "Host".to_string(),
+        colour: "red".to_string(),
+        version: PROTOCOL_VERSION,
+        nonce: nonce.to_string(),
+    };
+    let one = relay.receive(&ConnectionId("socket-a".to_string()), request("one"));
+    let two = relay.receive(&ConnectionId("socket-a".to_string()), request("two"));
+    assert_ne!(one.created, two.created);
+    assert_eq!(relay.log().matches().len(), 2);
+}
+
+/// The secret these tests host under, so the match id is computable in advance.
+const MEDDLED_SECRET: [u8; 32] = [3; 32];
+const HOST_NONCE: &str = "host-once";
+
+fn meddled_host() -> Account {
+    Account::Discord("account-host".to_string())
+}
+
+/// The match `seat_a_host` will create.
+///
+/// Derived rather than written down, because the id is now a function of the secret, the
+/// account and the nonce. A test that guessed it would interfere with a match nobody
+/// creates and would pass while proving nothing — which is what happened to the
+/// exhaustive test below the moment ids stopped being `match-0`.
+fn meddled_match() -> MatchId {
+    MatchId(integrity::name_for(
+        &Secret::from_bytes(MEDDLED_SECRET),
+        &protocol::account_text(&meddled_host()),
+        HOST_NONCE,
+    ))
+}
+
 /// A log that lets somebody else in once, between a decision and the commit of it.
 ///
 /// A thread race can only *probably* collide, so it can pass by luck and prove nothing.
@@ -474,6 +563,108 @@ impl Log for Meddling {
     }
 }
 
+impl Meddling {
+    /// Whether the interference actually fired.
+    ///
+    /// A test that asserts an invariant after an interference that never happened is
+    /// green and empty. This is how each of them says it was really interfered with.
+    fn spent(&self) -> bool {
+        self.interference.is_none()
+    }
+}
+
+/// Interference at every point a message could be interrupted, not one chosen point.
+///
+/// Behind the `Log` seam the places a schedule can diverge are finite and countable: one
+/// per append. So the right test is not a representative interleaving but all of them,
+/// which is what makes this certainty rather than a sample.
+#[test]
+fn a_join_survives_interference_at_every_append() {
+    // More appends than any message makes, so the last iterations interfere after the
+    // join has already committed and the invariant still has to hold.
+    for after in 0..6 {
+        let match_id = meddled_match();
+        let interloper = Event::Join {
+            seat: Seat(1),
+            name: "Interloper".to_string(),
+            colour: "blue".to_string(),
+            account: Account::Discord("account-x".to_string()),
+        };
+        let mut relay = Relay::new(
+            Meddling::interfering_after(after, &match_id, vec![interloper]),
+            MemoryConnections::new(),
+            Secret::from_bytes(MEDDLED_SECRET),
+        );
+
+        // The host's message is itself subject to the interference. At `after == 0` the
+        // interloper creates this exact match first, and since the id is a function of
+        // the request there is no second name to fall back to — so hosting is refused,
+        // which is the only iteration where that is the right answer.
+        let outcome = relay.receive(
+            &ConnectionId("host".to_string()),
+            Message::Host {
+                account: meddled_host(),
+                name: "Host".to_string(),
+                colour: "red".to_string(),
+                version: PROTOCOL_VERSION,
+                nonce: HOST_NONCE.to_string(),
+            },
+        );
+        if after == 0 {
+            assert_eq!(
+                outcome.refused,
+                Some(Refused::MatchIdTaken),
+                "a name taken by another account must not be appended to"
+            );
+            continue;
+        }
+        let Some(created) = outcome.created else {
+            panic!("interfering after {after} stopped a match being created");
+        };
+        assert_eq!(created, match_id, "the interference named the wrong match");
+
+        let outcome = relay.receive(
+            &ConnectionId("late".to_string()),
+            Message::Join {
+                match_id: created.clone(),
+                account: Account::Discord("account-late".to_string()),
+                name: "Late".to_string(),
+                colour: "green".to_string(),
+                version: PROTOCOL_VERSION,
+            },
+        );
+        assert_eq!(
+            outcome.refused, None,
+            "interfering after {after} refused a join that should have been re-decided"
+        );
+
+        // The invariant, whatever the schedule was: no two joins share a seat, and the
+        // seats are the ones a match actually dealt out.
+        let seats: Vec<u8> = relay
+            .log()
+            .read(&created)
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::Join { seat, .. } => Some(seat.0),
+                _ => None,
+            })
+            .collect();
+        let mut sorted = seats.clone();
+        sorted.sort_unstable();
+        let mut distinct = sorted.clone();
+        distinct.dedup();
+        assert_eq!(
+            sorted, distinct,
+            "interfering after {after} put two players on one seat: {seats:?}"
+        );
+        assert_eq!(
+            sorted,
+            (0..sorted.len() as u8).collect::<Vec<u8>>(),
+            "interfering after {after} left a gap in the seats: {seats:?}"
+        );
+    }
+}
+
 /// `Two players never share a seat`, with the race made certain rather than likely.
 ///
 /// The seat came from counting the seats in the log, so a join decided against a log that
@@ -481,7 +672,7 @@ impl Log for Meddling {
 /// refused append moved to the next position and the two joins landed on one seat.
 #[test]
 fn a_join_decided_against_a_stale_log_is_decided_again() {
-    let match_id = MatchId("match-0".to_string());
+    let match_id = meddled_match();
     let interloper = Event::Join {
         seat: Seat(1),
         name: "Interloper".to_string(),
@@ -491,7 +682,7 @@ fn a_join_decided_against_a_stale_log_is_decided_again() {
     let mut relay = Relay::new(
         Meddling::interfering_after(1, &match_id, vec![interloper]),
         MemoryConnections::new(),
-        Secret::from_bytes([3; 32]),
+        Secret::from_bytes(MEDDLED_SECRET),
     );
     seat_a_host(&mut relay, &match_id);
 
@@ -506,6 +697,10 @@ fn a_join_decided_against_a_stale_log_is_decided_again() {
         },
     );
     assert_eq!(outcome.refused, None);
+    assert!(
+        relay.log().spent(),
+        "the interference never fired, so this proved nothing"
+    );
 
     let seats: Vec<u8> = relay
         .log()
@@ -530,7 +725,7 @@ fn a_join_decided_against_a_stale_log_is_decided_again() {
 /// already a statement; this is the first test that holds it under a race.
 #[test]
 fn a_colour_taken_while_a_join_was_decided_is_refused_on_the_retry() {
-    let match_id = MatchId("match-0".to_string());
+    let match_id = meddled_match();
     let interloper = Event::Join {
         seat: Seat(1),
         name: "Interloper".to_string(),
@@ -540,7 +735,7 @@ fn a_colour_taken_while_a_join_was_decided_is_refused_on_the_retry() {
     let mut relay = Relay::new(
         Meddling::interfering_after(1, &match_id, vec![interloper]),
         MemoryConnections::new(),
-        Secret::from_bytes([3; 32]),
+        Secret::from_bytes(MEDDLED_SECRET),
     );
     seat_a_host(&mut relay, &match_id);
 
@@ -556,6 +751,10 @@ fn a_colour_taken_while_a_join_was_decided_is_refused_on_the_retry() {
         },
     );
     assert_eq!(outcome.refused, Some(Refused::ColourTaken));
+    assert!(
+        relay.log().spent(),
+        "the interference never fired, so this proved nothing"
+    );
     // By name, not by count: two joins is also what an interference that never fired
     // would leave, and a test that cannot tell those apart proves nothing.
     let names: Vec<String> = relay
@@ -581,10 +780,11 @@ fn seat_a_host<L: Log, C: Connections>(relay: &mut Relay<L, C>, expected: &Match
         .receive(
             &ConnectionId("host".to_string()),
             Message::Host {
-                account: Account::Discord("account-host".to_string()),
+                account: meddled_host(),
                 name: "Host".to_string(),
                 colour: "red".to_string(),
                 version: PROTOCOL_VERSION,
+                nonce: HOST_NONCE.to_string(),
             },
         )
         .created

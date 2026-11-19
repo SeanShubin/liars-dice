@@ -142,6 +142,20 @@ The alternative of keeping `match-{n}` and retrying on the number would also be 
 once the position is the version, and was rejected for the other two faults: it keeps the
 scan the measurement indicted, and it leaves hosting non-idempotent.
 
+The nonce changes the message format, so `PROTOCOL_VERSION` is 4. That is what the version
+line is for, and the only existing log is the probe the deployed relay wrote, which becomes
+unjoinable by a current client — correctly, since its message format is not this one.
+
+**A seat is held by one connection.** Writing the idempotency test turned this up, and it
+is not a detail. `Connections::attach` evicted the connection from wherever else it was,
+because a socket is in one place; it did not evict whoever else held the seat. So a resent
+`host` from a new socket left both sockets on seat zero — and the relay sends a seat's deal
+to every connection on that seat, which is the dice leak the concurrency fix had just
+removed, reintroduced through the front door. `attach` now evicts both ways. A second tab
+on one account takes the seat and the first goes quiet, which is the right trade: before
+identity exists there is nothing to distinguish a second tab from somebody else claiming
+the account.
+
 ### Dealing, and the one line the relay walks
 
 The relay deals: `Every round deals the dice limit to every seat`, which needs no rules
@@ -314,7 +328,17 @@ In `apps/local`, against in-memory implementations of both traits:
   which is what the defect above was, written down as the contract.
 - A message is all or nothing: a conflict part-way through a multi-event message leaves
   none of its events in the log, not the first two of three.
-- Hosting the same nonce twice creates one match, and the second answer names it.
+- Hosting the same nonce twice creates one match, the second answer names it, and the
+  resend's socket is the one left holding the seat.
+- Hosting with a different nonce creates a second match, so idempotency is not an
+  accidental ban on hosting twice.
+- Taking a seat evicts whoever was on it, asserted on both implementations of
+  `Connections`, because this is the invariant that decides who is sent whose dice.
+- Interference at *every* append a message makes, not one chosen point. Behind the `Log`
+  seam the places a schedule can diverge are finite and countable, so the test enumerates
+  them instead of sampling one. Each interference test also asserts that the interference
+  fired: a test that checks an invariant after something that never happened is green and
+  proves nothing, which is a worse failure than a flaky one because it is silent.
 - Two hosts at once create two matches. Two joins at once take two seats, two colours, and
   attach to two different seats. These need real concurrent storage, so they live with the
   deployed implementations in `apps/relay` rather than here — see `relay-service.md`.

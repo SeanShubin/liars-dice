@@ -129,7 +129,21 @@ pub trait Log {
 /// Which socket is which seat. The one thing that is neither derived nor in the log.
 pub trait Connections {
     fn of(&self, match_id: &MatchId) -> Vec<Connected>;
+
+    /// Put this connection on this seat, and nothing else anywhere near either.
+    ///
+    /// Two evictions, not one. The connection leaves wherever else it was, because a
+    /// socket is in one place. And whatever else held this seat leaves it, because a seat
+    /// is held by one socket — which is the invariant that actually decides who is sent
+    /// whose dice. `Two players never share a seat` is a statement about the log; this is
+    /// the same statement about the transport, and it is the half that can leak.
+    ///
+    /// So a second tab on one account takes the seat and the first goes quiet. That is
+    /// the right trade: the alternative is a seat whose deal is sent to two sockets, and
+    /// before identity exists there is nothing to distinguish a second tab from somebody
+    /// else claiming the account.
     fn attach(&mut self, match_id: &MatchId, connection: ConnectionId, seat: Seat, role: Role);
+
     fn detach(&mut self, connection: &ConnectionId);
 }
 
@@ -173,6 +187,12 @@ pub enum Message {
         name: String,
         colour: String,
         version: u32,
+        /// Which request this is, so the match it makes has a name.
+        ///
+        /// Need not be secret or unpredictable, only distinct per request. Sending the
+        /// same one twice names the same match, which is what makes hosting safe to
+        /// repeat when an answer went missing.
+        nonce: String,
     },
     Join {
         match_id: MatchId,
@@ -213,7 +233,10 @@ pub enum Message {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Refused {
     NoSuchMatch,
-    VersionMismatch { match_version: u32, yours: u32 },
+    VersionMismatch {
+        match_version: u32,
+        yours: u32,
+    },
     AlreadyStarted,
     Barred,
     ColourTaken,
@@ -222,6 +245,13 @@ pub enum Refused {
     NotInThisMatch,
     SeatIsAbsent,
     NotYourSeat,
+    /// The derived match id names a match this account did not host.
+    ///
+    /// Reachable only by a collision in sixteen bytes of HMAC, which is not a thing that
+    /// happens — but refusing is still better than the alternatives. Retrying cannot help,
+    /// because the name is a function of the request and would be derived identically, and
+    /// appending to the match would hand it to somebody who is not its host.
+    MatchIdTaken,
 }
 
 /// What the relay did, and what to send where.
@@ -336,7 +366,8 @@ impl<L: Log, C: Connections> Relay<L, C> {
                 name,
                 colour,
                 version,
-            } => self.host(from, account, name, colour, version),
+                nonce,
+            } => self.host(from, account, name, colour, version, nonce),
             Message::Join {
                 match_id,
                 account,
@@ -387,6 +418,7 @@ impl<L: Log, C: Connections> Relay<L, C> {
         name: String,
         colour: String,
         version: u32,
+        nonce: String,
     ) -> Result<Outcome, Stale> {
         if version != PROTOCOL_VERSION {
             return Ok(Outcome::refused(Refused::VersionMismatch {
@@ -394,23 +426,41 @@ impl<L: Log, C: Connections> Relay<L, C> {
                 yours: version,
             }));
         }
-        let match_id = MatchId(format!("match-{}", self.log.matches().len()));
+        // Derived, not counted. Nothing is read to name a match, so hosting scans no
+        // table and has no window between choosing a name and claiming it.
+        let match_id = MatchId(integrity::name_for(
+            &self.secret,
+            &protocol::account_text(&account),
+            &nonce,
+        ));
         let seat = Seat(0);
-        // `fresh` rather than `open`: a new match is a claim on position zero, so losing
-        // the race for the name refuses the whole message instead of appending these
-        // three events to the end of somebody else's match.
+        // `fresh` rather than `open`: a new match is a claim on position zero, so a name
+        // that is already taken refuses the whole message instead of appending these
+        // three events to the end of whatever is there.
         let mut work = Working::fresh(match_id.clone());
         work.push(Event::Version { protocol: version });
         work.push(Event::Join {
             seat,
             name,
             colour,
-            account,
+            account: account.clone(),
         });
         work.push(Event::Host { seat });
-        self.commit(&work)?;
+
+        if self.commit(&work).is_err() {
+            // The name is taken, and the name is a function of this request, so the
+            // likeliest reason by far is that this request already succeeded and its
+            // answer went missing. Answering with the match the sender already has is
+            // what `A repeated request to host creates no second match` asks for.
+            //
+            // Not a retry: deriving the name again would derive the same name.
+            if self.open(&match_id).view().seat_of_account(&account) != Some(seat) {
+                return Ok(Outcome::refused(Refused::MatchIdTaken));
+            }
+        }
         // After the commit, because a connection attached to a match that was never
-        // created is a row pointing at nothing.
+        // created is a row pointing at nothing. Also on the repeated path: the resend
+        // may well come from a new socket, and that socket is this seat's.
         self.connections
             .attach(&match_id, from.clone(), seat, Role::Player);
         Ok(Outcome {

@@ -168,28 +168,15 @@ impl Shape {
     }
 }
 
-/// `discord:<snowflake>`, `ai` or `local`.
+/// The canonical text of an account, which `protocol` owns.
 ///
-/// Built here rather than with `Account`'s `Display`, which passes the id through the
-/// archive's collapsing and would alter anything it considered unsafe for a line.
-pub fn account_text(account: &Account) -> String {
-    match account {
-        Account::Discord(id) => format!("discord:{id}"),
-        Account::Ai => "ai".to_string(),
-        Account::Local => "local".to_string(),
-    }
-}
+/// Re-exported rather than written again: `relay` derives a match id from the same text
+/// and cannot depend on this crate, so the form lives where the format lives.
+pub use protocol::account_text;
 
+/// [`account_text`] in reverse, with this crate's error.
 pub fn account_of(text: &str) -> Result<Account, Malformed> {
-    match text {
-        "ai" => Ok(Account::Ai),
-        "local" => Ok(Account::Local),
-        // Split once, so a colon inside an id cannot change who the account is.
-        other => match other.split_once(':') {
-            Some(("discord", id)) => Ok(Account::Discord(id.to_string())),
-            _ => Err(Malformed::UnknownAccount(other.to_string())),
-        },
-    }
+    protocol::account_from_text(text).ok_or_else(|| Malformed::UnknownAccount(text.to_string()))
 }
 
 /// The `&'static str` a stored or received variant name refers to.

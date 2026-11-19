@@ -27,6 +27,7 @@ pub fn shape_of(message: &Message) -> Shape {
             name,
             colour,
             version,
+            nonce,
         } => Shape::of(
             "host",
             vec![
@@ -34,6 +35,7 @@ pub fn shape_of(message: &Message) -> Shape {
                 ("name", text(name)),
                 ("colour", text(colour)),
                 ("version", Value::Count(u64::from(*version))),
+                ("nonce", text(nonce)),
             ],
         ),
         Message::Join {
@@ -88,6 +90,7 @@ pub fn from_shape(shape: &Shape) -> Result<Message, Malformed> {
             name: shape.text("name")?.to_string(),
             colour: shape.text("colour")?.to_string(),
             version: shape.count("version")?,
+            nonce: shape.text("nonce")?.to_string(),
         }),
         "join" => Ok(Message::Join {
             match_id: match_id()?,

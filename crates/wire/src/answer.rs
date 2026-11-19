@@ -65,6 +65,7 @@ fn refusal(why: &Refused) -> Shape {
         Refused::NotInThisMatch => named("not-in-this-match"),
         Refused::SeatIsAbsent => named("seat-is-absent"),
         Refused::NotYourSeat => named("not-your-seat"),
+        Refused::MatchIdTaken => named("match-id-taken"),
     }
 }
 
@@ -94,6 +95,7 @@ fn why(shape: &Shape) -> Result<Refused, Malformed> {
         "not-in-this-match" => Ok(Refused::NotInThisMatch),
         "seat-is-absent" => Ok(Refused::SeatIsAbsent),
         "not-your-seat" => Ok(Refused::NotYourSeat),
+        "match-id-taken" => Ok(Refused::MatchIdTaken),
         other => Err(Malformed::UnknownKind(format!("{REFUSED}:{other}"))),
     }
 }

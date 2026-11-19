@@ -66,8 +66,11 @@ impl Connections for MemoryConnections {
     }
 
     fn attach(&mut self, match_id: &MatchId, connection: ConnectionId, seat: Seat, role: Role) {
-        self.rows
-            .retain(|(_, connected)| connected.connection != connection);
+        // This socket leaves wherever else it was, and whoever else was on this seat
+        // leaves it. See the contract on `Connections::attach`.
+        self.rows.retain(|(id, connected)| {
+            connected.connection != connection && !(id == match_id && connected.seat == seat)
+        });
         self.rows.push((
             match_id.clone(),
             Connected {
