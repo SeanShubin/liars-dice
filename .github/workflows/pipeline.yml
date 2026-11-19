@@ -34,6 +34,16 @@ jobs:
   gate:
     name: Gate (fmt · clippy · tests · wasm build)
     runs-on: ubuntu-latest
+
+    # The relay's storage tests run against a real DynamoDB rather than a fake of one,
+    # because what they check is whether the two trait implementations honour contracts
+    # the in-memory ones cannot get wrong. A fake would agree with whatever they did.
+    services:
+      dynamodb:
+        image: amazon/dynamodb-local:3.3.2
+        ports:
+          - 8000:8000
+
     steps:
       - uses: actions/checkout@v4
 
@@ -65,8 +75,27 @@ jobs:
       - name: Clippy, warnings denied
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # DynamoDB Local has no healthcheck, and a gate that is occasionally red for a
+      # reason nobody can reproduce is worse than a gate that waits ten seconds.
+      - name: Wait for DynamoDB Local
+        run: |
+          for _ in $(seq 30); do
+            if curl -s -o /dev/null "http://localhost:8000"; then
+              echo "listening"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "DynamoDB Local never came up"
+          exit 1
+
+      # --include-ignored, because the storage tests are ignored by default so that
+      # `cargo test` on a machine with no Docker stays green. The gate is where they are
+      # not optional. Nothing else in the workspace is ignored, so this adds exactly them.
       - name: Test
-        run: cargo test --workspace
+        env:
+          AWS_ENDPOINT_URL_DYNAMODB: http://localhost:8000
+        run: cargo test --workspace -- --include-ignored
 
       # The bundle the deploy publishes is the one the gate built. Nothing is
       # rebuilt downstream, so nothing downstream can differ.
@@ -168,6 +197,15 @@ jobs:
     needs: [gate, deploy]
     if: always() && needs.gate.result == 'success'
     runs-on: ubuntu-latest
+
+    # The same container as the gate. An AWS SDK release that breaks the storage would
+    # otherwise pass here untested, which is the one thing this job exists to catch.
+    services:
+      dynamodb:
+        image: amazon/dynamodb-local:3.3.2
+        ports:
+          - 8000:8000
+
     steps:
       - uses: actions/checkout@v4
 
@@ -180,7 +218,21 @@ jobs:
       # The gate builds the committed lockfile so a deploy stays reproducible;
       # this throws that lockfile away and tests against the newest everything.
       # A break here reds the run and tells us, and production is untouched.
+      - name: Wait for DynamoDB Local
+        run: |
+          for _ in $(seq 30); do
+            if curl -s -o /dev/null "http://localhost:8000"; then
+              echo "listening"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "DynamoDB Local never came up"
+          exit 1
+
       - name: Update every dependency and test
+        env:
+          AWS_ENDPOINT_URL_DYNAMODB: http://localhost:8000
         run: |
           cargo update
-          cargo test --workspace
+          cargo test --workspace -- --include-ignored

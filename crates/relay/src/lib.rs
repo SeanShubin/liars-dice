@@ -611,7 +611,10 @@ const ORDER_ROUND: u32 = u32::MAX;
 
 /// The variants a hosted match is played under. Every one off, which is the default rules.
 /// The relay records them; it does not know what any of them does.
-const VARIANTS: [(&str, bool); 1] = [("ones-wild", false)];
+/// Every variant a match declares, and whether it is on. Public because these are the
+/// only names an `Event::Variant` in this log can carry, so anything reading the log back
+/// out of storage needs the list to recover the `&'static str` the event holds.
+pub const VARIANTS: [(&str, bool); 1] = [("ones-wild", false)];
 
 /// Every seat is dealt the dice limit. The relay does not know what a dice limit means,
 /// only how many faces to deal, which is why this is here and not in `rules`.

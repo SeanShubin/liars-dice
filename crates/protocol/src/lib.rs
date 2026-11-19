@@ -65,6 +65,26 @@ impl Moment {
         }
     }
 
+    /// Back to the epoch, exactly reversing [`Moment::from_unix_nanos`].
+    ///
+    /// A moment holds no sub-millisecond part, so this is the inverse of that constructor
+    /// rather than of the nanoseconds it was handed: whatever nanos went in, these come
+    /// back truncated to the millisecond, and feeding them back in yields the same moment.
+    /// Storage wants a number, and a reversible pair of functions is a better thing to
+    /// store than a formatted date something would have to parse.
+    pub fn to_unix_nanos(&self) -> u64 {
+        let days = days_from_civil(self.year, self.month, self.day);
+        let seconds = days * 86_400
+            + i64::from(self.hour) * 3_600
+            + i64::from(self.minute) * 60
+            + i64::from(self.second);
+        let milliseconds = seconds * 1_000 + i64::from(self.millisecond);
+        // The multiply happens in u64 because nanoseconds run past i64 in the year 2262
+        // and the epoch type is u64. A moment before 1970 has no u64 representation at
+        // all, and clamps rather than wrapping into the distant future.
+        milliseconds.max(0) as u64 * 1_000_000
+    }
+
     /// A file name stem whose text order is its chronological order.
     ///
     /// Every field is fixed width and zero padded, and the separators are the same at
@@ -110,6 +130,17 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
         shifted_month - 9
     } as u32;
     (year + i64::from(month <= 2), month, day)
+}
+
+/// The inverse of [`civil_from_days`]: the standard days-from-civil algorithm.
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let year = year - i64::from(month <= 2);
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let shifted_month = if month > 2 { month - 3 } else { month + 9 } as i64;
+    let day_of_year = (153 * shifted_month + 2) / 5 + i64::from(day) - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
 }
 
 /// The version of the log format and of the messages that carry it.
@@ -442,6 +473,34 @@ mod tests {
         let moment = Moment::from_unix_nanos(0);
         assert_eq!(moment.to_string(), "1970-01-01T00:00:00.000Z");
         assert_eq!(moment.file_stem(), "1970-01-01T00-00-00-000");
+    }
+
+    /// The two conversions are each other's inverse, which is the only reason storage is
+    /// allowed to keep a number instead of a date. Stepping by a prime number of
+    /// milliseconds crosses leap days, century years and month ends without choosing
+    /// which ones to try.
+    #[test]
+    fn the_epoch_and_the_calendar_are_inverses() {
+        let step = 900_000_011_u64;
+        for index in 0..10_000 {
+            let nanos = index * step * 1_000_000;
+            let moment = Moment::from_unix_nanos(nanos);
+            assert_eq!(
+                Moment::from_unix_nanos(moment.to_unix_nanos()),
+                moment,
+                "{moment} did not survive the trip back to the epoch"
+            );
+            assert_eq!(
+                moment.to_unix_nanos(),
+                nanos,
+                "{moment} came back as a different instant"
+            );
+        }
+    }
+
+    #[test]
+    fn the_epoch_is_zero_in_both_directions() {
+        assert_eq!(Moment::from_unix_nanos(0).to_unix_nanos(), 0);
     }
 
     #[test]

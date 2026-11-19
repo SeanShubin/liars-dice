@@ -1,9 +1,9 @@
 //! The relay service: the composition root that will wire `crates/relay` to API Gateway
 //! WebSocket, DynamoDB for the log and the connection table, and SSM for the secret.
 //!
-//! The behaviour lives in `crates/relay`, which knows nothing about any of those. Until
-//! this is wired, a whole match already runs in one process over `relay::memory`; see
-//! crates/relay/tests/matches.rs.
+//! The storage is written and tested; the three handlers are not. See
+//! /implementation/relay-service.md, and `relay::memory` for the arrangement that
+//! already plays a whole match in one process with none of this.
 //!
 //! Composition root. No behavior.
 
