@@ -274,6 +274,10 @@ pub struct Game {
     pending: Option<Call>,
     /// Whether this round's dice have been shown to everyone.
     revealed: bool,
+    /// The resolution, once computed. Kept so that asking twice answers twice with the
+    /// same thing rather than applying it twice: several things may want to know how a
+    /// round went, and none of them should move a die by asking.
+    settled: Option<Resolution>,
 }
 
 impl Game {
@@ -297,6 +301,7 @@ impl Game {
             dice: vec![None; players],
             pending: None,
             revealed: false,
+            settled: None,
         }
     }
 
@@ -394,6 +399,9 @@ impl Game {
     /// gets `Some` on the first ask; a client gets `None` until the relay reveals. Both
     /// run this same code, differing only in when the dice arrive.
     pub fn resolve(&mut self) -> Option<Resolution> {
+        if let Some(settled) = self.settled {
+            return Some(settled);
+        }
         let call = self.pending?;
         let previous = self.public.history.last().copied()?;
         let truth = self.truth(previous.claim.face)?;
@@ -471,7 +479,7 @@ impl Game {
         };
 
         self.revealed = true;
-        Some(Resolution {
+        let resolution = Resolution {
             opens,
             affected,
             lost,
@@ -481,7 +489,9 @@ impl Game {
             eliminated,
             truth,
             over: self.public.over(),
-        })
+        };
+        self.settled = Some(resolution);
+        Some(resolution)
     }
 
     /// Clear the round and begin the next. The dice are forgotten, so the next round must
@@ -493,6 +503,7 @@ impl Game {
         self.dice = vec![None; self.public.players()];
         self.pending = None;
         self.revealed = false;
+        self.settled = None;
     }
 
     /// The dice this player holds: the prefix of what their seat was dealt. Every seat is
@@ -987,6 +998,28 @@ mod tests {
             game.resolve().is_some(),
             "the last seat makes the round settleable"
         );
+    }
+
+    /// Several things want to know how a round went — each client, a renderer, a log
+    /// writer. None of them may move a die by asking.
+    #[test]
+    fn settling_a_round_twice_settles_it_once() {
+        let mut game = game_of(2, 2);
+        holding(&mut game, &[3, 3], &[0, 0]);
+        game.claim(Call::Raise(Claim {
+            quantity: 1,
+            face: 5,
+        }))
+        .unwrap();
+        assert_eq!(game.claim(Call::Liar), Ok(Claimed::RoundEnded));
+
+        let first = game.resolve().expect("a complete game settles");
+        let counts: Vec<u32> = (0..2).map(|seat| game.public().count(seat)).collect();
+        for _ in 0..5 {
+            assert_eq!(game.resolve(), Some(first), "the same answer every time");
+        }
+        let after: Vec<u32> = (0..2).map(|seat| game.public().count(seat)).collect();
+        assert_eq!(counts, after, "asking again moved a die");
     }
 
     #[test]

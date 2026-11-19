@@ -154,4 +154,30 @@ In `apps/local`, against the real relay over `relay::memory`:
   rather than the harness.
 
 ## Status
-Not started
+Built. `crates/coordinator` is the client and the `Decides` trait; `apps/local` seats N
+clients around a `relay::memory` relay and plays whole matches. 147 tests pass across the
+workspace, clippy clean with warnings denied.
+
+A three-player match now runs end to end: 114 turns, 270 events, one survivor, every
+round's seed verified against its commitment by each client as it arrives.
+
+Three things building it turned up:
+
+**The relay emitted no turn order and no variants.** Nothing had needed them before, and a
+client cannot build a game without the order. The relay now derives the ordering from the
+match secret with a Fisher-Yates over the same rejection sampling the dice use, records it,
+and declares the setup *before* `start` so a client has it in hand when it builds its game.
+
+**`Game::resolve` was not idempotent.** Several things want to know how a round went —
+each client, a renderer, a log writer — and asking twice applied the resolution twice,
+underflowing a count to panic. It now keeps the resolution and answers the same thing every
+time. Asking must not move a die.
+
+**`act` takes the odds rather than computing them.** The odds are a display value, and
+computing them here would make the client depend on the probability model. The composition
+root supplies them, which also keeps the client honest about what it is: the odds on a
+claim are what the claimant said they were.
+
+`Intent` rather than `relay::Message` is what a client emits, so the coordinator depends on
+`protocol` and not on `relay`. The composition root addresses an intent; the client does
+not know what a connection is.

@@ -387,8 +387,32 @@ impl<L: Log, C: Connections> Relay<L, C> {
         if view.started {
             return Outcome::refused(Refused::AlreadyStarted);
         }
+        let mut sends = Vec::new();
+
+        // Turn order is chosen at random when the match starts. Derived from the match's
+        // own secret rather than stored, so anyone holding the log can recompute it, and
+        // keyed apart from any round so it says nothing about anyone's dice.
+        let ordering = integrity::shuffle(
+            &integrity::seed_for(&self.secret, &match_id.0, ORDER_ROUND),
+            view.seats.len(),
+        );
+        let order = Event::PlayerOrder(ordering.iter().map(|seat| Seat(*seat as u8)).collect());
+        self.write(&match_id, order.clone());
+        sends.extend(self.to_everyone(&match_id, order));
+
+        // One per variant, so a replay knows which rules were in force. The relay does
+        // not know what a variant means; it records the settings it was given.
+        for (name, on) in VARIANTS {
+            let event = Event::Variant { name, on };
+            self.write(&match_id, event.clone());
+            sends.extend(self.to_everyone(&match_id, event));
+        }
+
+        // The setup is declared before the match starts, so a client has the order and
+        // the variants in hand when it builds its game.
         self.write(&match_id, Event::Start);
-        let mut sends = self.to_everyone(&match_id, Event::Start);
+        sends.extend(self.to_everyone(&match_id, Event::Start));
+
         sends.extend(self.open_round(&match_id, 0));
         Outcome {
             refused: None,
@@ -580,6 +604,14 @@ impl<L: Log, C: Connections> Relay<L, C> {
         }
     }
 }
+
+/// The round number the turn ordering is derived under. Never a real round, so an
+/// ordering and a deal can never share a seed.
+const ORDER_ROUND: u32 = u32::MAX;
+
+/// The variants a hosted match is played under. Every one off, which is the default rules.
+/// The relay records them; it does not know what any of them does.
+const VARIANTS: [(&str, bool); 1] = [("ones-wild", false)];
 
 /// Every seat is dealt the dice limit. The relay does not know what a dice limit means,
 /// only how many faces to deal, which is why this is here and not in `rules`.

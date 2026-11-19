@@ -153,6 +153,46 @@ pub fn deal(seed: &Seed, seat: u8, count: usize) -> Vec<u8> {
     faces
 }
 
+/// A permutation of `len` items, derived from a seed.
+///
+/// Turn order is chosen at random when the match starts, and like everything else here it
+/// is derived rather than stored, so anyone holding the log can recompute it. Fisher-Yates
+/// with the same rejection sampling the dice use, so every ordering is equally likely.
+pub fn shuffle(seed: &Seed, len: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..len).collect();
+    // Drawn from a stream keyed apart from any seat, so an ordering tells nobody anything
+    // about anyone's dice.
+    let mut stream: Vec<u8> = Vec::new();
+    let mut at = 0;
+    let mut counter: u32 = 0;
+    for position in (1..len).rev() {
+        let span = (position + 1) as u16;
+        // The largest multiple of `span` that fits in a byte. A draw at or above it would
+        // favour the low positions, exactly as it would favour low faces.
+        let ceiling = 256 - (256 % span);
+        let draw = loop {
+            if at == stream.len() {
+                let mut message = [0u8; 5];
+                message[0] = ORDER_STREAM;
+                message[1..].copy_from_slice(&counter.to_be_bytes());
+                stream = mac(&seed.0, &message).to_vec();
+                at = 0;
+                counter += 1;
+            }
+            let byte = u16::from(stream[at]);
+            at += 1;
+            if byte < ceiling {
+                break byte % span;
+            }
+        };
+        order.swap(position, draw as usize);
+    }
+    order
+}
+
+/// Keyed apart from every seat, which are numbered from zero.
+const ORDER_STREAM: u8 = 0xff;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,6 +310,47 @@ mod tests {
             "the biased implementation was not detectably worse, so this test proves \
              nothing: {biased:?}"
         );
+    }
+
+    #[test]
+    fn an_ordering_is_a_permutation_and_depends_on_the_seed() {
+        let seed = seed_for(&secret(), "match-1", 0);
+        let order = shuffle(&seed, 6);
+        let mut sorted = order.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec![0, 1, 2, 3, 4, 5], "every seat appears once");
+        assert_eq!(
+            shuffle(&seed, 6),
+            order,
+            "the same seed orders the same way"
+        );
+        assert_ne!(
+            shuffle(&seed_for(&secret(), "match-2", 0), 6),
+            order,
+            "a different match orders differently"
+        );
+        assert_eq!(shuffle(&seed, 1), vec![0]);
+        assert!(shuffle(&seed, 0).is_empty());
+    }
+
+    /// Every position must be equally likely, or the player who joined first is favoured.
+    #[test]
+    fn an_ordering_does_not_favour_a_position() {
+        let mut seen = [[0u32; 4]; 4];
+        let rounds = 12_000u32;
+        for round in 0..rounds {
+            let order = shuffle(&seed_for(&secret(), "fair", round), 4);
+            for (position, seat) in order.iter().enumerate() {
+                seen[*seat][position] += 1;
+            }
+        }
+        let expected = f64::from(rounds) / 4.0;
+        for seat in seen {
+            for count in seat {
+                let drift = (f64::from(count) - expected).abs() / expected;
+                assert!(drift < 0.08, "a seat favoured a position: {seen:?}");
+            }
+        }
     }
 
     #[test]

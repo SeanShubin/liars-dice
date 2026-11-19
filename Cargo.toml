@@ -39,4 +39,6 @@ odds = { path = "crates/odds" }
 ai = { path = "crates/ai" }
 readout = { path = "crates/readout" }
 integrity = { path = "crates/integrity" }
+coordinator = { path = "crates/coordinator" }
+relay = { path = "crates/relay" }
 render-minimal = { path = "crates/render-minimal" }
