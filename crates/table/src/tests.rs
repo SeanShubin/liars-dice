@@ -149,8 +149,8 @@ fn a_scripted_driver_and_an_ai_share_a_table() {
     );
 }
 
-/// Hotseat, incidentally: three clients in one process, each driven separately. It needs
-/// no product statement because the specification describes the game, not the harness.
+/// Three clients in one process, each driven separately, which is what a hotseat match
+/// is underneath. See /implementation/hotseat.md for the screen over it.
 #[test]
 fn several_clients_in_one_process_is_hotseat() {
     let mut table = Table::seat(
@@ -299,4 +299,171 @@ fn turn_order_is_recorded_and_depends_on_the_match() {
     sorted.sort();
     assert_eq!(sorted, vec![0, 1, 2, 3, 4], "every seat is ordered once");
     assert_ne!(first, second, "two matches ordered identically");
+}
+
+/// A driver with no answer, which is what a person is until they tap something.
+struct Waits;
+
+impl Decides for Waits {
+    fn choose(&mut self, _view: &View) -> Option<Call> {
+        None
+    }
+}
+
+fn table_with_a_person_in_seat(seat: usize, players: usize) -> Table {
+    let names = ["Alice", "Bob", "Carol", "Dave", "Erin"];
+    Table::seat(
+        secret(),
+        (0..players)
+            .map(|at| {
+                let driver: Box<dyn Decides> = if at == seat {
+                    Box::new(Waits)
+                } else {
+                    Box::new(Ai)
+                };
+                (names[at].to_string(), driver)
+            })
+            .collect(),
+    )
+}
+
+/// Stepping stops at the seat that has to be asked, and asking changes nothing. A screen
+/// draws between these two facts, so a stop that quietly advanced the match would show a
+/// player a position they never had.
+#[test]
+fn advancing_stops_at_a_seat_with_no_answer_and_changes_nothing_by_stopping() {
+    let mut table = table_with_a_person_in_seat(0, 3);
+
+    let waiting = table.advance();
+    assert_eq!(
+        waiting,
+        Waiting::Call(0),
+        "the table should be waiting on the seat nobody is driving"
+    );
+
+    let log = table.log();
+    let public = table.players[0]
+        .client
+        .public()
+        .expect("the match has started")
+        .clone();
+    for _ in 0..5 {
+        assert_eq!(
+            table.advance(),
+            Waiting::Call(0),
+            "the answer should not move"
+        );
+    }
+    assert_eq!(table.log(), log, "stopping wrote to the log");
+    assert_eq!(
+        table.players[0].client.public(),
+        Some(&public),
+        "stopping changed the match"
+    );
+}
+
+/// The state a reveal screen is drawn from: settled, so every die is visible through every
+/// view, and not yet left behind, so the round's claims are still there to list.
+#[test]
+fn advancing_stops_on_a_settled_round_with_its_dice_and_claims_still_readable() {
+    let mut table = table_with_a_person_in_seat(0, 3);
+    let mut guard = 0;
+    let resolution = loop {
+        guard += 1;
+        assert!(guard < 500, "no round resolved");
+        match table.advance() {
+            Waiting::Outcome(resolution) => break resolution,
+            // The person has to claim for the round to get anywhere, so take the lowest
+            // raise available and carry on.
+            Waiting::Call(at) => {
+                let call = {
+                    let view = table.players[at].client.view().expect("a view");
+                    match view.legal_raises().first() {
+                        Some(&claim) => Call::Raise(claim),
+                        None => Call::Liar,
+                    }
+                };
+                let intent = table.players[at]
+                    .client
+                    .act(call, 0.0)
+                    .expect("the call was offered as legal");
+                let sends = table.send(at, intent);
+                table.deliver(sends);
+            }
+            Waiting::Over => panic!("the match ended before a round resolved"),
+        }
+    };
+
+    for player in &table.players {
+        let view = player.client.view().expect("a view");
+        assert!(
+            !view.public().history().is_empty(),
+            "the round's claims were cleared before the outcome was shown"
+        );
+        for seat in 0..table.players.len() {
+            assert!(
+                view.dice_of(seat).is_some(),
+                "seat {} could not see seat {seat} on a settled round",
+                player.client.seat().0
+            );
+        }
+    }
+
+    // And it keeps saying so until the round is left behind.
+    assert_eq!(table.advance(), Waiting::Outcome(resolution));
+}
+
+/// Resuming is what leaves a settled round behind, and it begins the round the resolution
+/// named rather than one of the table's choosing.
+#[test]
+fn resuming_begins_the_round_the_resolution_named() {
+    let mut table = ai_table(3);
+    // Every seat is driven, so the first thing the table stops for is a round ending.
+    let resolution = match table.advance() {
+        Waiting::Outcome(resolution) => resolution,
+        other => panic!("expected a round to resolve, got {other:?}"),
+    };
+
+    let before = table.players[0].client.public().expect("started").round();
+    table.resume();
+    let after = table.players[0].client.public().expect("started");
+
+    assert_eq!(after.round(), before + 1, "resuming did not begin a round");
+    assert_eq!(
+        after.current(),
+        resolution.opens,
+        "the wrong seat opened the round"
+    );
+    assert!(
+        after.history().is_empty(),
+        "the new round began with the old round's claims"
+    );
+}
+
+/// Stepping and resuming play the same match as the one-call-at-a-time loop, event for
+/// event. The two ways of driving a table are two shapes of the same thing, which is what
+/// lets a screen use one and a test use the other.
+#[test]
+fn stepping_plays_the_same_match_as_taking_turns() {
+    let mut stepped = ai_table(3);
+    let mut guard = 0;
+    loop {
+        guard += 1;
+        assert!(guard < 5_000, "the stepped match would not finish");
+        match stepped.advance() {
+            Waiting::Outcome(_) => stepped.resume(),
+            Waiting::Over => break,
+            Waiting::Call(at) => panic!("an ai seat had no answer at seat {at}"),
+        }
+    }
+
+    let mut turned = ai_table(3);
+    turned.play(5_000);
+
+    assert!(stepped.over() && turned.over(), "both matches should end");
+    assert_eq!(
+        stepped.log(),
+        turned.log(),
+        "the two ways of driving a table disagreed"
+    );
 }

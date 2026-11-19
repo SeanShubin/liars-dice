@@ -14,6 +14,7 @@ use integrity::Secret;
 use protocol::{Account, Event, PROTOCOL_VERSION, Seat};
 use relay::memory::{MemoryConnections, MemoryLog};
 use relay::{ConnectionId, Log, MatchId, Message, Relay};
+pub use rules::Resolution;
 use rules::{Call, View};
 
 /// A seat at the table: a client, and whatever is driving it.
@@ -59,11 +60,37 @@ impl Decides for Scripted {
     }
 }
 
+/// Why the table stopped stepping.
+///
+/// A table that only runs to completion is right for a test and useless for a player, so
+/// stepping it says what it is waiting for. Each variant is something a person has to look
+/// at or answer.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Waiting {
+    /// This seat's driver had no answer, which is a person's usual answer. Nothing has
+    /// changed and nothing will until a call is supplied.
+    Call(usize),
+    /// A round resolved and has not been left behind. The match stays on it — every die
+    /// visible, the round's claims intact — until [`Table::resume`] is called, which is
+    /// what lets a screen show the outcome before the next deal replaces it.
+    Outcome(Resolution),
+    /// Nobody can move again.
+    Over,
+}
+
 /// A table: one relay, and every player at it.
 pub struct Table {
     pub relay: Relay<MemoryLog, MemoryConnections>,
     pub players: Vec<Player>,
     pub match_id: MatchId,
+    /// Whether the last round's outcome has been handed to a caller and acknowledged.
+    ///
+    /// Only the final round of a match needs this. Resuming any other round leaves its
+    /// resolution behind by beginning the next one, so there is nothing left to report —
+    /// but the final round has no next round to begin, and a settled round answers the
+    /// same however often it is asked, so without this the match would report its last
+    /// outcome forever and never say it was over.
+    final_outcome_seen: bool,
 }
 
 impl Table {
@@ -115,6 +142,7 @@ impl Table {
             relay,
             players,
             match_id,
+            final_outcome_seen: false,
         };
         let host = table.players[0].connection.clone();
         let started = table.relay.receive(
@@ -166,46 +194,49 @@ impl Table {
         self.relay.receive(&connection, message).sends
     }
 
-    /// Settle any round that can be settled, and begin the next.
-    fn settle_rounds(&mut self) {
-        let mut opens = None;
+    /// Settle the round if it can be settled, without leaving it behind.
+    ///
+    /// Idempotent, because `Client::settle` is: a settled round answers the same however
+    /// often it is asked. Every client is asked rather than just one, since a client only
+    /// settles once it has been dealt every seat, and asking them all is what makes this
+    /// independent of which client that was.
+    fn settled(&mut self) -> Option<Resolution> {
+        let mut found = None;
         for player in self.players.iter_mut() {
             if let Some(resolution) = player.client.settle() {
-                opens = Some((resolution.opens, resolution.over));
+                found = Some(resolution);
             }
         }
-        if let Some((opens, over)) = opens
-            && !over
-        {
-            for player in self.players.iter_mut() {
-                player.client.begin_next_round(opens);
-            }
-        }
+        found
     }
 
-    /// Whether the match has ended.
-    pub fn over(&self) -> bool {
-        self.players
-            .first()
-            .and_then(|player| player.client.public())
-            .is_some_and(|public| public.over())
-    }
-
-    /// Ask whoever's turn it is for a call, send it, and settle whatever follows.
+    /// Leave a settled round behind and begin the next one.
     ///
-    /// Returns false when nobody could move, which ends the match or exposes a stall.
-    pub fn take_turn(&mut self) -> bool {
-        self.settle_rounds();
-        if self.over() {
-            return false;
-        }
-        let Some(at) = (0..self.players.len()).find(|&at| self.players[at].client.is_my_turn())
-        else {
-            return false;
+    /// Nothing happens if no round is settled, or if the one that is ended the match.
+    pub fn resume(&mut self) {
+        let Some(resolution) = self.settled() else {
+            return;
         };
-        // The view borrows the client and the driver is a sibling field, so the
-        // choice is made in its own scope and the view is gone before the client is
-        // asked to act.
+        if resolution.over {
+            // No round follows the last one, so acknowledging it is all there is to do.
+            self.final_outcome_seen = true;
+            return;
+        }
+        for player in self.players.iter_mut() {
+            player.client.begin_next_round(resolution.opens);
+        }
+        self.final_outcome_seen = false;
+    }
+
+    /// Whose turn it is, if it is anyone's.
+    fn whose_turn(&self) -> Option<usize> {
+        (0..self.players.len()).find(|&at| self.players[at].client.is_my_turn())
+    }
+
+    /// Ask one seat's driver for a call and play it. False when it had none.
+    fn play_one(&mut self, at: usize) -> bool {
+        // The view borrows the client and the driver is a sibling field, so the choice is
+        // made in its own scope and the view is gone before the client is asked to act.
         let Some((call, odds)) = ({
             let player = &mut self.players[at];
             match player.client.view() {
@@ -223,7 +254,61 @@ impl Table {
         };
         let sends = self.send(at, intent);
         self.deliver(sends);
-        self.settle_rounds();
+        true
+    }
+
+    /// Step until a person has to look at the screen, and say why.
+    ///
+    /// Every seat whose driver answers is played without stopping, so a table of virtual
+    /// players runs itself and a table with people in it stops at each of them. It does
+    /// not leave a settled round behind: that is [`Table::resume`], so whatever is showing
+    /// the outcome decides when it has been seen.
+    pub fn advance(&mut self) -> Waiting {
+        loop {
+            if let Some(resolution) = self.settled()
+                && !self.final_outcome_seen
+            {
+                return Waiting::Outcome(resolution);
+            }
+            if self.over() {
+                return Waiting::Over;
+            }
+            let Some(at) = self.whose_turn() else {
+                return Waiting::Over;
+            };
+            if !self.play_one(at) {
+                return Waiting::Call(at);
+            }
+        }
+    }
+
+    /// Whether the match has ended.
+    pub fn over(&self) -> bool {
+        self.players
+            .first()
+            .and_then(|player| player.client.public())
+            .is_some_and(|public| public.over())
+    }
+
+    /// Ask whoever's turn it is for a call, send it, and settle whatever follows.
+    ///
+    /// One call, with a settled round left behind on either side of it. This is the whole
+    /// match in one line for anything that does not need to show a round ending — a test,
+    /// or a terminal that prints the log afterwards.
+    ///
+    /// Returns false when nobody could move, which ends the match or exposes a stall.
+    pub fn take_turn(&mut self) -> bool {
+        self.resume();
+        if self.over() {
+            return false;
+        }
+        let Some(at) = self.whose_turn() else {
+            return false;
+        };
+        if !self.play_one(at) {
+            return false;
+        }
+        self.resume();
         true
     }
 

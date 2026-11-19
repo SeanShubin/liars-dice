@@ -68,8 +68,18 @@ pub enum Waiting {
 ```
 
 `advance` runs turns while drivers keep answering and returns the first of these it hits.
-`resume` dismisses a shown outcome and begins the next round. `play` becomes a loop over
-the two, so every existing caller and test keeps its behaviour.
+`resume` dismisses a shown outcome and begins the next round. `take_turn` and `play` keep
+their exact behaviour on top of the same primitives, and a test asserts the two ways of
+driving a table produce the same log event for event.
+
+One wrinkle, found by that test. A settled round answers the same however often it is
+asked, and resuming is what leaves it behind — but the final round has no next round to
+begin, so the match reported its last outcome forever and never said it was over. `Table`
+therefore records that the final outcome was acknowledged. Only the last round needs it:
+resuming any other round clears its resolution by beginning the next. The alternative was
+to report `Over` ahead of a settled round, which would have been simpler and would have
+thrown away the last round's resolution — the one carrying the sentence that says who won
+and how.
 
 The `Outcome` stop is what makes `A round's outcome is shown before the next round begins`
 true. It works because of an accident of the rules that is worth naming: `Game::resolve`
