@@ -214,6 +214,8 @@ millisecond and leaves nothing that can be stale, be migrated, or fall out of st
 the log. It also keeps `The event log is the only state` true in the strongest available
 sense. The alternative — a stored projection from the start — is the same architecture
 with a cache added; the cache can be built later, when something measured asks for it.
+`relay-service.md` is where the measuring is specified, including the two numbers that
+are allowed to ask.
 
 **The minimal presentation does not use Bevy.** `apps/minimal` calls egui in 62 places and
 Bevy in one: a startup system that spawns `Camera2d`. There are no queries, components,

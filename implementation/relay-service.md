@@ -96,6 +96,35 @@ let outcome = tokio::task::spawn_blocking(move || relay.receive(&from, message))
 stalled executor. The async-ness stops at the edge of this crate, which is where the
 decision is paid for and recorded.
 
+### Measuring what the lobby costs
+
+`deployment.md` deferred the projection "until something measured asks for it", and this
+is the measuring. A lobby view does work that grows with the whole table, so the question
+is not whether it is slow today but which day it stops being fast, and that is answerable
+only by a number nobody had to go looking for.
+
+`DynamoLog` counts what it did. It holds a read counter, an event counter and a consumed
+capacity counter, incremented inside `read` and `matches` — interior mutability, since the
+trait takes `&self`, and no contention, since the instance lives for one invocation. The
+handler times the call it wraps and emits one line per invocation:
+
+| Field | Why it is the number and not another |
+|-------|--------------------------------------|
+| `route` | So a lobby view and a game message are never averaged together. |
+| `scan_millis` | Finding which matches exist, which grows with every event ever written. |
+| `fold_millis` | Reading and folding them, which grows with the matches still open. |
+| `matches_folded` | The divisor. Time without it cannot distinguish more matches from a slower table. |
+| `events_read` | The actual work, independent of how fast the hardware was that day. |
+| `read_capacity` | What it costs and what gets throttled, from `ReturnConsumedCapacity`. |
+
+The line is CloudWatch Embedded Metric Format: structured JSON on stdout, which costs one
+log line, needs no `PutMetricData` call on the hot path, and arrives as a CloudWatch metric
+with percentiles. So the thresholds below can be alarms rather than a habit of looking.
+
+Two separate timers because they fail for different reasons and have different fixes. A
+slow fold is answered by the projection. A slow scan is answered by not scanning, and no
+projection of open matches fixes it.
+
 ## Boundaries
 
 - **Depends on** `crates/relay`, `protocol`, `integrity`, and the AWS SDK.
@@ -118,13 +147,26 @@ runs in one process with no deployment at all. The cost is that the handler must
 test. Recorded in the Approach because it is the one place this crate's shape is not
 obvious from the library's.
 
-**The log's `matches()` and the lobby list.** `Relay::listed` folds every match's log to
-answer who is hosting and how many have joined. That is a read of every event of every
-match, per lobby view. At this project's size it is nothing; at some size it is the first
-thing that breaks, and the fix is a projection — a second item per match, updated on the
-events that change it. Not built now, because `deployment.md` already decided the
-projection is deferred until the log proves too slow, and a lobby nobody is looking at is
-not evidence. Named here so the first slow lobby is recognised rather than diagnosed.
+**The lobby list folds every log, and says so in writing.** `Relay::open_matches` folds
+every match's log to answer who is hosting and how many have joined. That is a read of
+every event of every match, per lobby view. At this project's size it is nothing; at some
+size it is the first thing that breaks, and the fix is a projection — a second item per
+match, updated on the events that change it.
+
+Not built now, because `deployment.md` decided the projection waits for a measurement, and
+a lobby nobody is looking at is not evidence. The measurement is built now, because
+"it got slow" is not a trigger anyone can act on and a graph is. The trigger, so that
+neither taste nor memory is involved:
+
+- `fold_millis` p99 over a week above **200 ms** — the lobby is a page load, and a fifth
+  of a second of folding alone, before the scan and the socket, is where a list stops
+  arriving and starts loading.
+- or `events_read` for any single lobby view above **5,000** — because a warm Lambda on an
+  idle table can hold the time down long after the work has become absurd, and the event
+  count is the leading indicator that does not depend on the weather.
+
+Either one is sufficient and no further argument is needed. Until one of them fires, the
+fold stands, and that is a position held on evidence rather than on hope.
 
 **One table or three.** Separate tables for the log and the connections, rather than one
 table with a discriminated key. They have different lifetimes — a log is permanent, a
@@ -148,6 +190,10 @@ one would silently make every commitment unverifiable.
   different unit of work.
 - Nothing about an invocation — its id, its cold start, its concurrency — can reach a
   value that lands in the log.
+- The measurement is outside the log and cannot reach into it. The counters are fields of
+  `DynamoLog`, read by the handler after `receive` has returned, and emitted to a log
+  stream; no event, claim, seed or commitment is derived from a duration. A metric that
+  could change a value in the log would make replay disagree with the original match.
 
 ## Testing
 
@@ -167,6 +213,11 @@ one would silently make every commitment unverifiable.
   diagnosable: if the socket already plays a match, the fault is in the page.
 - A run of that client is checked against the match's log read straight from DynamoDB:
   same events, same order, every round's seed matching its commitment.
+- The counters count. Against DynamoDB Local: a lobby view over three matches of known
+  length reports exactly those matches and exactly that many events. The timings cannot be
+  asserted on, which is why the counts are asserted on instead — a measurement nobody
+  checked is a decoration, and the numbers that trigger the projection are the two that
+  tests can pin.
 
 ## Open Items
 
@@ -174,6 +225,14 @@ The pipeline does not build a Lambda yet. A Rust function needs a cross-compiled
 for the Lambda runtime, which is a new toolchain step in the gate and a new upload in the
 deploy. That is part of this unit of work, not a separate one, since nothing here can be
 proven until it deploys.
+
+`Log::matches()` has no cheap implementation on the table as described. Listing distinct
+partition keys means a Scan, which grows with every event ever written rather than with
+the matches still open, so it is probably what the measurement above will indict first —
+and the projection would not fix it. The likely answer is a small item per match written
+on `host`, making the lobby a Query on one partition. Not decided here, because this is
+the document that just agreed to measure before guessing, and `scan_millis` is reported
+separately so the evidence arrives already separated from the fold's.
 
 ## Status
 Not started.
