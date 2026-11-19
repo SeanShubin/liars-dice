@@ -37,7 +37,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The minimal game still hosts egui inside Bevy, which links these natively.
+      # `apps/prototype` and `crates/dice-render` are Bevy, which links these natively.
       - name: Install Bevy's Linux dependencies
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
 
@@ -70,7 +70,7 @@ jobs:
 
       # The bundle the deploy publishes is the one the gate built. Nothing is
       # rebuilt downstream, so nothing downstream can differ.
-      - name: Build the hotseat harness for the browser
+      - name: Build the hotseat match for the browser
         working-directory: apps/hotseat
         run: trunk build --release --public-url /liars-dice/hotseat/
 
