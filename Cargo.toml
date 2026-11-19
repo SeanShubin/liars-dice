@@ -32,6 +32,9 @@ publish = false
 [workspace.dependencies]
 bevy = "0.20"
 bevy_egui = "0.43"
+# The presentation crate draws with egui directly, so it depends on no delivery.
+# eframe 0.37 resolves the same egui, which is what lets a window and a canvas share it.
+egui = "0.37"
 # glow alone: wgpu doubles the bundle and brings nothing a two dimensional
 # presentation uses. default-features off drops the persistence and accesskit extras.
 eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow"] }

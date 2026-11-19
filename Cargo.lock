@@ -5355,6 +5355,13 @@ version = "0.0.0"
 [[package]]
 name = "render-minimal"
 version = "0.0.0"
+dependencies = [
+ "ai",
+ "egui 0.37.0",
+ "integrity",
+ "readout",
+ "rules",
+]
 
 [[package]]
 name = "render-pretty"

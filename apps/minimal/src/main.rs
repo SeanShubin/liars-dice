@@ -13,14 +13,14 @@ use std::io::Write;
 use ai::Seen;
 use integrity::{Secret, Seed};
 use protocol::{Account, Event, Moment, PROTOCOL_VERSION, Seat};
-use render_minimal::palette::{PALETTE, assign, ink};
-use rules::{Call, Claim, Claimed, Entry, Game, Resolution, SEAT, Variants};
+use render_minimal::palette::{PALETTE, assign};
+use render_minimal::{
+    Seating, calls, dialler, history, odds, opening_claim, palette_picker, ranking, standing,
+    table, tap, verdict,
+};
+use rules::{Call, Claim, Claimed, Game, Resolution, SEAT, Variants};
 
 const MAX_PLAYERS: usize = 10;
-/// Every die is drawn in a box this size, shown or not, so the dice line up in a grid.
-const DIE: f32 = 32.0;
-/// Every claim is drawn in a box this size, filled or not, so the claims line up too.
-const CLAIM: [f32; 2] = [58.0, 30.0];
 /// Where the audit logs go.
 const LOGS: &str = "logs";
 /// An outcome this unlikely or worse is called out in the log as luck.
@@ -190,14 +190,18 @@ impl Dealer {
 /// A match in progress, with everything the screens need.
 struct Playing {
     game: Game,
-    colours: Vec<usize>,
+    seating: Seating,
     dealer: Dealer,
     /// The claim the human is dialling in. Always legal.
     pending: Claim,
-    /// Dice as they were when the round ended, for the reveal.
-    revealed: Vec<Vec<u8>>,
-    /// The round's claims, kept because resolving a round clears them from the match.
-    round: Vec<Entry>,
+    /// Which seat opens the next round, once this one has been settled and shown.
+    ///
+    /// Set when a round resolves, taken when the player moves on. Holding it here is what
+    /// keeps the game on the round being shown: `Game::resolve` reveals every die and
+    /// leaves the round's claims alone, and it is `Game::next_round` that clears them, so
+    /// until that call the reveal screen reads the real match rather than a snapshot of
+    /// one.
+    opens: Option<usize>,
     verdict: Option<String>,
     audit: Audit,
 }
@@ -238,20 +242,6 @@ fn main() -> eframe::Result {
     )
 }
 
-fn colour_of(index: usize) -> egui::Color32 {
-    let [r, g, b] = PALETTE[index].rgb;
-    egui::Color32::from_rgb(r, g, b)
-}
-
-/// A tap target big enough for a finger.
-fn tap(ui: &mut egui::Ui, label: &str, enabled: bool) -> bool {
-    ui.add_enabled(
-        enabled,
-        egui::Button::new(egui::RichText::new(label).size(20.0)).min_size([64.0, 44.0].into()),
-    )
-    .clicked()
-}
-
 /// Reading the clock is the one piece of non-determinism outside the dice, and it happens
 /// here so that each match differs from the last and names its own log.
 fn stamp() -> u64 {
@@ -283,7 +273,7 @@ fn start(colour: usize, opponents: usize) -> Playing {
     let variants = Variants::default();
     let mut game = Game::start(order.clone(), variants);
     dealer.deal(&mut game);
-    let pending = first_legal(&game);
+    let pending = opening_claim(&game.view(HUMAN));
 
     let mut audit = Audit::open(std::path::Path::new(LOGS), at);
     audit.record(Event::Version {
@@ -309,25 +299,13 @@ fn start(colour: usize, opponents: usize) -> Playing {
 
     Playing {
         game,
-        colours,
+        seating: Seating::new((0..players).map(name_of).collect(), colours),
         dealer,
         pending,
-        revealed: Vec::new(),
-        round: Vec::new(),
+        opens: None,
         verdict: None,
         audit,
     }
-}
-
-fn first_legal(game: &Game) -> Claim {
-    game.public()
-        .legal_raises()
-        .first()
-        .copied()
-        .unwrap_or(Claim {
-            quantity: 1,
-            face: 1,
-        })
 }
 
 /// A player's seat. The minimal desktop game seats players in index order, so the two
@@ -409,28 +387,7 @@ fn setup(ui: &mut egui::Ui, colour: &mut usize, opponents: &mut usize) -> Option
     ui.heading("Your dice");
     ui.label(PALETTE[*colour].name);
 
-    egui::Grid::new("palette")
-        .spacing([6.0, 6.0])
-        .show(ui, |ui| {
-            for (index, swatch) in PALETTE.iter().enumerate() {
-                let selected = index == *colour;
-                let size = if selected { 52.0 } else { 44.0 };
-                if ui
-                    .add(
-                        egui::Button::new("")
-                            .fill(colour_of(index))
-                            .min_size([size, size].into()),
-                    )
-                    .on_hover_text(swatch.name)
-                    .clicked()
-                {
-                    *colour = index;
-                }
-                if index % 5 == 4 {
-                    ui.end_row();
-                }
-            }
-        });
+    palette_picker(ui, colour);
 
     ui.separator();
     ui.heading("Opponents");
@@ -450,274 +407,6 @@ fn setup(ui: &mut egui::Ui, colour: &mut usize, opponents: &mut usize) -> Option
         return Some(start(*colour, *opponents));
     }
     None
-}
-
-fn ink_of(index: usize) -> egui::Color32 {
-    let [r, g, b] = ink(PALETTE[index]);
-    egui::Color32::from_rgb(r, g, b)
-}
-
-/// One die: a fixed size box in its owner's colour, with a border and a value in whichever
-/// ink contrasts with that colour.
-///
-/// The border is what makes a black die visible against a dark background and a white one
-/// visible against a light one, whatever the theme does. `face` is `None` for a die whose
-/// value is not revealed; the box is the same size either way, so the dice line up in a
-/// grid whether they are shown or not.
-fn die(ui: &mut egui::Ui, swatch: usize, face: Option<u8>) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(DIE, DIE), egui::Sense::hover());
-    let ink = ink_of(swatch);
-    let painter = ui.painter();
-    painter.rect_filled(rect, 5.0, colour_of(swatch));
-    painter.rect_stroke(
-        rect,
-        5.0,
-        egui::Stroke::new(1.5, ink),
-        egui::StrokeKind::Inside,
-    );
-    match face {
-        Some(value) => {
-            painter.text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                value,
-                egui::FontId::proportional(17.0),
-                ink,
-            );
-        }
-        // A question mark rather than a dot: a dot reads as a die showing one.
-        None => {
-            painter.text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                "?",
-                egui::FontId::proportional(17.0),
-                ink,
-            );
-        }
-    }
-}
-
-/// Every player and their dice, in a grid so the columns line up across players.
-///
-/// Only the human's values are shown while a round is live; everyone else's dice occupy
-/// their slots unrevealed.
-fn table(ui: &mut egui::Ui, playing: &Playing, revealed: bool) {
-    let game = &playing.game;
-    let turn = (!game.public().over()).then(|| game.public().current());
-    egui::Grid::new("table").spacing([5.0, 5.0]).show(ui, |ui| {
-        // Turn order rather than player number, so who attacks whom is visible.
-        for &player in game.public().order() {
-            let out = game.public().eliminated(player);
-            let mut name = egui::RichText::new(name_of(player)).size(15.0);
-            if out {
-                name = name.strikethrough();
-            }
-            if turn == Some(player) {
-                name = name.strong();
-            }
-            ui.label(name);
-            ui.label(if turn == Some(player) {
-                egui::RichText::new("turn").size(13.0).strong()
-            } else {
-                egui::RichText::new("")
-            });
-
-            let dice: Vec<u8> = if revealed {
-                playing.revealed.get(player).cloned().unwrap_or_default()
-            } else {
-                game.view(HUMAN)
-                    .dice_of(player)
-                    .map(|dice| dice.to_vec())
-                    .unwrap_or_default()
-            };
-            let show = revealed || player == HUMAN;
-            if dice.is_empty() && out {
-                ui.label(egui::RichText::new("out").size(14.0).weak());
-            }
-            for value in dice {
-                die(ui, playing.colours[player], show.then_some(value));
-            }
-            ui.end_row();
-        }
-    });
-}
-
-/// Whose turn it is, what there is to beat, and how many dice are in play.
-fn standing(ui: &mut egui::Ui, playing: &Playing) {
-    let game = &playing.game;
-    let whose = if game.public().over() {
-        "match over".to_string()
-    } else if game.public().current() == HUMAN {
-        "Your turn".to_string()
-    } else {
-        format!("{}'s turn", name_of(game.public().current()))
-    };
-    let beat = match game.public().previous_claim() {
-        Some(claim) => format!("to beat: at least {} x {}", claim.quantity, claim.face),
-        None => "nothing to beat yet".to_string(),
-    };
-    ui.label(
-        egui::RichText::new(format!(
-            "{whose}   -   {beat}   -   {} dice in play",
-            game.public().dice_in_play()
-        ))
-        .size(16.0),
-    );
-}
-
-/// The chance that each claim the human could make is true.
-///
-/// Three rows, one per button. The standing claim's own chance is shown rather than the
-/// chance that calling liar is right, because those are complements and the claim is the
-/// thing on the table — but it is the number the liar decision turns on.
-fn odds(ui: &mut egui::Ui, view: &impl Seen, dialled: Claim, previous: Option<Claim>) {
-    ui.label(egui::RichText::new("Odds").strong());
-    egui::Grid::new("odds").spacing([10.0, 4.0]).show(ui, |ui| {
-        let row = |ui: &mut egui::Ui, what: &str, claim: String, chance: Option<f64>| {
-            ui.label(egui::RichText::new(what).size(15.0));
-            ui.label(egui::RichText::new(claim).size(15.0));
-            ui.label(
-                egui::RichText::new(match chance {
-                    Some(percent) => format!("{percent:.1}%"),
-                    None => "-".to_string(),
-                })
-                .size(16.0)
-                .strong(),
-            );
-            ui.end_row();
-        };
-
-        match previous {
-            Some(claim) => row(
-                ui,
-                "their claim",
-                format!("at least {} x {}", claim.quantity, claim.face),
-                Some(readout::percent(&view.chance_of(claim))),
-            ),
-            None => row(ui, "their claim", "none yet".to_string(), None),
-        }
-
-        row(
-            ui,
-            "your raise",
-            format!("at least {} x {}", dialled.quantity, dialled.face),
-            Some(readout::percent(&view.chance_of(dialled))),
-        );
-
-        match previous {
-            Some(claim) => row(
-                ui,
-                "spot on",
-                format!("exactly {} x {}", claim.quantity, claim.face),
-                Some(readout::percent(&view.chance_exactly(claim))),
-            ),
-            None => row(ui, "spot on", "not available".to_string(), None),
-        }
-    });
-}
-
-/// A dialled number, centred in a box the height of a tap target.
-///
-/// Fixed width, so a two digit quantity does not shift the button beside it, and the same
-/// height as the buttons, so the rows line up vertically as well as across.
-fn dialled_value(ui: &mut egui::Ui, value: u32) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(48.0, 44.0), egui::Sense::hover());
-    ui.painter().text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        value,
-        egui::FontId::proportional(24.0),
-        ui.visuals().text_color(),
-    );
-}
-
-/// A claim in its claimer's colour.
-///
-/// The grid position already says who claimed, so the claimer's dice do not have to be
-/// drawn beside it. An empty cell still takes its space, which is what keeps the columns
-/// lined up.
-fn claim_box(ui: &mut egui::Ui, swatch: usize, claim: Option<Claim>) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(CLAIM[0], CLAIM[1]), egui::Sense::hover());
-    let Some(claim) = claim else {
-        return;
-    };
-    let ink = ink_of(swatch);
-    let painter = ui.painter();
-    painter.rect_filled(rect, 5.0, colour_of(swatch));
-    painter.rect_stroke(
-        rect,
-        5.0,
-        egui::Stroke::new(1.5, ink),
-        egui::StrokeKind::Inside,
-    );
-    painter.text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        format!("{} x {}", claim.quantity, claim.face),
-        egui::FontId::proportional(15.0),
-        ink,
-    );
-}
-
-/// This round's claims: players down the side, trips around the table across the top.
-///
-/// A player's first claim sits in the first column, their second in the second, and so on,
-/// so a column is one time around the table and a row is one player's escalation. Reading
-/// along a row shows how far one player pushed.
-///
-/// Rows start with whoever opened the round rather than with the match's turn order, so the
-/// first column reads straight down in the order the claims were actually made.
-fn history(ui: &mut egui::Ui, playing: &Playing, entries: &[Entry]) {
-    ui.label(egui::RichText::new("This round").strong());
-    if entries.is_empty() {
-        ui.label("no claims yet");
-        return;
-    }
-
-    let mut claims: Vec<Vec<Claim>> = vec![Vec::new(); playing.colours.len()];
-    for entry in entries {
-        claims[entry.player].push(entry.claim);
-    }
-    let trips = claims.iter().map(Vec::len).max().unwrap_or(0);
-
-    let order = playing.game.public().order();
-    let opener = entries[0].player;
-    let from = order
-        .iter()
-        .position(|&player| player == opener)
-        .unwrap_or(0);
-    let rotated: Vec<usize> = order[from..]
-        .iter()
-        .chain(order[..from].iter())
-        .copied()
-        .collect();
-
-    egui::Grid::new("history")
-        .spacing([4.0, 4.0])
-        .show(ui, |ui| {
-            ui.label("");
-            for trip in 1..=trips {
-                ui.label(egui::RichText::new(format!("{trip}")).size(13.0).weak());
-            }
-            ui.end_row();
-
-            for &player in &rotated {
-                // A player who never claimed and is out of the match has nothing to show.
-                if claims[player].is_empty() && playing.game.public().eliminated(player) {
-                    continue;
-                }
-                ui.label(egui::RichText::new(name_of(player)).size(14.0));
-                for trip in 0..trips {
-                    claim_box(
-                        ui,
-                        playing.colours[player],
-                        claims[player].get(trip).copied(),
-                    );
-                }
-                ui.end_row();
-            }
-        });
 }
 
 /// How likely the claimant's own claim was true, from what they could see when they made
@@ -793,7 +482,7 @@ fn run_opponents(playing: &mut Playing) -> Option<Screen> {
             return Some(screen);
         }
     }
-    playing.pending = first_legal(&playing.game);
+    playing.pending = opening_claim(&playing.game.view(HUMAN));
     None
 }
 
@@ -801,8 +490,6 @@ fn run_opponents(playing: &mut Playing) -> Option<Screen> {
 fn apply(playing: &mut Playing, call: Call) -> Option<Screen> {
     let disputed = playing.game.public().previous_claim();
     let actor = playing.game.public().current();
-    // Resolving a round clears its claims from the match, so they are kept here first.
-    let round: Vec<Entry> = playing.game.public().history().to_vec();
     let odds = claimant_odds(&playing.game, actor, call);
     let previous_player = playing.game.public().previous_player();
     // Judging luck needs the round's dice, which beginning the next round forgets.
@@ -828,6 +515,10 @@ fn apply(playing: &mut Playing, call: Call) -> Option<Screen> {
         Claimed::RoundEnded => {
             // A desktop game holds every die, so the round settles on the first ask. A
             // networked client gets `None` here until the relay reveals the round.
+            let resolution = playing
+                .game
+                .resolve()
+                .expect("a desktop game knows every die");
             let Resolution {
                 opens,
                 affected: _,
@@ -838,49 +529,9 @@ fn apply(playing: &mut Playing, call: Call) -> Option<Screen> {
                 eliminated,
                 truth,
                 over,
-            } = playing
-                .game
-                .resolve()
-                .expect("a desktop game knows every die");
-            // Now that the round is revealed, every seat's dice may be shown.
-            let snapshot: Vec<Vec<u8>> = (0..playing.colours.len())
-                .map(|player| {
-                    playing
-                        .game
-                        .view(HUMAN)
-                        .dice_of(player)
-                        .map(|dice| dice.to_vec())
-                        .unwrap_or_default()
-                })
-                .collect();
+            } = resolution;
             let claim = disputed.expect("a resolution always disputes a claim");
-            let mut said = match call {
-                Call::Liar => format!("{} called liar", name_of(actor)),
-                Call::SpotOn => format!("{} called spot on", name_of(actor)),
-                Call::Raise(_) => unreachable!("a raise does not resolve a round"),
-            };
-            said.push_str(&format!(
-                " on at least {} × {}. There were {truth}.",
-                claim.quantity, claim.face
-            ));
-            if let Some(player) = gained {
-                said.push_str(&format!(" {} gained a die.", name_of(player)));
-            }
-            if let Some(player) = shield_gained {
-                said.push_str(&format!(" {} gained a shield token.", name_of(player)));
-            }
-            if let Some(player) = lost {
-                said.push_str(&format!(" {} lost a die.", name_of(player)));
-            }
-            if let Some(player) = shield_spent {
-                said.push_str(&format!(
-                    " {} spent a shield token instead of losing a die.",
-                    name_of(player)
-                ));
-            }
-            if let Some(player) = eliminated {
-                said.push_str(&format!(" {} is out.", name_of(player)));
-            }
+            let said = verdict(&playing.seating, actor, call, claim, &resolution);
 
             playing.audit.record(match call {
                 Call::Liar => Event::Liar {
@@ -939,8 +590,6 @@ fn apply(playing: &mut Playing, call: Call) -> Option<Screen> {
                 playing.audit.record(event);
             }
 
-            playing.revealed = snapshot;
-            playing.round = round;
             playing.verdict = Some(said);
             if over {
                 playing
@@ -954,19 +603,10 @@ fn apply(playing: &mut Playing, call: Call) -> Option<Screen> {
                 playing.audit.record(Event::NextTurn {
                     seat: seat_of(opens),
                 });
-                // The round that just ended is revealed, then the next one is begun,
-                // dealt, and committed to. Settling a round no longer deals the next:
-                // a client is dealt by the relay, and a desktop game by its own dealer,
-                // so both do it here rather than inside the rules.
-                let players = playing.colours.len();
-                playing
-                    .audit
-                    .record_reveal(&playing.dealer, playing.game.public().round());
-                playing.game.next_round(opens);
-                playing.dealer.deal(&mut playing.game);
-                playing
-                    .audit
-                    .record_deal(&playing.game, &playing.dealer, players);
+                // The game stays on the round that just ended, because that is the
+                // round the reveal screen shows. Beginning the next one is what the
+                // `Next round` button does.
+                playing.opens = Some(opens);
                 Some(Screen::Reveal)
             }
         }
@@ -981,92 +621,20 @@ fn play(ui: &mut egui::Ui, playing: &mut Playing) -> Option<Screen> {
         return Some(screen);
     }
 
-    table(ui, playing, false);
+    let view = playing.game.view(HUMAN);
+    table(ui, &view, &playing.seating);
     ui.separator();
-    standing(ui, playing);
-    history(ui, playing, playing.game.public().history());
+    standing(ui, &view, &playing.seating);
+    history(ui, &view, &playing.seating);
     ui.separator();
-
-    let game = &playing.game;
-    let view = game.view(HUMAN);
 
     ui.label(egui::RichText::new("Your claim").strong());
-    let pending = playing.pending;
-    let step = |claim: Claim| game.public().check_raise(claim).is_ok();
-
-    let mut dialled = pending;
-    egui::Grid::new("dialler")
-        .spacing([6.0, 6.0])
-        .show(ui, |ui| {
-            ui.label(egui::RichText::new("quantity").size(16.0));
-            if tap(
-                ui,
-                "-",
-                pending.quantity > 0
-                    && step(Claim {
-                        quantity: pending.quantity - 1,
-                        ..pending
-                    }),
-            ) {
-                dialled.quantity -= 1;
-            }
-            dialled_value(ui, pending.quantity);
-            if tap(
-                ui,
-                "+",
-                step(Claim {
-                    quantity: pending.quantity + 1,
-                    ..pending
-                }),
-            ) {
-                dialled.quantity += 1;
-            }
-            ui.end_row();
-
-            ui.label(egui::RichText::new("face").size(16.0));
-            if tap(
-                ui,
-                "-",
-                pending.face > 1
-                    && step(Claim {
-                        face: pending.face - 1,
-                        ..pending
-                    }),
-            ) {
-                dialled.face -= 1;
-            }
-            dialled_value(ui, pending.face as u32);
-            if tap(
-                ui,
-                "+",
-                pending.face < 6
-                    && step(Claim {
-                        face: pending.face + 1,
-                        ..pending
-                    }),
-            ) {
-                dialled.face += 1;
-            }
-            ui.end_row();
-        });
-    playing.pending = dialled;
-
-    odds(ui, &view, playing.pending, game.public().previous_claim());
-
+    let mut pending = playing.pending;
+    dialler(ui, &view, &mut pending);
+    odds(ui, &view, pending);
     ui.separator();
-    let has_previous = game.public().previous_claim().is_some();
-    let mut call = None;
-    ui.horizontal(|ui| {
-        if tap(ui, "Raise", step(playing.pending)) {
-            call = Some(Call::Raise(playing.pending));
-        }
-        if tap(ui, "Liar", has_previous) {
-            call = Some(Call::Liar);
-        }
-        if tap(ui, "Spot On", has_previous) {
-            call = Some(Call::SpotOn);
-        }
-    });
+    let call = calls(ui, &view, pending);
+    playing.pending = pending;
 
     if let Some(call) = call {
         if let Some(screen) = apply(playing, call) {
@@ -1083,16 +651,30 @@ fn reveal(ui: &mut egui::Ui, playing: &mut Playing) -> Option<Screen> {
         ui.label(egui::RichText::new(verdict).size(17.0));
     }
     ui.separator();
-    table(ui, playing, true);
+    let view = playing.game.view(HUMAN);
+    table(ui, &view, &playing.seating);
     ui.separator();
-    standing(ui, playing);
-    history(ui, playing, &playing.round.clone());
+    standing(ui, &view, &playing.seating);
+    history(ui, &view, &playing.seating);
     ui.separator();
-    if tap(ui, "Next round", true) {
-        playing.revealed.clear();
-        playing.round.clear();
+    // The round that just ended is written to the log, then the next one is begun, dealt
+    // and committed to. Settling a round does not deal the next: a client is dealt by the
+    // relay and a desktop game by its own dealer, so both do it here rather than in the
+    // rules.
+    if tap(ui, "Next round", true)
+        && let Some(opens) = playing.opens.take()
+    {
+        let players = playing.seating.len();
+        playing
+            .audit
+            .record_reveal(&playing.dealer, playing.game.public().round());
+        playing.game.next_round(opens);
+        playing.dealer.deal(&mut playing.game);
+        playing
+            .audit
+            .record_deal(&playing.game, &playing.dealer, players);
         playing.verdict = None;
-        playing.pending = first_legal(&playing.game);
+        playing.pending = opening_claim(&playing.game.view(HUMAN));
         return Some(Screen::Play);
     }
     None
@@ -1104,27 +686,17 @@ fn over(ui: &mut egui::Ui, playing: &mut Playing) -> Option<Screen> {
         ui.label(egui::RichText::new(verdict).size(17.0));
     }
     ui.separator();
-    table(ui, playing, true);
+    let view = playing.game.view(HUMAN);
+    table(ui, &view, &playing.seating);
     ui.separator();
-    history(ui, playing, &playing.round.clone());
+    history(ui, &view, &playing.seating);
     ui.separator();
-    ui.label(egui::RichText::new("Finishing order").strong());
-    egui::Grid::new("ranking")
-        .spacing([5.0, 5.0])
-        .show(ui, |ui| {
-            for (place, player) in playing.game.public().ranking().iter().enumerate() {
-                ui.label(
-                    egui::RichText::new(format!("{}. {}", place + 1, name_of(*player))).size(16.0),
-                );
-                die(ui, playing.colours[*player], None);
-                ui.end_row();
-            }
-        });
+    ranking(ui, &view, &playing.seating);
     ui.separator();
     if tap(ui, "New match", true) {
         return Some(Screen::Setup {
-            colour: playing.colours[HUMAN],
-            opponents: playing.colours.len() - 1,
+            colour: playing.seating.colour(HUMAN),
+            opponents: playing.seating.len() - 1,
         });
     }
     None
