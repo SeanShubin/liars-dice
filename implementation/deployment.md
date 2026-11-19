@@ -236,4 +236,16 @@ autocorrect. This is what `Text entry works with an on-screen keyboard` depends 
 should be proved on a real tablet rather than assumed.
 
 ## Status
-Not started
+The static half is built and has run. One push drove the whole pipeline end to end for the
+first time on 2026-11-18: the gate formatted, linted with warnings denied, tested, built
+the release wasm bundle and checked every page reachable from the root, and the deploy
+updated the stack, synced both cache classes, invalidated the edge and confirmed `/` and
+`/liars-dice/hotseat/` answer 200. `scripts/push` is the way it is run.
+
+Two things that first run settled, neither of which any amount of local green could have:
+the workspace had never been compiled on Linux and it compiles clean, and the deploy role's
+trust condition had never been exercised and was wrong - see Bootstrap above.
+
+Not started: everything server side. The relay service, the DynamoDB log, the API Gateway
+WebSocket connection table and Discord OAuth are all still stubs, and the deployed stack is
+seven resources of static hosting. What is live is the hotseat match, which needs no server.
