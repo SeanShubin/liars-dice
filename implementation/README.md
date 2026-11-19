@@ -51,6 +51,7 @@ Not started | In progress | Built
 - [Game State](/implementation/game-state.md) — the whole game, one player's view, the operations
 - [Coordinator](/implementation/coordinator.md) — the client, and whatever drives it
 - [Relay and Lobby](/implementation/relay.md) — hosting, joining, dealing, fan-out, reconnection
+- [Relay Service](/implementation/relay-service.md) — the deployed relay: DynamoDB, the WebSocket, the Lambda
 - [Dice Integrity](/implementation/integrity.md) — commitment, seed derivation, reveal
 - [Protocol](/implementation/protocol.md) — seats, the version line, shield events
 - [Deployment](/implementation/deployment.md) — the GitHub pipeline, AWS wiring, Discord OAuth
