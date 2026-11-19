@@ -54,6 +54,7 @@ Not started | In progress | Built
 - [Dice Integrity](/implementation/integrity.md) — commitment, seed derivation, reveal
 - [Protocol](/implementation/protocol.md) — seats, the version line, shield events
 - [Deployment](/implementation/deployment.md) — the GitHub pipeline, AWS wiring, Discord OAuth
+- [Hotseat](/implementation/hotseat.md) — one screen passed between seats, and the one presentation both deliveries draw
 
 ## Order
 

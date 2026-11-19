@@ -150,14 +150,16 @@ into a throwaway lockfile and runs the full test suite against it: a broken upgr
 the run and notifies, without touching production. That second job is the only thing that
 can make `A broken upgrade is discovered automatically` true of the repository.
 
-### The hotseat harness
+### The hotseat match
 
 `seanshubin.com/liars-dice/hotseat` is the first thing deployed, and it is deliberately
 the cheapest thing that proves the most: it exercises the build, the bucket, the
 distribution, the routing, the directory-index function and the whole game, while needing
-no relay, no authentication and no database. A harness rather than a game — hidden
-information makes one screen nonsense to play seriously — so it shows every seat at once
-instead of pretending otherwise.
+no relay, no authentication and no database.
+
+It is a real match rather than a demonstration of one: the screen shows what one seat may
+see and is handed over between seats, so hidden information survives having one device.
+How that works is [Hotseat](/implementation/hotseat.md).
 
 Measured: **2.8 MB raw, 1.34 MB gzipped**, against the 44.2 MB and 13.8 MB a Bevy page
 serves. That is the number the host decision was argued on and it is now a measurement.

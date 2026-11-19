@@ -15,10 +15,28 @@
 - A web game is multiplayer
 - A player using one presentation and a player using the other can be in the same match
 
-## Harness
-- The hotseat harness seats every player in one browser
-- The hotseat harness has no network and no authentication
-- A harness is not a game, and no statement about a game applies to it
+## Hotseat
+- Hotseat is a seating arrangement, not a game
+- In a hotseat match every seat is in one browser
+- A hotseat match has no network
+- A hotseat match has no authentication
+- A hotseat match plays by every rule of the game
+- No seat in a hotseat match sees more than it would see on its own device
+- The screen shows the match as one seat sees it
+- The screen shows nothing that seat cannot see
+- The screen names the seat it shows
+- A seat is held by a human or by a virtual player
+- A virtual player takes its turn without the local player acting
+- The screen is handed over before a human seat other than the one shown acts
+- A handover screen shows no part of the match
+- A handover screen names the seat taking the screen
+- The host adds a virtual player to a seat
+- The host launches the match
+- A round's outcome is shown before the next round begins
+- The local player chooses when the next round begins
+- Every seat may be a virtual player
+- When every seat is a virtual player the match plays without the local player acting
+- When every seat is a virtual player the screen shows the match as the first seat sees it
 
 ## Desktop
 - A desktop game has one human

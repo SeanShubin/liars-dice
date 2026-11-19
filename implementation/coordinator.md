@@ -150,8 +150,8 @@ In `apps/local`, against the real relay over `relay::memory`:
   left, given the same events. This is the reconnection property stated as an equivalence
   rather than as a procedure.
 - Hotseat, incidentally: three clients in one process with scripted drivers is exactly
-  hotseat, and it needs no product statement because the specification describes the game
-  rather than the harness.
+  hotseat, which is why hotseat needs nothing here beyond a screen and a driver fed by a
+  person. See [Hotseat](/implementation/hotseat.md).
 
 ## Status
 Built. `crates/coordinator` is the client and the `Decides` trait; `apps/local` seats N

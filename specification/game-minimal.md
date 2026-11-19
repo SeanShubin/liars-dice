@@ -12,7 +12,7 @@
 - A probability does not account for any player's behaviour
 - Every claim of the current round is listed
 - A listed claim shows the claim
-- The dice each player holds are shown
+- How many dice each player holds is shown
 
 ## Out of Scope
 - The minimal presentation does not represent dice as physical objects
