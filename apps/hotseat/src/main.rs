@@ -58,8 +58,8 @@ fn seat(secret: u8) -> Table {
 }
 
 impl eframe::App for Harness {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ctx, |ui| {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        egui::Frame::central_panel(ui.style()).show(ui, |ui| {
             ui.heading("Liars Dice — hotseat harness");
             ui.label(
                 "Every seat is a virtual player. Nothing here is networked: the relay, \

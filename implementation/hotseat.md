@@ -132,12 +132,40 @@ so `Rc` is the honest choice over an `Arc` that would never be contended.
 
 ## Decisions
 
-**One egui in the workspace.** `eframe 0.33` resolved egui 0.33.3 and `bevy_egui 0.43.1`
-resolves egui 0.36.2, so there were two incompatible copies and no shared widget crate was
-possible. The options were to pin `eframe` to 0.36, to hold `bevy_egui` back to an egui 0.33
-release, or to move `apps/minimal` off Bevy. Pinning eframe to 0.36 is the smallest change
-that unifies them and it keeps both apps on a supported release; moving `apps/minimal` off
-Bevy is a larger question that the pretty presentation should decide, not this document.
+**Both deliveries of the minimal presentation run on eframe, and Bevy leaves
+`apps/minimal`.** A shared widget crate needs one egui, and there were two: `eframe 0.33`
+resolved egui 0.33.3 while `bevy_egui 0.43.1` resolves egui 0.36.2.
+
+Pinning `eframe` to 0.36 to meet `bevy_egui` was the smallest change and it was the wrong
+one, because it is paid for on every page load. Measured, same app, wasm-opt `-Oz`:
+
+| egui | raw | gzipped |
+| --- | --- | --- |
+| 0.33 | 2.87 MB | 1.34 MB |
+| 0.36 | 4.53 MB | 1.95 MB |
+| 0.37 | 3.96 MB | 1.55 MB |
+
+Meeting Bevy's egui would have cost 45% of the transfer size to avoid a migration that
+turned out to be about twenty-five lines: `apps/minimal` used Bevy for an app builder, a
+2D camera, two `Resource` derives and two `warn!` calls, and nothing else. So it moves to
+eframe instead, both apps sit on eframe 0.37, and the shared crate targets one egui.
+
+Three things follow that are worth more than the size. `apps/minimal` stops carrying a
+game engine to draw rectangles, which is `The minimal presentation asks least of the
+machine it runs on` taken seriously. The minimal *web* game that
+[applications.md](/specification/applications.md) requires becomes reachable, because one
+eframe binary targets a window and a canvas — Bevy's path to the browser is the 44 MB
+bundle already rejected. And `main` shrinks: one `Minimal` struct holding the screen and
+the match, instead of two resources and a system.
+
+0.37 rather than 0.33, despite 0.33 being the smallest, because 0.33 is three releases
+behind and the 210 KB is gzipped weight on a file served `immutable` for a year. The growth
+is egui's new CPU renderer — 0.37 pulls `vello_cpu`, `read-fonts` and `fearless_simd`.
+
+Bevy stays in the workspace for `crates/dice-render` and `apps/prototype`, which are the
+3D spike, so `bevy_egui` keeps egui 0.36 in the build. Nothing links both: the prototype
+does not use `render-minimal`. When the pretty presentation is built it will have to answer
+this question again, and the answer will probably be that Bevy belongs only to the spike.
 
 **A virtual player is still only a driver.** Hotseat adds no account kind, no protocol
 field and no branch in the relay. The seat a virtual player holds is `Account::Ai`, which

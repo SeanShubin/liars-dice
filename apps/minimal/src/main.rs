@@ -6,8 +6,7 @@
 //!
 //! Realizes /specification/game-minimal.md.
 
-use bevy::prelude::*;
-use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
+use eframe::egui;
 
 use std::io::Write;
 
@@ -71,7 +70,7 @@ impl Audit {
         match opened {
             Ok(file) => Self { file: Some(file) },
             Err(reason) => {
-                warn!("no audit log: {reason}");
+                eprintln!("no audit log: {reason}");
                 Self { file: None }
             }
         }
@@ -81,7 +80,7 @@ impl Audit {
         if let Some(file) = self.file.as_mut()
             && let Err(reason) = writeln!(file, "{event}")
         {
-            warn!("audit log write failed: {reason}");
+            eprintln!("audit log write failed: {reason}");
             self.file = None;
         }
     }
@@ -207,7 +206,7 @@ struct Playing {
 /// sit varies.
 const HUMAN: usize = 0;
 
-#[derive(Resource, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Screen {
     Setup { colour: usize, opponents: usize },
     Play,
@@ -215,30 +214,28 @@ enum Screen {
     Over,
 }
 
-/// The match in progress. Separate from [`Screen`] so changing screens never moves it.
-#[derive(Resource, Default)]
-struct Table(Option<Playing>);
+/// The window: which screen is showing, and the match behind it.
+///
+/// The match is held separately from the screen so that changing screens never moves it.
+struct Minimal {
+    screen: Screen,
+    playing: Option<Playing>,
+}
 
-fn main() {
-    App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "Liars Dice".into(),
-                ..default()
-            }),
-            ..default()
-        }))
-        .add_plugins(EguiPlugin::default())
-        .insert_resource(Screen::Setup {
-            colour: 1,
-            opponents: 3,
-        })
-        .insert_resource(Table::default())
-        .add_systems(Startup, |mut commands: Commands| {
-            commands.spawn(Camera2d);
-        })
-        .add_systems(EguiPrimaryContextPass, screen)
-        .run();
+fn main() -> eframe::Result {
+    eframe::run_native(
+        "Liars Dice",
+        eframe::NativeOptions::default(),
+        Box::new(|_| {
+            Ok(Box::new(Minimal {
+                screen: Screen::Setup {
+                    colour: 1,
+                    opponents: 3,
+                },
+                playing: None,
+            }))
+        }),
+    )
 }
 
 fn colour_of(index: usize) -> egui::Color32 {
@@ -360,53 +357,52 @@ fn name_of(player: usize) -> String {
     }
 }
 
-fn screen(
-    mut contexts: EguiContexts,
-    mut screen: ResMut<Screen>,
-    mut table: ResMut<Table>,
-) -> Result {
-    let context = contexts.ctx_mut()?.clone();
-    let mut next: Option<Screen> = None;
+impl eframe::App for Minimal {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        egui::Frame::central_panel(ui.style()).show(ui, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| self.screen(ui));
+        });
+    }
+}
 
-    egui::Window::new("Liars Dice")
-        .default_width(560.0)
-        .default_pos([20.0, 20.0])
-        .show(&context, |ui| {
-            let mut current = *screen;
-            match &mut current {
-                Screen::Setup { colour, opponents } => {
-                    if let Some(started) = setup(ui, colour, opponents) {
-                        table.0 = Some(started);
-                        next = Some(Screen::Play);
-                    } else {
-                        next = Some(Screen::Setup {
-                            colour: *colour,
-                            opponents: *opponents,
-                        });
-                    }
-                }
-                Screen::Play => {
-                    if let Some(playing) = table.0.as_mut() {
-                        next = play(ui, playing);
-                    }
-                }
-                Screen::Reveal => {
-                    if let Some(playing) = table.0.as_mut() {
-                        next = reveal(ui, playing);
-                    }
-                }
-                Screen::Over => {
-                    if let Some(playing) = table.0.as_mut() {
-                        next = over(ui, playing);
-                    }
+impl Minimal {
+    /// One screen at a time. Which one is a value, so the transitions are all in one
+    /// place rather than spread through the screens that cause them.
+    fn screen(&mut self, ui: &mut egui::Ui) {
+        let mut next: Option<Screen> = None;
+        let mut current = self.screen;
+        match &mut current {
+            Screen::Setup { colour, opponents } => {
+                if let Some(started) = setup(ui, colour, opponents) {
+                    self.playing = Some(started);
+                    next = Some(Screen::Play);
+                } else {
+                    next = Some(Screen::Setup {
+                        colour: *colour,
+                        opponents: *opponents,
+                    });
                 }
             }
-        });
-
-    if let Some(screen_next) = next {
-        *screen = screen_next;
+            Screen::Play => {
+                if let Some(playing) = self.playing.as_mut() {
+                    next = play(ui, playing);
+                }
+            }
+            Screen::Reveal => {
+                if let Some(playing) = self.playing.as_mut() {
+                    next = reveal(ui, playing);
+                }
+            }
+            Screen::Over => {
+                if let Some(playing) = self.playing.as_mut() {
+                    next = over(ui, playing);
+                }
+            }
+        }
+        if let Some(screen) = next {
+            self.screen = screen;
+        }
     }
-    Ok(())
 }
 
 fn setup(ui: &mut egui::Ui, colour: &mut usize, opponents: &mut usize) -> Option<Playing> {

@@ -161,10 +161,13 @@ It is a real match rather than a demonstration of one: the screen shows what one
 see and is handed over between seats, so hidden information survives having one device.
 How that works is [Hotseat](/implementation/hotseat.md).
 
-Measured: **2.8 MB raw, 1.34 MB gzipped**, against the 44.2 MB and 13.8 MB a Bevy page
-serves. That is the number the host decision was argued on and it is now a measurement.
-Enabling both the `glow` and `wgpu` backends breaks the wasm build outright; `glow` alone
-builds and carries nothing a two dimensional presentation does not use.
+Measured: **3.96 MB raw, 1.55 MB gzipped** on eframe 0.37, against the 44.2 MB and
+13.8 MB a Bevy page serves. That is the number the host decision was argued on and it is
+now a measurement. It was 2.87 MB and 1.34 MB on eframe 0.33; the growth is egui's new CPU
+renderer, and why that is paid rather than avoided is in
+[Hotseat](/implementation/hotseat.md). Enabling both the `glow` and `wgpu` backends breaks
+the wasm build outright; `glow` alone builds and carries nothing a two dimensional
+presentation does not use.
 
 ### Desktop builds
 
