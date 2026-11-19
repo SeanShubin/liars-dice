@@ -94,7 +94,7 @@ fn log_table(runtime: &Runtime, client: &Client) -> String {
                 .attribute_definitions(attribute(codec::POSITION, ScalarAttributeType::N))
                 .send(),
         )
-        .expect("DynamoDB Local should be reachable; see this file's header");
+        .expect("the table should be created; if nothing answers at all, see this file's header");
     table
 }
 
@@ -121,13 +121,13 @@ fn connection_table(runtime: &Runtime, client: &Client) -> String {
                 .table_name(&table)
                 .billing_mode(BillingMode::PayPerRequest)
                 .key_schema(key(codec::MATCH, KeyType::Hash))
-                .key_schema(key(CONNECTION, KeyType::Hash))
+                .key_schema(key(CONNECTION, KeyType::Range))
                 .attribute_definitions(attribute(codec::MATCH, ScalarAttributeType::S))
                 .attribute_definitions(attribute(CONNECTION, ScalarAttributeType::S))
                 .global_secondary_indexes(index)
                 .send(),
         )
-        .expect("DynamoDB Local should be reachable; see this file's header");
+        .expect("the table should be created; if nothing answers at all, see this file's header");
     table
 }
 

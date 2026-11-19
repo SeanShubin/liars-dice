@@ -291,9 +291,12 @@ and is in the gate. `protocol` gained `Moment::to_unix_nanos`, and the test that
 inverses `from_unix_nanos` found an overflow in it on the first run, in the year 2262,
 where nanoseconds pass `i64`.
 
-What is written but not yet run: the seven tests against DynamoDB Local. The gate has the
-container and runs them with `--include-ignored`; they are `#[ignore]` so that a machine
-without Docker still gets an honest green.
+The seven tests against DynamoDB Local pass: the conditional write refuses a taken
+position without overwriting it, eight threads racing one position produce exactly one
+winner, `matches()` lists a match once however many events it holds, the reverse index
+answers `$disconnect`, and the meter reports one scan, three reads and six events for a
+lobby view over three matches. They are `#[ignore]` so a machine without Docker still
+gets an honest green, and the gate runs them with `--include-ignored`.
 
 Not started: the three handlers, the SSM read for the `Secret`, the two tables in
 CloudFormation, and the Lambda artifact in the pipeline. Until those exist this crate
