@@ -45,6 +45,67 @@ pub enum Role {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Taken;
 
+/// The log moved while a message was being decided, so the decision is thrown away.
+///
+/// Never returned to a caller: [`Relay::receive`] reads again and decides again, and the
+/// client is told nothing because nothing happened.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Stale;
+
+/// How many times one message may be decided before the relay gives up.
+///
+/// A turn-based game has no contention to speak of — two players acting at the same
+/// instant is the whole of it — so reaching this means something is wrong that retrying
+/// will not fix. Failing the invocation is the right answer: nothing has been written, and
+/// the client is free to send the message again.
+const MAX_ATTEMPTS: usize = 16;
+
+/// One match's log as a message is being decided against it.
+///
+/// Holds what was read and what is about to be appended, which is what makes a decision
+/// and the write that follows it one unit. Every guard in every handler reads this rather
+/// than the log, so a handler sees its own writes — `round_over` counts the
+/// acknowledgement it just added — without any of them reaching storage until the whole
+/// message does.
+struct Working {
+    match_id: MatchId,
+    /// The length of the log this was read at. The version the decision is based on.
+    at: u64,
+    /// The events read, then the ones this message adds.
+    events: Vec<Event>,
+    /// Where the added ones begin.
+    added: usize,
+}
+
+impl Working {
+    /// A match that must not already exist.
+    ///
+    /// `at` is zero rather than the end of whatever is there, so creating a match is a
+    /// claim on position zero. Without that, a host that lost the race for an id would
+    /// append its events to the end of the winner's match and both would be told they
+    /// created it.
+    fn fresh(match_id: MatchId) -> Self {
+        Self {
+            match_id,
+            at: 0,
+            events: Vec::new(),
+            added: 0,
+        }
+    }
+
+    fn view(&self) -> MatchView {
+        MatchView::fold(&self.events)
+    }
+
+    fn push(&mut self, event: Event) {
+        self.events.push(event);
+    }
+
+    fn added(&self) -> &[Event] {
+        &self.events[self.added..]
+    }
+}
+
 /// The append-only event log. The only state.
 pub trait Log {
     /// Append every event at consecutive positions from `from`, or append none of them.
@@ -249,7 +310,26 @@ impl<L: Log, C: Connections> Relay<L, C> {
         MatchView::fold(&self.log.read(match_id))
     }
 
+    /// Serve one message: decide it against the log, and commit it to the log it was
+    /// decided against.
+    ///
+    /// The loop is the concurrency design. Every handler reads the log, decides from what
+    /// it read, and appends at the length it saw; if something else appended first the
+    /// append is refused, the decision is discarded, and the whole message is decided
+    /// again against what is now there. See `The position is the version` in
+    /// /implementation/relay.md.
     pub fn receive(&mut self, from: &ConnectionId, message: Message) -> Outcome {
+        for _ in 0..MAX_ATTEMPTS {
+            match self.attempt(from, message.clone()) {
+                Ok(outcome) => return outcome,
+                Err(Stale) => continue,
+            }
+        }
+        panic!("gave up deciding a message after {MAX_ATTEMPTS} attempts; nothing was written");
+    }
+
+    /// Read the log, decide, and commit — once.
+    fn attempt(&mut self, from: &ConnectionId, message: Message) -> Result<Outcome, Stale> {
         match message {
             Message::Host {
                 account,
@@ -273,6 +353,28 @@ impl<L: Log, C: Connections> Relay<L, C> {
         }
     }
 
+    /// The match's log as it is now, ready to be decided against.
+    fn open(&self, match_id: &MatchId) -> Working {
+        let events = self.log.read(match_id);
+        let at = events.len() as u64;
+        Working {
+            match_id: match_id.clone(),
+            at,
+            events,
+            added: at as usize,
+        }
+    }
+
+    /// Append what the message added, at the position it was decided against.
+    fn commit(&mut self, work: &Working) -> Result<(), Stale> {
+        if work.added().is_empty() {
+            return Ok(());
+        }
+        self.log
+            .append(&work.match_id, work.at, work.added())
+            .map_err(|Taken| Stale)
+    }
+
     /// A connection went away. Its seat is absent until it returns.
     pub fn disconnect(&mut self, connection: &ConnectionId) {
         self.connections.detach(connection);
@@ -285,33 +387,37 @@ impl<L: Log, C: Connections> Relay<L, C> {
         name: String,
         colour: String,
         version: u32,
-    ) -> Outcome {
+    ) -> Result<Outcome, Stale> {
         if version != PROTOCOL_VERSION {
-            return Outcome::refused(Refused::VersionMismatch {
+            return Ok(Outcome::refused(Refused::VersionMismatch {
                 match_version: PROTOCOL_VERSION,
                 yours: version,
-            });
+            }));
         }
         let match_id = MatchId(format!("match-{}", self.log.matches().len()));
         let seat = Seat(0);
-        self.write(&match_id, Event::Version { protocol: version });
-        self.write(
-            &match_id,
-            Event::Join {
-                seat,
-                name,
-                colour,
-                account,
-            },
-        );
-        self.write(&match_id, Event::Host { seat });
+        // `fresh` rather than `open`: a new match is a claim on position zero, so losing
+        // the race for the name refuses the whole message instead of appending these
+        // three events to the end of somebody else's match.
+        let mut work = Working::fresh(match_id.clone());
+        work.push(Event::Version { protocol: version });
+        work.push(Event::Join {
+            seat,
+            name,
+            colour,
+            account,
+        });
+        work.push(Event::Host { seat });
+        self.commit(&work)?;
+        // After the commit, because a connection attached to a match that was never
+        // created is a row pointing at nothing.
         self.connections
             .attach(&match_id, from.clone(), seat, Role::Player);
-        Outcome {
+        Ok(Outcome {
             refused: None,
             sends: Vec::new(),
             created: Some(match_id),
-        }
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -323,29 +429,33 @@ impl<L: Log, C: Connections> Relay<L, C> {
         name: String,
         colour: String,
         version: u32,
-    ) -> Outcome {
-        let view = self.view(&match_id);
+    ) -> Result<Outcome, Stale> {
+        let mut work = self.open(&match_id);
+        let view = work.view();
         if view.host().is_none() {
-            return Outcome::refused(Refused::NoSuchMatch);
+            return Ok(Outcome::refused(Refused::NoSuchMatch));
         }
         if version != view.version {
-            return Outcome::refused(Refused::VersionMismatch {
+            return Ok(Outcome::refused(Refused::VersionMismatch {
                 match_version: view.version,
                 yours: version,
-            });
+            }));
         }
         if view.started {
-            return Outcome::refused(Refused::AlreadyStarted);
+            return Ok(Outcome::refused(Refused::AlreadyStarted));
         }
         if view.is_barred(&account) {
-            return Outcome::refused(Refused::Barred);
+            return Ok(Outcome::refused(Refused::Barred));
         }
         if view.seats.len() >= MAX_PLAYERS {
-            return Outcome::refused(Refused::MatchIsFull);
+            return Ok(Outcome::refused(Refused::MatchIsFull));
         }
         if view.seats.iter().any(|seat| seat.colour == colour) {
-            return Outcome::refused(Refused::ColourTaken);
+            return Ok(Outcome::refused(Refused::ColourTaken));
         }
+        // Every guard above read the same snapshot this event is appended against, so the
+        // seat, the colour, the player count and the started flag are all decided by the
+        // commit rather than merely consulted before it.
         let seat = Seat(view.seats.len() as u8);
         let event = Event::Join {
             seat,
@@ -353,45 +463,55 @@ impl<L: Log, C: Connections> Relay<L, C> {
             colour,
             account,
         };
-        self.write(&match_id, event.clone());
+        work.push(event.clone());
+        self.commit(&work)?;
         self.connections
             .attach(&match_id, from.clone(), seat, Role::Player);
-        Outcome {
+        Ok(Outcome {
             refused: None,
             sends: self.to_everyone(&match_id, event),
             created: None,
-        }
+        })
     }
 
-    fn bar(&mut self, from: &ConnectionId, match_id: MatchId, seat: Seat, on: bool) -> Outcome {
-        let view = self.view(&match_id);
+    fn bar(
+        &mut self,
+        from: &ConnectionId,
+        match_id: MatchId,
+        seat: Seat,
+        on: bool,
+    ) -> Result<Outcome, Stale> {
+        let mut work = self.open(&match_id);
+        let view = work.view();
         match self.seat_of(&match_id, from) {
             Some(mine) if Some(mine) == view.host() => {}
-            Some(_) => return Outcome::refused(Refused::NotTheHost),
-            None => return Outcome::refused(Refused::NotInThisMatch),
+            Some(_) => return Ok(Outcome::refused(Refused::NotTheHost)),
+            None => return Ok(Outcome::refused(Refused::NotInThisMatch)),
         }
         let event = if on {
             Event::Bar { seat }
         } else {
             Event::Lift { seat }
         };
-        self.write(&match_id, event.clone());
-        Outcome {
+        work.push(event.clone());
+        self.commit(&work)?;
+        Ok(Outcome {
             refused: None,
             sends: self.to_everyone(&match_id, event),
             created: None,
-        }
+        })
     }
 
-    fn start(&mut self, from: &ConnectionId, match_id: MatchId) -> Outcome {
-        let view = self.view(&match_id);
+    fn start(&mut self, from: &ConnectionId, match_id: MatchId) -> Result<Outcome, Stale> {
+        let mut work = self.open(&match_id);
+        let view = work.view();
         match self.seat_of(&match_id, from) {
             Some(mine) if Some(mine) == view.host() => {}
-            Some(_) => return Outcome::refused(Refused::NotTheHost),
-            None => return Outcome::refused(Refused::NotInThisMatch),
+            Some(_) => return Ok(Outcome::refused(Refused::NotTheHost)),
+            None => return Ok(Outcome::refused(Refused::NotInThisMatch)),
         }
         if view.started {
-            return Outcome::refused(Refused::AlreadyStarted);
+            return Ok(Outcome::refused(Refused::AlreadyStarted));
         }
         let mut sends = Vec::new();
 
@@ -403,122 +523,154 @@ impl<L: Log, C: Connections> Relay<L, C> {
             view.seats.len(),
         );
         let order = Event::PlayerOrder(ordering.iter().map(|seat| Seat(*seat as u8)).collect());
-        self.write(&match_id, order.clone());
+        work.push(order.clone());
         sends.extend(self.to_everyone(&match_id, order));
 
         // One per variant, so a replay knows which rules were in force. The relay does
         // not know what a variant means; it records the settings it was given.
         for (name, on) in VARIANTS {
             let event = Event::Variant { name, on };
-            self.write(&match_id, event.clone());
+            work.push(event.clone());
             sends.extend(self.to_everyone(&match_id, event));
         }
 
         // The setup is declared before the match starts, so a client has the order and
         // the variants in hand when it builds its game.
-        self.write(&match_id, Event::Start);
+        work.push(Event::Start);
         sends.extend(self.to_everyone(&match_id, Event::Start));
 
-        sends.extend(self.open_round(&match_id, 0));
-        Outcome {
+        sends.extend(self.open_round(&mut work, 0));
+        // Every event of the start — the order, the variants, the start, the commitment
+        // and one deal per seat — lands together or not at all. A match that had been
+        // dealt but not started, or started but not dealt, is not a state any client
+        // knows how to be in.
+        self.commit(&work)?;
+        Ok(Outcome {
             refused: None,
             sends,
             created: None,
-        }
+        })
     }
 
-    fn claim(&mut self, from: &ConnectionId, match_id: MatchId, event: Event) -> Outcome {
+    fn claim(
+        &mut self,
+        from: &ConnectionId,
+        match_id: MatchId,
+        event: Event,
+    ) -> Result<Outcome, Stale> {
+        let mut work = self.open(&match_id);
         let Some(seat) = self.seat_of(&match_id, from) else {
-            return Outcome::refused(Refused::NotInThisMatch);
+            return Ok(Outcome::refused(Refused::NotInThisMatch));
         };
         if seat_named(&event) != Some(seat) {
-            return Outcome::refused(Refused::NotYourSeat);
+            return Ok(Outcome::refused(Refused::NotYourSeat));
         }
-        if self.absent(&match_id) {
-            return Outcome::refused(Refused::SeatIsAbsent);
+        if self.absent(&work) {
+            return Ok(Outcome::refused(Refused::SeatIsAbsent));
         }
         // Recorded and forwarded without being judged. Whether it was legal is for the
         // receiving clients to decide; the relay only guarantees everyone sees the same
         // messages in the same order.
-        self.write(&match_id, event.clone());
-        Outcome {
+        work.push(event.clone());
+        self.commit(&work)?;
+        Ok(Outcome {
             refused: None,
             sends: self.to_everyone(&match_id, event),
             created: None,
-        }
+        })
     }
 
     /// A seat says the round ended. When every connected seat has said so, the seed is
     /// revealed and the next round is dealt.
-    fn round_over(&mut self, from: &ConnectionId, match_id: MatchId) -> Outcome {
+    fn round_over(&mut self, from: &ConnectionId, match_id: MatchId) -> Result<Outcome, Stale> {
+        let mut work = self.open(&match_id);
         let Some(seat) = self.seat_of(&match_id, from) else {
-            return Outcome::refused(Refused::NotInThisMatch);
+            return Ok(Outcome::refused(Refused::NotInThisMatch));
         };
-        if self.absent(&match_id) {
-            return Outcome::refused(Refused::SeatIsAbsent);
+        if self.absent(&work) {
+            return Ok(Outcome::refused(Refused::SeatIsAbsent));
         }
         let event = Event::RoundOver { seat };
-        self.write(&match_id, event.clone());
+        work.push(event.clone());
         let mut sends = self.to_everyone(&match_id, event);
 
-        let view = self.view(&match_id);
+        // Counted from the working copy, so this seat's own acknowledgement — pushed a
+        // line ago and not yet in storage — is included. Reading the log here would
+        // count every seat but the one that just spoke.
+        let view = work.view();
         if view.round_over_count() < view.seats.len() {
-            return Outcome {
+            self.commit(&work)?;
+            return Ok(Outcome {
                 refused: None,
                 sends,
                 created: None,
-            };
+            });
         }
 
         let round = view.round;
-        sends.extend(self.reveal(&match_id, round));
-        sends.extend(self.open_round(&match_id, round + 1));
-        Outcome {
+        sends.extend(self.reveal(&mut work, round));
+        sends.extend(self.open_round(&mut work, round + 1));
+        // The last acknowledgement, the reveal and the next round's deal are one message.
+        // Revealing a seed without dealing the round that follows it would leave every
+        // client waiting on a round that never opens.
+        self.commit(&work)?;
+        Ok(Outcome {
             refused: None,
             sends,
             created: None,
-        }
+        })
     }
 
-    fn resume(&mut self, from: &ConnectionId, match_id: MatchId, account: Account) -> Outcome {
-        let view = self.view(&match_id);
+    /// Reattach to a seat. The one message that writes nothing.
+    fn resume(
+        &mut self,
+        from: &ConnectionId,
+        match_id: MatchId,
+        account: Account,
+    ) -> Result<Outcome, Stale> {
+        let work = self.open(&match_id);
+        let view = work.view();
         let Some(seat) = view.seat_of_account(&account) else {
-            return Outcome::refused(Refused::NotInThisMatch);
+            return Ok(Outcome::refused(Refused::NotInThisMatch));
         };
         self.connections
             .attach(&match_id, from.clone(), seat, Role::Player);
         // Replayed through the same filter as if they had never left, so returning
         // reveals nothing that staying would not have.
         let sends = self
-            .visible_to(&match_id, seat)
+            .visible_to(&work, seat)
             .into_iter()
             .map(|event| (from.clone(), event))
             .collect();
-        Outcome {
+        // No commit: this message appends nothing, so there is no decision for the log to
+        // invalidate. A seat that was resumed against a log that has since grown is still
+        // resumed, and the events it missed reach it the usual way.
+        Ok(Outcome {
             refused: None,
             sends,
             created: None,
-        }
+        })
     }
 
     /// Commit to the round, deal every seat, and send each seat only its own dice.
-    fn open_round(&mut self, match_id: &MatchId, round: u32) -> Vec<(ConnectionId, Event)> {
+    fn open_round(&mut self, work: &mut Working, round: u32) -> Vec<(ConnectionId, Event)> {
+        let match_id = work.match_id.clone();
         let seed = integrity::seed_for(&self.secret, &match_id.0, round);
         let commit = Event::Commit {
             digest: integrity::commit(&seed).to_hex(),
         };
-        self.write(match_id, commit.clone());
-        let mut sends = self.to_everyone(match_id, commit);
+        work.push(commit.clone());
+        let mut sends = self.to_everyone(&match_id, commit);
 
-        let seats = self.view(match_id).seats.len();
+        let seats = work.view().seats.len();
         for index in 0..seats {
             let seat = Seat(index as u8);
             let dice = integrity::deal(&seed, seat.0, DICE_PER_SEAT);
             let event = Event::Deal { seat, dice };
-            self.write(match_id, event.clone());
+            work.push(event.clone());
             // Only this seat's own connection is told. Every other seat learns it at the
             // reveal.
-            for connected in self.connections.of(match_id) {
+            for connected in self.connections.of(&match_id) {
                 if connected.seat == seat {
                     sends.push((connected.connection.clone(), event.clone()));
                 }
@@ -528,17 +680,18 @@ impl<L: Log, C: Connections> Relay<L, C> {
     }
 
     /// The round is over: every seat's dice, then the seed they came from.
-    fn reveal(&mut self, match_id: &MatchId, round: u32) -> Vec<(ConnectionId, Event)> {
+    fn reveal(&mut self, work: &mut Working, round: u32) -> Vec<(ConnectionId, Event)> {
+        let match_id = work.match_id.clone();
         let seed = integrity::seed_for(&self.secret, &match_id.0, round);
         let mut sends = Vec::new();
-        let seats = self.view(match_id).seats.len();
+        let seats = work.view().seats.len();
         for index in 0..seats {
             let seat = Seat(index as u8);
             let event = Event::Deal {
                 seat,
                 dice: integrity::deal(&seed, seat.0, DICE_PER_SEAT),
             };
-            for connected in self.connections.of(match_id) {
+            for connected in self.connections.of(&match_id) {
                 if connected.seat != seat {
                     sends.push((connected.connection.clone(), event.clone()));
                 }
@@ -547,14 +700,14 @@ impl<L: Log, C: Connections> Relay<L, C> {
         let event = Event::Reveal {
             seed: seed.to_hex(),
         };
-        self.write(match_id, event.clone());
-        sends.extend(self.to_everyone(match_id, event));
+        work.push(event.clone());
+        sends.extend(self.to_everyone(&match_id, event));
         sends
     }
 
     /// Everything this seat would have seen, in order.
-    fn visible_to(&self, match_id: &MatchId, seat: Seat) -> Vec<Event> {
-        let events = self.log.read(match_id);
+    fn visible_to(&self, work: &Working, seat: Seat) -> Vec<Event> {
+        let events = work.events.clone();
         let revealed = view::revealed_rounds(&events);
         let mut round = 0;
         let mut visible = Vec::new();
@@ -576,12 +729,12 @@ impl<L: Log, C: Connections> Relay<L, C> {
     }
 
     /// Whether any seat has nobody on it.
-    fn absent(&self, match_id: &MatchId) -> bool {
-        let view = self.view(match_id);
+    fn absent(&self, work: &Working) -> bool {
+        let view = work.view();
         if !view.started {
             return false;
         }
-        let connected = self.connections.of(match_id);
+        let connected = self.connections.of(&work.match_id);
         (0..view.seats.len())
             .any(|index| !connected.iter().any(|row| row.seat == Seat(index as u8)))
     }
@@ -600,18 +753,6 @@ impl<L: Log, C: Connections> Relay<L, C> {
             .into_iter()
             .map(|row| (row.connection, event.clone()))
             .collect()
-    }
-
-    /// Append, retrying at the next position if another message got there first.
-    fn write(&mut self, match_id: &MatchId, event: Event) {
-        let mut position = self.log.read(match_id).len() as u64;
-        while self
-            .log
-            .append(match_id, position, std::slice::from_ref(&event))
-            .is_err()
-        {
-            position += 1;
-        }
     }
 }
 

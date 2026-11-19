@@ -24,8 +24,9 @@ use aws_sdk_dynamodb::types::{
     AttributeDefinition, BillingMode, GlobalSecondaryIndex, KeySchemaElement, KeyType, Projection,
     ProjectionType, ScalarAttributeType,
 };
+use integrity::Secret;
 use protocol::{Account, Event, Seat};
-use relay::{ConnectionId, Connections, Log, MatchId, Role, Taken};
+use relay::{ConnectionId, Connections, Log, MatchId, Message, Relay, Role, Taken};
 use relay_service::connections::{BY_CONNECTION, CONNECTION};
 use relay_service::{DynamoLog, GatewayConnections, Meter, codec};
 use tokio::runtime::Runtime;
@@ -367,6 +368,175 @@ fn the_meter_counts_what_a_lobby_view_cost() {
     assert!(line.contains("\"events_read\":6"), "{line}");
     assert!(line.contains("\"log_reads\":3"), "{line}");
     assert!(line.contains("\"route\":\"$default\""), "{line}");
+}
+
+/// Everything a relay holds, over real storage, for one invocation's worth of work.
+fn relay_over(
+    client: &Client,
+    log_table: &str,
+    connection_table: &str,
+    handle: tokio::runtime::Handle,
+) -> Relay<DynamoLog, GatewayConnections> {
+    let log = DynamoLog::new(client.clone(), log_table, handle.clone(), Meter::new());
+    let connections = GatewayConnections::new(client.clone(), connection_table, handle);
+    Relay::new(log, connections, Secret::from_bytes([5; 32]))
+}
+
+fn host_message(at: usize) -> Message {
+    Message::Host {
+        account: Account::Discord(format!("account-{at}")),
+        name: format!("Player {at}"),
+        colour: ["red", "blue", "green", "white"][at].to_string(),
+        version: protocol::PROTOCOL_VERSION,
+    }
+}
+
+/// `Two matches never share an identity`.
+///
+/// This is the defect that a deployment found and a single process cannot: `receive` is
+/// sequential, so in one process the match count is read and used inside one
+/// uninterrupted call and the window is zero wide. Two Lambdas have a real one.
+#[test]
+#[ignore = "needs DynamoDB Local; the gate runs it with --include-ignored"]
+fn two_hosts_at_once_create_two_matches() {
+    let (runtime, client) = arrange();
+    let log_table = log_table(&runtime, &client);
+    let connection_table = connection_table(&runtime, &client);
+
+    let created: Vec<Option<MatchId>> = std::thread::scope(|scope| {
+        let threads: Vec<_> = (0..2)
+            .map(|at| {
+                let client = client.clone();
+                let log_table = log_table.clone();
+                let connection_table = connection_table.clone();
+                let handle = runtime.handle().clone();
+                scope.spawn(move || {
+                    let mut relay = relay_over(&client, &log_table, &connection_table, handle);
+                    relay
+                        .receive(&ConnectionId(format!("socket-{at}")), host_message(at))
+                        .created
+                })
+            })
+            .collect();
+        threads
+            .into_iter()
+            .map(|thread| thread.join().expect("a host"))
+            .collect()
+    });
+
+    assert!(
+        created.iter().all(Option::is_some),
+        "both hosts made a match"
+    );
+    assert_ne!(
+        created[0], created[1],
+        "two hosts were told they created the same match"
+    );
+
+    let log = DynamoLog::new(client, &log_table, runtime.handle().clone(), Meter::new());
+    let matches = log.matches();
+    assert_eq!(matches.len(), 2, "two hosts, two matches: {matches:?}");
+    for found in &matches {
+        let events = log.read(found);
+        assert_eq!(
+            events.len(),
+            3,
+            "{} should hold exactly one host's three events: {events:?}",
+            found.0
+        );
+    }
+}
+
+/// `Two players never share a seat`, and the colour guard holds under a race too.
+///
+/// Worse than the hosting race when it goes wrong: the hosting race leaves a match that
+/// cannot start, while this one leaves an ordinary match that starts and sends one seat's
+/// deal to two different people.
+#[test]
+#[ignore = "needs DynamoDB Local; the gate runs it with --include-ignored"]
+fn two_joins_at_once_take_two_seats() {
+    let (runtime, client) = arrange();
+    let log_table = log_table(&runtime, &client);
+    let connection_table = connection_table(&runtime, &client);
+
+    let mut host = relay_over(
+        &client,
+        &log_table,
+        &connection_table,
+        runtime.handle().clone(),
+    );
+    let match_id = host
+        .receive(&ConnectionId("socket-0".into()), host_message(0))
+        .created
+        .expect("a match");
+
+    std::thread::scope(|scope| {
+        for at in 1..3 {
+            let client = client.clone();
+            let log_table = log_table.clone();
+            let connection_table = connection_table.clone();
+            let handle = runtime.handle().clone();
+            let match_id = match_id.clone();
+            scope.spawn(move || {
+                let mut relay = relay_over(&client, &log_table, &connection_table, handle);
+                let Message::Host {
+                    account,
+                    name,
+                    colour,
+                    version,
+                } = host_message(at)
+                else {
+                    unreachable!("host_message makes a host message")
+                };
+                let outcome = relay.receive(
+                    &ConnectionId(format!("socket-{at}")),
+                    Message::Join {
+                        match_id,
+                        account,
+                        name,
+                        colour,
+                        version,
+                    },
+                );
+                assert_eq!(outcome.refused, None, "a joiner was refused");
+            });
+        }
+    });
+
+    let log = DynamoLog::new(
+        client.clone(),
+        &log_table,
+        runtime.handle().clone(),
+        Meter::new(),
+    );
+    let mut seats: Vec<u8> = Vec::new();
+    let mut colours: Vec<String> = Vec::new();
+    for event in log.read(&match_id) {
+        if let Event::Join { seat, colour, .. } = event {
+            seats.push(seat.0);
+            colours.push(colour);
+        }
+    }
+    seats.sort_unstable();
+    colours.sort();
+    assert_eq!(seats, vec![0, 1, 2], "three players, three seats");
+    let mut distinct = colours.clone();
+    distinct.dedup();
+    assert_eq!(distinct, colours, "two players took the same colour");
+
+    // And the connection table agrees, which is what decides who is sent whose dice.
+    let connections = GatewayConnections::new(client, &connection_table, runtime.handle().clone());
+    let mut attached: Vec<u8> = connections
+        .of(&match_id)
+        .into_iter()
+        .map(|row| row.seat.0)
+        .collect();
+    attached.sort_unstable();
+    assert_eq!(
+        attached,
+        vec![0, 1, 2],
+        "two sockets on one seat is one player seeing another's dice"
+    );
 }
 
 #[test]
