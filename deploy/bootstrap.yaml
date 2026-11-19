@@ -14,9 +14,26 @@ Parameters:
     Type: String
     Default: SeanShubin/liars-dice
     Description: >-
-      owner/repo whose workflows may assume the role. The trust condition is
-      scoped to this repository alone, which is why vote's role cannot be
-      reused: its condition names repo:SeanShubin/vote:*.
+      owner/repo the role belongs to. Names the role and describes it; the trust
+      condition is SubjectPrefix below, not this.
+  SubjectPrefix:
+    Type: String
+    Default: repo:SeanShubin@3894337/liars-dice@1460374970
+    Description: >-
+      The start of the subject claim GitHub puts in this repository's OIDC
+      token, which the trust condition matches against. Not derivable from
+      owner/repo: this repository has immutable subjects turned on, so the
+      numeric owner and repository ids appear in the claim and the familiar
+      repo:owner/name form never does. Read the real value rather than writing
+      one out:
+
+        gh api repos/<owner>/<repo>/actions/oidc/customization/sub
+
+      The ids are immutable, which is the point of the format - renaming the
+      repository or the account does not break this, and a new repository
+      claiming the old name cannot inherit the trust. The sibling vote project
+      predates the feature and still has the legacy form, which is why its role
+      and this one do not look alike.
   RoleName:
     Type: String
     Default: liars-dice-github-deploy
@@ -45,7 +62,7 @@ Resources:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
               StringLike:
-                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubRepo}:*"
+                token.actions.githubusercontent.com:sub: !Sub "${SubjectPrefix}:*"
       # Broad AWS-managed permissions on the services the deploy touches, as
       # `vote` does. Scope down once the stack has settled and the actual set of
       # calls is known from CloudTrail rather than guessed at.

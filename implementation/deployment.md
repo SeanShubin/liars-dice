@@ -83,10 +83,33 @@ caching both free and correct.
 
 ### Bootstrap
 
-A separate bootstrap stack, copied from `vote`: it creates the GitHub OIDC provider,
-the deploy role and an artifacts bucket, and outputs a ready-made `gh` command to set
-the repository secret. The deploy workflow assumes that role with `id-token: write`.
-No AWS access key exists in the repository, the workflow, or a developer's machine.
+A separate bootstrap stack, modelled on `vote`'s: one IAM role, and its ARN as an output
+to set as the repository secret. The GitHub OIDC provider is not created here. It is an
+account-wide singleton that `vote`'s bootstrap already put in this account, and a second
+one fails with `EntityAlreadyExists`, so this template references it. The deploy workflow
+assumes the role with `id-token: write`. No AWS access key exists in the repository, the
+workflow, or a developer's machine.
+
+The role's trust condition matches the subject claim GitHub puts in the token, and that
+claim is not `repo:owner/name` here. This repository has immutable subjects turned on,
+which is GitHub's newer default, so the claim carries the numeric owner and repository
+ids instead:
+
+```
+repo:SeanShubin@3894337/liars-dice@1460374970:environment:production
+```
+
+`vote` predates the feature and still gets the legacy form. That is why the two roles'
+conditions do not look alike, and why copying `vote`'s across was wrong in a way nothing
+could catch until a workflow actually ran: every part of the setup was individually
+correct, and the mismatch existed only in the one string neither side could check against
+the other.
+
+The ids are pinned rather than the feature turned off. Immutability is the point of the
+format: renaming the repository or the account does not break the trust, and a new
+repository claiming a freed name cannot inherit it. The cost is a template nobody can read
+without knowing what the numbers mean, which the parameter's description carries, along
+with the command that prints the real value rather than inviting someone to write one out.
 
 ### Identity
 
