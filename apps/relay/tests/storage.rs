@@ -169,7 +169,7 @@ fn a_log_reads_back_in_position_order() {
         claim(1, 3),
     ];
     for (position, event) in written.iter().enumerate() {
-        log.append(&match_id, position as u64, event)
+        log.append(&match_id, position as u64, std::slice::from_ref(event))
             .expect("an empty position");
     }
 
@@ -186,9 +186,10 @@ fn an_append_at_a_taken_position_is_refused_and_changes_nothing() {
     let mut log = DynamoLog::new(client, &table, runtime.handle().clone(), Meter::new());
     let match_id = MatchId("match-0".into());
 
-    log.append(&match_id, 0, &claim(0, 2)).expect("position 0");
+    log.append(&match_id, 0, &[claim(0, 2)])
+        .expect("position 0");
     assert_eq!(
-        log.append(&match_id, 0, &claim(1, 9)),
+        log.append(&match_id, 0, &[claim(1, 9)]),
         Err(Taken),
         "the condition expression is the whole concurrency design"
     );
@@ -197,6 +198,69 @@ fn an_append_at_a_taken_position_is_refused_and_changes_nothing() {
         vec![claim(0, 2)],
         "a refused append must not overwrite: the loser re-reads, and would re-read a lie"
     );
+}
+
+/// A message of several events lands whole or not at all.
+///
+/// This is the `TransactWriteItems` path, which only a message of more than one event
+/// takes — hosting is three and starting is a dozen. `A message either happens entirely
+/// or not at all`, so the half-committed case is the one worth proving does not exist.
+#[test]
+#[ignore = "needs DynamoDB Local; the gate runs it with --include-ignored"]
+fn a_message_of_several_events_lands_whole_or_not_at_all() {
+    let (runtime, client) = arrange();
+    let table = log_table(&runtime, &client);
+    let mut log = DynamoLog::new(client, &table, runtime.handle().clone(), Meter::new());
+    let match_id = MatchId("match-0".into());
+
+    let message = vec![
+        Event::Version { protocol: 3 },
+        Event::Join {
+            seat: Seat(0),
+            name: "Mary Jane".into(),
+            colour: "red".into(),
+            account: Account::Discord("450853396908343307".into()),
+        },
+        Event::Host { seat: Seat(0) },
+    ];
+    log.append(&match_id, 0, &message).expect("an empty log");
+    assert_eq!(log.read(&match_id), message);
+
+    // Somebody else is already at position 0, so the whole message is refused — and in
+    // particular its second and third events do not land at 3 and 4.
+    assert_eq!(log.append(&match_id, 0, &message), Err(Taken));
+    assert_eq!(
+        log.read(&match_id),
+        message,
+        "a refused message must leave nothing of itself behind"
+    );
+
+    // The same message does land at the position the log is actually at.
+    log.append(&match_id, 3, &message)
+        .expect("the end of the log");
+    assert_eq!(log.read(&match_id).len(), 6);
+}
+
+/// A message whose first position is free but whose later ones are not is still refused.
+///
+/// The condition is on every item, not only the first, so this cannot be committed by a
+/// transaction that happened to start in a gap.
+#[test]
+#[ignore = "needs DynamoDB Local; the gate runs it with --include-ignored"]
+fn a_message_overlapping_an_existing_event_is_refused() {
+    let (runtime, client) = arrange();
+    let table = log_table(&runtime, &client);
+    let mut log = DynamoLog::new(client, &table, runtime.handle().clone(), Meter::new());
+    let match_id = MatchId("match-0".into());
+
+    // Position 1 is taken and position 0 is not, which a one-item condition would miss.
+    log.append(&match_id, 1, &[claim(0, 9)])
+        .expect("position 1");
+    assert_eq!(
+        log.append(&match_id, 0, &[claim(1, 1), claim(1, 2), claim(1, 3)]),
+        Err(Taken)
+    );
+    assert_eq!(log.read(&match_id), vec![claim(0, 9)]);
 }
 
 /// What the conditional write is for. Many threads race for one position; exactly one
@@ -218,7 +282,7 @@ fn concurrent_appends_at_one_position_produce_one_winner() {
                 let match_id = match_id.clone();
                 scope.spawn(move || {
                     let mut log = DynamoLog::new(client, table, handle, Meter::new());
-                    log.append(&match_id, 0, &claim(seat, 2))
+                    log.append(&match_id, 0, &[claim(seat, 2)])
                     // Every racer claims a different quantity of the same face, so the
                     // winner is identifiable from the log alone.
                 })
@@ -249,7 +313,7 @@ fn matches_lists_every_match_once_however_many_events_it_holds() {
     for (index, name) in ["match-0", "match-1", "match-2"].iter().enumerate() {
         let match_id = MatchId((*name).to_string());
         for position in 0..=index as u64 {
-            log.append(&match_id, position, &claim(0, position as u32 + 1))
+            log.append(&match_id, position, &[claim(0, position as u32 + 1)])
                 .expect("an empty position");
         }
     }
@@ -280,7 +344,7 @@ fn the_meter_counts_what_a_lobby_view_cost() {
     for (index, name) in ["match-0", "match-1", "match-2"].iter().enumerate() {
         let match_id = MatchId((*name).to_string());
         for position in 0..=index as u64 {
-            log.append(&match_id, position, &claim(0, position as u32 + 1))
+            log.append(&match_id, position, &[claim(0, position as u32 + 1)])
                 .expect("an empty position");
         }
     }

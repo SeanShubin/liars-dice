@@ -22,14 +22,17 @@ impl MemoryLog {
 }
 
 impl Log for MemoryLog {
-    fn append(&mut self, match_id: &MatchId, position: u64, event: &Event) -> Result<(), Taken> {
+    fn append(&mut self, match_id: &MatchId, from: u64, events: &[Event]) -> Result<(), Taken> {
         let entries = self.entries.entry(match_id.clone()).or_default();
-        if position != entries.len() as u64 {
+        if from != entries.len() as u64 {
             // Something is already at that position, or there is a hole before it. Either
-            // way the caller's idea of the end of the log is stale.
+            // way the caller's idea of the end of the log is stale, and so is whatever it
+            // decided from reading it.
             return Err(Taken);
         }
-        entries.push(event.clone());
+        // Checked before anything is pushed, so this is all or nothing without needing to
+        // undo a partial write.
+        entries.extend(events.iter().cloned());
         Ok(())
     }
 

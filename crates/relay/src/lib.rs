@@ -47,11 +47,17 @@ pub struct Taken;
 
 /// The append-only event log. The only state.
 pub trait Log {
-    /// Append at `position`, failing if something is already there.
+    /// Append every event at consecutive positions from `from`, or append none of them.
     ///
-    /// The conditional write is what gives the log a total order without a lock: two
-    /// messages racing cannot both land at the same position, and the loser re-reads.
-    fn append(&mut self, match_id: &MatchId, position: u64, event: &Event) -> Result<(), Taken>;
+    /// The conditional write is what gives the log a total order without a lock, and the
+    /// position is a version number: `from` is the length of the log the caller decided
+    /// against, so `Taken` means the log moved and the decision is stale. The caller
+    /// re-reads and redoes the whole message rather than moving its events along, which
+    /// would commit a decision that was never true.
+    ///
+    /// All or nothing, because a message is several events — hosting is three and
+    /// starting is a dozen — and `A message either happens entirely or not at all`.
+    fn append(&mut self, match_id: &MatchId, from: u64, events: &[Event]) -> Result<(), Taken>;
 
     fn read(&self, match_id: &MatchId) -> Vec<Event>;
 
@@ -71,8 +77,8 @@ pub trait Connections {
 /// "a relay may be stopped and replaced between any two messages" is tested rather than
 /// asserted.
 impl<T: Log + ?Sized> Log for &mut T {
-    fn append(&mut self, match_id: &MatchId, position: u64, event: &Event) -> Result<(), Taken> {
-        (**self).append(match_id, position, event)
+    fn append(&mut self, match_id: &MatchId, from: u64, events: &[Event]) -> Result<(), Taken> {
+        (**self).append(match_id, from, events)
     }
 
     fn read(&self, match_id: &MatchId) -> Vec<Event> {
@@ -599,7 +605,11 @@ impl<L: Log, C: Connections> Relay<L, C> {
     /// Append, retrying at the next position if another message got there first.
     fn write(&mut self, match_id: &MatchId, event: Event) {
         let mut position = self.log.read(match_id).len() as u64;
-        while self.log.append(match_id, position, &event).is_err() {
+        while self
+            .log
+            .append(match_id, position, std::slice::from_ref(&event))
+            .is_err()
+        {
             position += 1;
         }
     }

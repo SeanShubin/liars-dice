@@ -428,18 +428,53 @@ fn a_seat_cannot_claim_as_another_seat() {
 }
 
 /// The conditional append is what gives the log a total order without a lock.
+///
+/// The position is a version number, so a refused append means the log moved under the
+/// caller and whatever it decided from reading that log is stale. This test used to
+/// append the loser's event at the next position and assert it landed, which is the
+/// defect `relay.md` records: it made the loser's decision come true after the fact.
 #[test]
-fn two_appends_racing_for_one_position_do_not_both_land() {
+fn an_append_at_a_taken_position_is_refused() {
     let mut log = MemoryLog::new();
     let match_id = MatchId("m".to_string());
     let event = Event::Start;
-    assert!(log.append(&match_id, 0, &event).is_ok());
     assert!(
-        log.append(&match_id, 0, &event).is_err(),
+        log.append(&match_id, 0, std::slice::from_ref(&event))
+            .is_ok()
+    );
+    assert!(
+        log.append(&match_id, 0, std::slice::from_ref(&event))
+            .is_err(),
         "position zero is taken"
     );
-    assert!(log.append(&match_id, 1, &event).is_ok());
+    // The loser's recourse is to read again and decide again, not to move along. Here
+    // that means appending at the length it now sees.
+    let from = log.read(&match_id).len() as u64;
+    assert!(log.append(&match_id, from, &[event]).is_ok());
     assert_eq!(log.read(&match_id).len(), 2);
+}
+
+/// `A message either happens entirely or not at all`.
+#[test]
+fn a_message_that_cannot_land_whole_lands_not_at_all() {
+    let mut log = MemoryLog::new();
+    let match_id = MatchId("m".to_string());
+    let three = [
+        Event::Version { protocol: 3 },
+        Event::Host { seat: Seat(0) },
+        Event::Start,
+    ];
+    // Somebody else got there first, so the whole message is refused.
+    assert!(log.append(&match_id, 0, &[Event::Start]).is_ok());
+    assert!(log.append(&match_id, 0, &three).is_err());
+    assert_eq!(
+        log.read(&match_id),
+        vec![Event::Start],
+        "a refused message must leave nothing of itself behind"
+    );
+    // And from the position the log is actually at, all three land together.
+    assert!(log.append(&match_id, 1, &three).is_ok());
+    assert_eq!(log.read(&match_id).len(), 4);
 }
 
 /// A relay may be stopped and replaced between any two messages without affecting a match

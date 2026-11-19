@@ -5,7 +5,11 @@
 use std::time::Instant;
 
 use aws_sdk_dynamodb::Client;
-use aws_sdk_dynamodb::types::{AttributeValue, ReturnConsumedCapacity, Select};
+use aws_sdk_dynamodb::error::DisplayErrorContext;
+use aws_sdk_dynamodb::operation::transact_write_items::TransactWriteItemsError;
+use aws_sdk_dynamodb::types::{
+    AttributeValue, Put, ReturnConsumedCapacity, Select, TransactWriteItem,
+};
 use protocol::Event;
 use relay::{Log, MatchId, Taken};
 use tokio::runtime::Handle;
@@ -42,19 +46,13 @@ impl DynamoLog {
     }
 }
 
-impl Log for DynamoLog {
-    /// `attribute_not_exists(position)` is the whole concurrency design.
-    ///
-    /// Two invocations racing for the same position cannot both land; the loser gets
-    /// `Taken`, re-reads, and tries again at the end it now knows about. The total order
-    /// the protocol depends on comes from the database rather than from a lock, which is
-    /// what lets any number of Lambdas serve one match.
-    fn append(&mut self, match_id: &MatchId, position: u64, event: &Event) -> Result<(), Taken> {
+impl DynamoLog {
+    fn put_one(&self, match_id: &MatchId, at: u64, event: &Event) -> Result<(), Taken> {
         let put = self
             .client
             .put_item()
             .table_name(&self.table)
-            .set_item(Some(codec::item(&match_id.0, position, event)))
+            .set_item(Some(codec::item(&match_id.0, at, event)))
             .condition_expression("attribute_not_exists(#position)")
             .expression_attribute_names("#position", POSITION);
         match self.handle.block_on(put.send()) {
@@ -67,14 +65,80 @@ impl Log for DynamoLog {
                 {
                     return Err(Taken);
                 }
-                // `Log` has no error channel, by design: the in-memory implementation
-                // cannot fail, and widening the trait would spread `Result` through a
-                // library whose point is that it runs with no storage at all. There is
-                // also exactly one thing to do about a storage failure here — fail the
-                // invocation, so the client retries against a log that is append-only and
-                // safe to retry against — and a panic already does that.
-                panic!("appending {event} to {} at {position}: {error}", match_id.0);
+                panic!(
+                    "appending {event} to {} at {at}: {}",
+                    match_id.0,
+                    DisplayErrorContext(&error)
+                );
             }
+        }
+    }
+
+    fn put_all(&self, match_id: &MatchId, from: u64, events: &[Event]) -> Result<(), Taken> {
+        // A hundred is DynamoDB's limit on one transaction. No message comes near it —
+        // the largest starts a ten player match — so this is an assertion rather than a
+        // case to handle, and it fails loudly if a future message is written that does.
+        assert!(
+            events.len() <= 100,
+            "a message of {} events cannot be committed atomically",
+            events.len()
+        );
+        let mut transaction = self.client.transact_write_items();
+        for (offset, event) in events.iter().enumerate() {
+            let put = Put::builder()
+                .table_name(&self.table)
+                .set_item(Some(codec::item(&match_id.0, from + offset as u64, event)))
+                .condition_expression("attribute_not_exists(#position)")
+                .expression_attribute_names("#position", POSITION)
+                .build()
+                .expect("a put with a table name and an item");
+            transaction = transaction.transact_items(TransactWriteItem::builder().put(put).build());
+        }
+        match self.handle.block_on(transaction.send()) {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                // A cancelled transaction is how a conditional check fails inside one.
+                // Every other cancellation reason — throttling, a conflict with another
+                // transaction on the same item — is a real failure, and reading the
+                // reasons is how they are told apart.
+                if let Some(TransactWriteItemsError::TransactionCanceledException(cancelled)) =
+                    error.as_service_error()
+                    && cancelled
+                        .cancellation_reasons()
+                        .iter()
+                        .any(|reason| reason.code() == Some("ConditionalCheckFailed"))
+                {
+                    return Err(Taken);
+                }
+                panic!(
+                    "appending {} events to {} from {from}: {}",
+                    events.len(),
+                    match_id.0,
+                    DisplayErrorContext(&error)
+                );
+            }
+        }
+    }
+}
+
+impl Log for DynamoLog {
+    /// `attribute_not_exists(position)` is the whole concurrency design.
+    ///
+    /// `from` is the length of the log the caller decided against, so the condition on the
+    /// first position is also a check that the decision is still true. Two invocations
+    /// racing cannot both land; the loser gets `Taken`, re-reads, and decides again
+    /// against what it now sees.
+    ///
+    /// One event is a `PutItem` and several are a `TransactWriteItems`, because a
+    /// transaction costs twice the capacity of a plain write and most messages are one
+    /// event. The transaction is what makes a message all or nothing, which matters for
+    /// the ones that are not: hosting writes three events and starting writes a dozen,
+    /// and half a message in the log is a match nobody can replay.
+    fn append(&mut self, match_id: &MatchId, from: u64, events: &[Event]) -> Result<(), Taken> {
+        match events {
+            [] => Ok(()),
+            [event] => self.put_one(match_id, from, event),
+            many => self.put_all(match_id, from, many),
         }
     }
 
