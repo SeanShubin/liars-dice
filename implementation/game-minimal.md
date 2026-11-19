@@ -178,6 +178,29 @@ and pips would be the beginning of drawing dice as objects.
 The claim history lists the current round only. Each entry is the claimer's dice count and
 their claim, in their colour, which is what identifies them without naming them.
 
+### Shield tokens
+
+A shield token is drawn as a shield silhouette in its holder's colour, carrying how many
+they hold, and nothing is drawn where a player holds none.
+
+A shield is a pentagon pointing down rather than a numeral in a rounded box, because that
+is what a die already is. A second numeral box on the same row would be counted as a sixth
+die, which is the one number on that row that must not be misread — the whole table is
+there to say how many dice each player holds.
+
+One shield carrying a count rather than one shield per token, because `A player may hold
+any number of shield tokens`: a shield per token has no bounded width, and in a grid it
+would give each seat a different number of columns.
+
+The shield sits in its own column between the names and the dice, and that column exists
+only while somebody at the table holds a token. A token comes only from a correct spot on
+at the dice limit, so in most matches there are none, and a column reserved for the whole
+match would be a permanent gap for a case that never arrives. The panel can see every
+seat's count, so it decides once per draw and the decision is the same for every row,
+which is what keeps the dice columns aligned across seats whichever way it went. Before
+the dice rather than after, because dice counts differ, so a cell after them would land in
+a different column on every row.
+
 ## Interaction
 
 Every control is a tap target; nothing drags and nothing needs a keyboard. A mouse click and
@@ -232,6 +255,11 @@ than a good one. A greedy farthest-point pick would be the fallback if either nu
 
 **Numerals rather than pips.** See Presentation.
 
+**A shield silhouette rather than a numeral, and a column only when it is occupied.** See
+Presentation. The alternative considered first was a count beside the player's name, which
+needs no column and cannot be mistaken for a die, but it reads as part of the name rather
+than as part of the holdings, and it is the holdings a player scans.
+
 **A separate `apps/minimal` rather than reusing `apps/local`.** They are different things:
 one is a product, the other a harness for the networked game.
 
@@ -274,6 +302,11 @@ one is a product, the other a harness for the networked game.
   small states.
 - Colour assignment: for every player count, no other subset of the palette containing the
   human's colour has a larger minimum pairwise distance.
+- A shield token is reachable: a seat claims the exact count of a face, the next calls spot
+  on at the dice limit, and the caller holds a token afterwards. The table draws its shield
+  column for that state and not for the state before it.
+- The shield column's presence is a function of the table's counts alone, so it is the same
+  for every row of a draw.
 - The same roll sequence replays to the same match.
 
 ## Open Items

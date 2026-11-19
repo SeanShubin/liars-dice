@@ -3,7 +3,9 @@
 //! Each one draws a fixed size box whether or not it has anything to put in it, which is
 //! what keeps dice and claims lined up in a grid across players.
 
-use egui::{Align2, Button, Color32, FontId, RichText, Sense, Stroke, StrokeKind, Ui, vec2};
+use egui::{
+    Align2, Button, Color32, FontId, RichText, Sense, Shape, Stroke, StrokeKind, Ui, pos2, vec2,
+};
 use rules::Claim;
 
 use crate::palette::{PALETTE, ink};
@@ -57,6 +59,44 @@ pub fn die(ui: &mut Ui, swatch: usize, face: Option<u8>) {
         Align2::CENTER_CENTER,
         text,
         FontId::proportional(17.0),
+        ink,
+    );
+}
+
+/// One player's shield tokens: a shield in their colour with how many they hold.
+///
+/// A pentagon pointing down rather than a rounded box, because a rounded box with a
+/// numeral in it is a die, and a die is what this must not be read as. `count` of zero
+/// draws nothing and still takes its space, so a table where one player holds a token and
+/// the others do not keeps its columns lined up.
+pub fn shield(ui: &mut Ui, swatch: usize, count: u32) {
+    let (rect, _) = ui.allocate_exact_size(vec2(DIE, DIE), Sense::hover());
+    if count == 0 {
+        return;
+    }
+    let body = rect.shrink(2.0);
+    let shoulder = body.top() + body.height() * 0.58;
+    let outline = vec![
+        pos2(body.left(), body.top()),
+        pos2(body.right(), body.top()),
+        pos2(body.right(), shoulder),
+        pos2(body.center().x, body.bottom()),
+        pos2(body.left(), shoulder),
+    ];
+    let ink = ink_of(swatch);
+    let painter = ui.painter();
+    painter.add(Shape::convex_polygon(
+        outline,
+        colour_of(swatch),
+        Stroke::new(1.5, ink),
+    ));
+    painter.text(
+        // Above the geometric centre: the point at the bottom pulls the centre of the
+        // shape down, and the number wants to sit in the wide part.
+        pos2(body.center().x, body.top() + body.height() * 0.38),
+        Align2::CENTER_CENTER,
+        count,
+        FontId::proportional(15.0),
         ink,
     );
 }

@@ -9,7 +9,7 @@ use integrity::Secret;
 use rules::{Call, Claim, Claimed, Game, SEAT, Variants};
 use std::collections::BTreeSet;
 
-use crate::{opening_claim, steps_from};
+use crate::{any_shields, opening_claim, steps_from};
 
 const SEATS: usize = 3;
 /// Enough states that a passing assertion is evidence rather than a coincidence.
@@ -213,4 +213,76 @@ fn liar_and_spot_on_are_available_exactly_when_there_is_a_claim_to_dispute() {
             "spot on did not match whether there was a claim"
         );
     });
+}
+
+/// `How many shield tokens a player holds is shown only when they hold at least one`, over
+/// a state the real rules produced rather than one written by hand.
+///
+/// A token comes from one place: a correct spot on at the dice limit. So the round is
+/// played to exactly that — a seat claims the true count of a face, and the next seat
+/// disputes it as exact — and the table's column is checked on both sides of the call.
+#[test]
+fn the_shield_column_appears_when_a_spot_on_at_the_dice_limit_grants_a_token() {
+    let secret = Secret::from_bytes([7; 32]);
+    let mut game = Game::start((0..SEATS).collect(), Variants::default());
+    deal_round(&mut game, &secret, 0);
+
+    // Everybody is at the dice limit in the opening round, which is the only condition a
+    // granted token has beyond the call being right.
+    let public = game.public();
+    for seat in 0..SEATS {
+        assert_eq!(public.count(seat), SEAT as u32, "seat {seat} is not full");
+    }
+
+    // A face somebody actually holds, and exactly how many of it there are.
+    let face = game
+        .dealt(public.current())
+        .expect("the current seat was dealt")[0];
+    let truth: u32 = (0..SEATS)
+        .map(|seat| {
+            game.dealt(seat)
+                .expect("every seat was dealt")
+                .iter()
+                .filter(|&&value| value == face)
+                .count() as u32
+        })
+        .sum();
+
+    let claimer = game.public().current();
+    assert!(
+        !any_shields(game.public()),
+        "a token before anybody could have gained one"
+    );
+    assert_eq!(
+        game.claim(Call::Raise(Claim {
+            quantity: truth,
+            face
+        })),
+        Ok(Claimed::Continues),
+        "the exact count was not a legal opening claim"
+    );
+    assert!(!any_shields(game.public()), "a claim alone granted a token");
+
+    let caller = game.public().current();
+    assert_ne!(caller, claimer, "spot on would dispute its own claim");
+    assert_eq!(game.claim(Call::SpotOn), Ok(Claimed::RoundEnded));
+    let resolution = game.resolve().expect("every die is known");
+
+    assert_eq!(
+        resolution.shield_gained,
+        Some(caller),
+        "a correct spot on at the dice limit granted no token"
+    );
+    assert_eq!(game.public().shields(caller), 1);
+    assert!(
+        any_shields(game.public()),
+        "the table would draw no shield column for a seat holding a token"
+    );
+    for other in (0..SEATS).filter(|&seat| seat != caller) {
+        assert_eq!(
+            game.public().shields(other),
+            0,
+            "seat {other} gained a token it did not earn"
+        );
+    }
 }

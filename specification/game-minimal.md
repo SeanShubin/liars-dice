@@ -7,6 +7,8 @@
 - The local player can reach every legal claim
 - An invalid claim cannot be made
 - A die is shown as its value in its owner's colour
+- A shield token is shown as a shield in its holder's colour
+- How many shield tokens a player holds is shown only when they hold at least one
 - The local player sees the probability that a prospective claim is true
 - A probability accounts only for how many dice are unknown and how faces are distributed
 - A probability does not account for any player's behaviour

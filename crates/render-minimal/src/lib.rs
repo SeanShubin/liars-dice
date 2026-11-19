@@ -23,12 +23,12 @@ pub mod widget;
 
 pub use palette::{PALETTE, Swatch, assign, distance, ink, lightness};
 pub use panel::{
-    Steps, calls, dialler, history, odds, opening_claim, ranking, standing, steps_from, table,
-    verdict,
+    Steps, any_shields, calls, dialler, history, odds, opening_claim, ranking, standing,
+    steps_from, table, verdict,
 };
 pub use seating::Seating;
 pub use widget::{
-    CLAIM, DIE, claim_box, colour_of, dialled_value, die, ink_of, palette_picker, tap,
+    CLAIM, DIE, claim_box, colour_of, dialled_value, die, ink_of, palette_picker, shield, tap,
 };
 
 #[cfg(test)]

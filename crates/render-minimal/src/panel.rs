@@ -8,18 +8,24 @@
 
 use ai::Seen;
 use egui::{Grid, RichText, Ui};
-use rules::{Call, Claim, Resolution, View};
+use rules::{Call, Claim, Public, Resolution, View};
 
 use crate::seating::Seating;
-use crate::widget::{claim_box, dialled_value, die, tap};
+use crate::widget::{claim_box, dialled_value, die, shield, tap};
 
 /// Every seat and the dice it holds, in a grid so the columns line up across seats.
 ///
 /// A die this seat may not see is drawn as an unrevealed box rather than left out, so
 /// `How many dice each player holds is shown` without saying what they are.
+///
+/// Shield tokens take a column of their own, before the dice, and only while somebody at
+/// the table holds one. That is `How many shield tokens a player holds is shown only when
+/// they hold at least one`, decided for the whole table rather than per seat so every row
+/// has the same columns and the dice stay aligned across seats.
 pub fn table(ui: &mut Ui, view: &View, seating: &Seating) {
     let public = view.public();
     let turn = (!public.over()).then(|| public.current());
+    let shielded = any_shields(public);
     Grid::new("table").spacing([5.0, 5.0]).show(ui, |ui| {
         // Turn order rather than seat number, so who attacks whom is visible.
         for &seat in public.order() {
@@ -38,6 +44,10 @@ pub fn table(ui: &mut Ui, view: &View, seating: &Seating) {
                 RichText::new("")
             });
 
+            if shielded {
+                shield(ui, seating.colour(seat), public.shields(seat));
+            }
+
             let held = public.count(seat) as usize;
             if held == 0 && out {
                 ui.label(RichText::new("out").size(14.0).weak());
@@ -55,6 +65,14 @@ pub fn table(ui: &mut Ui, view: &View, seating: &Seating) {
             ui.end_row();
         }
     });
+}
+
+/// Whether anybody at the table holds a shield token.
+///
+/// What decides the table's shield column. A function of the public counts and nothing
+/// else, so every row of a draw gets the same answer.
+pub fn any_shields(public: &Public) -> bool {
+    public.order().iter().any(|&seat| public.shields(seat) > 0)
 }
 
 /// Whose turn it is, what there is to beat, and how many dice are in play.
