@@ -290,6 +290,16 @@ time-ordered id would work and would introduce a source of values into this crat
 not the secret, which `Determinism` below exists to prevent. The nonce is the client's, is
 recorded in nothing, and influences only which name the match gets.
 
+**A host is sent its own join.** `host` used to answer with the match id and no events,
+which looked harmless and was not: a client learns which seat it is on from the join that
+names its own account, and from nothing else. A joiner gets that for free, because `join`
+sends the new event to everyone including the joiner. A host got nothing, so a host client
+could never build a client at all — found the first time two seats tried to play through
+the wire format rather than through `crates/table`, which hands out seats itself and so
+cannot notice. The join is read back from the log rather than taken from the message, so a
+repeated request is answered with the join that is really recorded: the name and colour of
+the first request are the ones that stand.
+
 **No `rules` dependency, enforced by Cargo.** Stated above, repeated here because it is a
 decision rather than an accident: if a future change needs `rules` in the relay, that is
 the signal to stop and re-read this document.

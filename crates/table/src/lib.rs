@@ -79,6 +79,19 @@ pub enum Waiting {
 }
 
 /// A table: one relay, and every player at it.
+/// How likely the call is, from what the seat making it can see.
+///
+/// A display value only: it is written to the log for a person to read and never read
+/// back into a decision. `ai::Seen::chance_of_call` decides which chance a call is
+/// asking about and keeps it exact; this rounds it, which is why the two live apart.
+/// Zero where there is no claim to judge, which the rules refuse anyway.
+fn odds_of(view: &View, call: Call) -> f64 {
+    use ai::Seen;
+    view.chance_of_call(call)
+        .map(|chance| readout::percent(&chance))
+        .unwrap_or_default()
+}
+
 pub struct Table {
     pub relay: Relay<MemoryLog, MemoryConnections>,
     pub players: Vec<Player>,
@@ -328,24 +341,6 @@ impl Table {
     pub fn log(&self) -> Vec<Event> {
         self.relay.log().read(&self.match_id)
     }
-}
-
-/// How likely the call is, from what the seat making it can see. A display value only:
-/// it is written to the log for a person to read and never read back into a decision.
-fn odds_of(view: &View, call: Call) -> f64 {
-    use ai::Seen;
-    let chance = match call {
-        Call::Raise(claim) => view.chance_of(claim),
-        Call::Liar => match view.previous_claim() {
-            Some(claim) => view.chance_of(claim).complement(),
-            None => return 0.0,
-        },
-        Call::SpotOn => match view.previous_claim() {
-            Some(claim) => view.chance_exactly(claim),
-            None => return 0.0,
-        },
-    };
-    readout::percent(&chance)
 }
 
 #[cfg(test)]

@@ -54,6 +54,22 @@ pub trait Seen {
         exactly(self.unknown(), self.needed(claim), self.chance(claim.face))
     }
 
+    /// How likely a call is to come true. `None` when there is no claim to judge.
+    ///
+    /// Which chance belongs to which call is the part that must not be answered twice:
+    /// the figure ends up in the log, and hot seat and multiplayer disagreeing about it
+    /// would be two answers to one question. It stays an [`Odds`] rather than a
+    /// percentage because tests/exactness.rs forbids a floating point number in this
+    /// crate — what decides a claim is computed exactly, and the rounding belongs to
+    /// whoever is about to show it to somebody.
+    fn chance_of_call(&self, call: Call) -> Option<Odds> {
+        match call {
+            Call::Raise(claim) => Some(self.chance_of(claim)),
+            Call::Liar => Some(self.chance_of(self.previous()?).complement()),
+            Call::SpotOn => Some(self.chance_exactly(self.previous()?)),
+        }
+    }
+
     /// How many of the dice this seat cannot see a claim still needs. Negative when its
     /// own dice already settle the claim.
     fn needed(&self, claim: Claim) -> i64 {

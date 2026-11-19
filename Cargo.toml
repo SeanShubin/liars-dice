@@ -10,6 +10,7 @@ members = [
     "crates/integrity",
     "crates/relay",
     "crates/wire",
+    "crates/seat",
     "crates/table",
     "crates/render",
     "crates/render-minimal",
@@ -19,6 +20,7 @@ members = [
     "apps/web",
     "apps/local",
     "apps/relay",
+    "apps/probe",
     "apps/admin",
     "apps/prototype",
     "apps/minimal",
@@ -51,6 +53,10 @@ aws-sdk-apigatewaymanagement = "1.123.0"
 aws-sdk-ssm = "1.138.0"
 lambda_runtime = "1.5.0"
 serde_json = "1.0"
+tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
+# Only to choose the crypto provider: both aws-lc-rs and ring are in the graph,
+# so rustls refuses to guess. The AWS SDK already builds aws-lc-rs.
+rustls = "0.23"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros"] }
 dice-render = { path = "crates/dice-render" }
 rules = { path = "crates/rules" }
@@ -62,5 +68,6 @@ integrity = { path = "crates/integrity" }
 coordinator = { path = "crates/coordinator" }
 relay = { path = "crates/relay" }
 wire = { path = "crates/wire" }
+seat = { path = "crates/seat" }
 table = { path = "crates/table" }
 render-minimal = { path = "crates/render-minimal" }

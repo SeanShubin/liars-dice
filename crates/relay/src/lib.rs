@@ -463,9 +463,25 @@ impl<L: Log, C: Connections> Relay<L, C> {
         // may well come from a new socket, and that socket is this seat's.
         self.connections
             .attach(&match_id, from.clone(), seat, Role::Player);
+
+        // The host is sent its own join, exactly as a joiner is. A client learns which
+        // seat it is on from the join that names its own account and from nothing else,
+        // so a host that was told only the match id could never build a client at all.
+        // Read back from the log rather than taken from `work`, so a repeated request is
+        // answered with the join that is really recorded rather than with the one it just
+        // asked for — the name and colour of the first request are the ones that stand.
+        let joined = self
+            .open(&match_id)
+            .events
+            .into_iter()
+            .find(|event| matches!(event, Event::Join { .. }));
+        let sends = match joined {
+            Some(event) => self.to_everyone(&match_id, event),
+            None => Vec::new(),
+        };
         Ok(Outcome {
             refused: None,
-            sends: Vec::new(),
+            sends,
             created: Some(match_id),
         })
     }

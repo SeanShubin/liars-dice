@@ -337,6 +337,21 @@ one would silently make every commitment unverifiable.
 - A run of that client is checked against the match's log read straight from DynamoDB:
   same events, same order, every round's seed matching its commitment.
 
+`crates/seat` is the client half, and it holds no transport. Frames in, frames out: the
+caller owns the socket, so `apps/probe` gives it one from a terminal and `apps/web` will
+give it one from a browser, and neither has any logic to get wrong because there is none
+there to duplicate. `crates/table` is the other arrangement of the same pieces — it owns
+the relay and every player in one process — and the two now share the odds calculation
+rather than each having one, because that figure goes in the log and two answers to it
+would be two logs.
+
+Which means the socket is the only thing `apps/probe` adds, and the only thing it cannot
+make certain. So the whole match is played through the wire format in a unit test first:
+a relay in the same process, reached only through JSON, with two seats taking turns. That
+covers the message rendering, the answer parsing, a seat learning which seat it is, the
+turn taking and the round settling. The probe then adds a real WebSocket, real API
+Gateway and a real Lambda, and nothing else.
+
 A wrinkle that only appears once a client is a process rather than an index in a vector:
 `Client::new` takes the seat up front, and a joiner does not know its seat until the relay
 assigns one. `crates/table` sidesteps this by choosing the seats itself, which a client on
