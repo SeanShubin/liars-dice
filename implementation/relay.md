@@ -6,7 +6,10 @@
 - [Multiplayer / Scope, Hosting, Joining](/specification/multiplayer.md) — hosting,
   listing, joining, barring, starting
 - [Multiplayer / Claims](/specification/multiplayer.md) — the relay records every message
-  it receives
+  it receives, and a message either happens entirely or not at all
+- [Multiplayer / Hosting](/specification/multiplayer.md) — two matches never share an
+  identity, and a repeated request to host creates no second match
+- [Multiplayer / Joining](/specification/multiplayer.md) — two players never share a seat
 - [Multiplayer / Versions](/specification/multiplayer.md) — a match records its protocol
   version and refuses a mismatched join
 - [Game Rules / Match](/specification/game-rules.md) — absence, and a player who
@@ -59,6 +62,85 @@ position is taken, which is DynamoDB's `attribute_not_exists` on the sort key. T
 messages racing cannot both land at position 41; the loser re-reads and retries. This is
 what gives the log a total order without a lock, and a total order is what makes
 `Every client derives the same match state from the same events` true.
+
+### The position is the version
+
+Every handler folds the log into a view, decides from it, and writes. That is check-then-
+act, and for most of this project's life it could not fail: `receive` is sequential, so
+the fold and the write happen inside one uninterrupted call and the window is zero wide.
+Deployment made the window real, because a Lambda per message means two decisions can be
+made against the same log state.
+
+What that produced, found by two concurrent `host` frames against DynamoDB Local and then
+confirmed to apply to `join` as well:
+
+| Guard | What two simultaneous messages produce |
+|-------|----------------------------------------|
+| `match-{n}` from the match count | two hosts, one match, both told they created it |
+| `Seat(view.seats.len())` | two accounts at one seat, and both sockets attached to it |
+| a colour already taken | two players with the same colour |
+| `seats.len() >= MAX_PLAYERS` | eleven players |
+| `view.started` | a join landing after the start |
+| `is_barred` | a barred player joining |
+
+The seat row is the worst of them. The host race leaves a match that cannot start, so the
+dice leak needs a third player to arrive; the seat race leaves a perfectly ordinary match
+that starts normally and sends one seat's `Deal` to two different people. `Public`, `Game`
+and `View` do not help, because the relay is not confused about who may see that seat —
+it correctly sends the deal to every connection attached to it, and there are two.
+
+**The remedy is the primitive that was already there.** `Log::append` is a compare-and-set
+and the position is a version number; the mistake was retrying at the wrong level. `write`
+retried a lost race by *moving forward*, which is right for appending to a match you are
+already in — your event goes after the winner's — and wrong for any append whose position
+was part of the decision. The `Taken` return carried exactly the information needed to
+detect the conflict, and the retry discarded it.
+
+So a message is served as optimistic concurrency control:
+
+1. Read the log. Note its length `L`. Decide everything from that snapshot.
+2. Append the message's events at `L..L+k`, each conditional on being free, **all or
+   nothing**.
+3. On `Taken`, discard the decision, re-read, and redo the whole message.
+
+All-or-nothing is not optional. `host` writes three events and `start` writes a dozen or
+more, so a conflict part-way through would otherwise leave a partial message in the log —
+and `A message either happens entirely or not at all` is now a statement. DynamoDB
+expresses this directly with `TransactWriteItems`: up to a hundred items, each with its
+own condition, which is comfortably more than any message needs.
+
+This moves the retry from `write` to `receive`, and it fixes every row of that table at
+once, because each guard becomes validated by the commit rather than merely consulted
+before it.
+
+### What a match is called
+
+`match-{n}`, where `n` was the number of matches the log held, had three faults and only
+one of them was the race. It read the whole table to name one match, which the deployed
+relay measured at 38 ms of a 104 ms message on an empty table. And a count is not an
+identity: it is a function of global history, so hosting is not idempotent — a client that
+times out waiting for its answer and resends gets a second match, and nobody is told.
+
+A match is instead named by what was asked for:
+
+```
+match_id = HMAC(secret, "match" || account || nonce)   // leading bytes, hex
+```
+
+The client supplies the nonce; it need only be distinct per intent, not secret and not
+unpredictable. Guessing a match id reveals nothing, because every seed is
+`HMAC(secret, match_id || round)` and the secret is not the client's.
+
+This buys three things at once. There is no read before the write, so there is no window
+and no scan. The id is a function of the intent, so resending the same nonce produces the
+same id, the conditional claim at position 0 fails, and the relay answers with the match
+the sender already has — idempotency falls out rather than being added. And the id is
+fixed-length hex, so nothing has to validate a client-supplied key or defend the log's
+readability against one.
+
+The alternative of keeping `match-{n}` and retrying on the number would also be correct
+once the position is the version, and was rejected for the other two faults: it keeps the
+scan the measurement indicted, and it leaves hosting non-idempotent.
 
 ### Dealing, and the one line the relay walks
 
@@ -177,6 +259,23 @@ Requiring every connected seat to acknowledge costs one message per player per r
 removes the possibility entirely. The cost is paid in log lines, which are cheap, and in
 liveness, which is already tied to everyone being connected.
 
+**The retry belongs to the message, not to the append.** Stated in the Approach and
+repeated here because it is the correction of a decision this document previously got
+wrong: the old `write` looped `position += 1` until the append landed, and the old test
+suite asserted that behaviour as the contract — *two appends racing for the same position:
+one wins, the loser retries and lands after*. That is the correct contract for an event
+whose position nobody reasoned about, and the wrong one for every event in this relay,
+because each is written after a decision made against a particular log length. A retry
+that cannot tell *you lost a race, go again* from *you asked for something that already
+belongs to someone else* will eventually do the wrong thing, and did.
+
+**A match id derived from the secret rather than from a count or a clock.** Deriving it
+keeps the relay free of both a random number generator and a clock, which matters because
+the id lands in the log as the partition key and feeds every seed. A random or
+time-ordered id would work and would introduce a source of values into this crate that is
+not the secret, which `Determinism` below exists to prevent. The nonce is the client's, is
+recorded in nothing, and influences only which name the match gets.
+
 **No `rules` dependency, enforced by Cargo.** Stated above, repeated here because it is a
 decision rather than an accident: if a future change needs `rules` in the relay, that is
 the signal to stop and re-read this document.
@@ -186,6 +285,12 @@ the signal to stop and re-read this document.
 The relay's own non-determinism is the dealing, which is already the integrity scheme and
 already injected. Given a fixed secret and a fixed message order, a match replays exactly,
 which is what lets `apps/local` drive a whole match from a script in a test.
+
+A match's identity is derived too, from the secret and the nonce the hosting client sent,
+so no clock and no entropy source enters this crate. The order of a match's events is the
+log's conditional write, which means it is decided by the store rather than by which
+invocation won a race — and a decision that was made against a stale log is not committed
+at all rather than committed out of order.
 
 The connection table is the one thing that is neither derived nor deterministic. It holds
 no game state, only which socket is which seat, and `The connections a relay holds survive
@@ -204,7 +309,15 @@ In `apps/local`, against in-memory implementations of both traits:
 - A claim refused while a seat is absent, and accepted once it returns.
 - A join refused for a mismatched protocol version, and for a barred player, and for a
   match that has started.
-- Two appends racing for the same position: one wins, the loser retries and lands after.
+- Two appends racing for the same position: one wins, and the loser is told `Taken` rather
+  than being moved along. This bullet used to say *the loser retries and lands after*,
+  which is what the defect above was, written down as the contract.
+- A message is all or nothing: a conflict part-way through a multi-event message leaves
+  none of its events in the log, not the first two of three.
+- Hosting the same nonce twice creates one match, and the second answer names it.
+- Two hosts at once create two matches. Two joins at once take two seats, two colours, and
+  attach to two different seats. These need real concurrent storage, so they live with the
+  deployed implementations in `apps/relay` rather than here — see `relay-service.md`.
 - A barred player does not see the match in the list.
 - The relay crate does not depend on `rules`, asserted by a test over the dependency graph
   so the boundary cannot be crossed by accident.

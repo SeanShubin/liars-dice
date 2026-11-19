@@ -7,6 +7,8 @@
 - A player can host a match
 - The host can start the match
 - A hosted match has no AI players
+- Two matches never share an identity
+- A repeated request to host creates no second match
 
 ## Joining
 - Every match that can be joined is listed
@@ -19,11 +21,13 @@
 - A match is not listed to a player barred from it
 - A player chooses the colour of their dice when they join
 - A colour another player has chosen cannot be chosen
+- Two players never share a seat
 
 ## Claims
 - A client does not send an illegal claim
 - A client ignores an illegal claim it receives
 - The relay records every message it receives
+- A message either happens entirely or not at all
 
 ## Versions
 - A match records the protocol version of the client that hosted it
