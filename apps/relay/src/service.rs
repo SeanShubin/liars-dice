@@ -229,7 +229,16 @@ impl Service {
             // A send that was lost while the log already holds the event is the one state
             // a client cannot detect by itself. It recovers by re-reading, which `Resume`
             // already does, so this is logged and not retried.
-            eprintln!("lost a frame to {}: {error}", to.0);
+            //
+            // `DisplayErrorContext` rather than the error itself: an `SdkError`'s own
+            // `Display` is the words "service error" and nothing more, which is exactly
+            // what the first line this ever logged in production said. The context walks
+            // the source chain and names the thing that actually went wrong.
+            eprintln!(
+                "lost a frame to {}: {}",
+                to.0,
+                aws_sdk_apigatewaymanagement::error::DisplayErrorContext(&error)
+            );
         }
     }
 }

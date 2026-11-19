@@ -168,7 +168,7 @@ handler times the call it wraps and emits one line per invocation:
 | `route` | So a lobby view and a game message are never averaged together. |
 | `scan_millis` | Finding which matches exist, which grows with every event ever written. |
 | `fold_millis` | Reading and folding them, which grows with the matches still open. |
-| `matches_folded` | The divisor. Time without it cannot distinguish more matches from a slower table. |
+| `log_reads` | The divisor. Time without it cannot distinguish more matches from a slower table. On a lobby view it is the matches folded; on a message it is the appends, because the relay reads to find the end of the log before each one. |
 | `events_read` | The actual work, independent of how fast the hardware was that day. |
 | `read_capacity` | What it costs and what gets throttled, from `ReturnConsumedCapacity`. |
 
@@ -336,6 +336,16 @@ one would silently make every commitment unverifiable.
   diagnosable: if the socket already plays a match, the fault is in the page.
 - A run of that client is checked against the match's log read straight from DynamoDB:
   same events, same order, every round's seed matching its commitment.
+
+A wrinkle that only appears once a client is a process rather than an index in a vector:
+`Client::new` takes the seat up front, and a joiner does not know its seat until the relay
+assigns one. `crates/table` sidesteps this by choosing the seats itself, which a client on
+a socket cannot. The answer needs no protocol change — buffer arriving events until the
+`join` naming this client's own account arrives, then construct the `Client` and replay the
+buffer in order. The replay is exact because the log is ordered, which is the whole point
+of the conditional write. Worth knowing before the client is written, because the
+alternative looks easier and is a new answer frame carrying a seat, which would be a second
+place that decides who is sitting where.
 - The counters count. Against DynamoDB Local: a lobby view over three matches of known
   length reports exactly those matches and exactly that many events. The timings cannot be
   asserted on, which is why the counts are asserted on instead — a measurement nobody
@@ -343,6 +353,22 @@ one would silently make every commitment unverifiable.
   tests can pin.
 
 ## Open Items
+
+**Hosting races, and the conditional write does not save it.** `host` names a match
+`match-{n}` where `n` is the number of matches the log holds, then appends through `write`,
+which retries a `Taken` position by moving to the next one. That is right for appending to
+a match you are already in: losing a race means your event goes after the winner's. It is
+wrong for creating one. Two Lambdas serving two `host` frames at the same moment both scan,
+both see `n`, and both pick `match-n`; the loser's `Version` is refused at position 0 and
+then *appended at position 1 of the winner's match*. Two hosts, two accounts, one log,
+nobody refused, and both told they created it.
+
+In one process this cannot happen, because `receive` is sequential — which is why the
+library's tests do not see it and why it took a deployment to find. The fix is in
+`crates/relay` and is small: `host` must claim position 0 or concede the id, retrying on
+the *match number* rather than the position. It needs a statement about what a match id is,
+and it is more urgent than any client, because it is a correctness bug rather than a
+missing feature.
 
 **Nothing asks for the lobby.** `Relay::open_matches` exists and no `Message` reaches it,
 so a client on a socket cannot list open matches — the in-process harness calls the method
@@ -371,6 +397,24 @@ the document that just agreed to measure before guessing, and `scan_millis` is r
 separately so the evidence arrives already separated from the fold's.
 
 ## Status
+
+**The relay is deployed and has served a message.** `wss://071ye3vz8h.execute-api.us-east-1.amazonaws.com/live`.
+A synthetic `$connect` returns 200 with no function error, which is the cold start reading
+the secret out of SSM. A synthetic `$default` carrying a `host` frame wrote three events to
+DynamoDB at positions 0, 1 and 2, attached the connection at seat 0, and emitted its metric
+line. The name in the log is `Mary Jane`, with the space the archive's line format would
+have turned into a hyphen — the codec decision, confirmed in production storage rather than
+in a test.
+
+It cost 104 ms, and **38 ms of that was the scan**. On an empty table, on a route that has
+nothing to do with the lobby. The measurement earned its keep on the first message it ever
+reported: `Log::matches()` is called by `host` to name the match, so hosting scans the whole
+log table. That is the Open Item below, now with a number against it.
+
+`match-0` in the log is that probe and is not a real match. Nothing deletes it, because the
+log is append-only by design and the function's role deliberately holds no `DeleteItem` on
+it.
+
 
 The storage is written. `apps/relay` holds the codec, `DynamoLog`, `GatewayConnections`
 and the meter, with the boundary test that keeps `rules` out of the composition root.

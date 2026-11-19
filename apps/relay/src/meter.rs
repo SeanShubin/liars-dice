@@ -54,7 +54,12 @@ impl Meter {
             .fetch_add((units.max(0.0) * 1_000.0).round() as u64, Ordering::Relaxed);
     }
 
-    /// How many times the log was read, which is also how many matches a lobby folded.
+    /// How many times the log was read.
+    ///
+    /// On a lobby view that is the number of matches folded, one read each. On a message
+    /// it is the number of appends, because the relay reads to find the end of the log
+    /// before each one — which is why the field is not called `matches_folded`. The first
+    /// message the deployed relay ever served reported three, for one match.
     pub fn reads(&self) -> u64 {
         self.counted.reads.load(Ordering::Relaxed)
     }
@@ -95,7 +100,7 @@ impl Meter {
             "total_millis",
             "scan_millis",
             "fold_millis",
-            "matches_folded",
+            "log_reads",
             "events_read",
             "read_capacity",
         ]
@@ -106,7 +111,7 @@ impl Meter {
                 "{{\"_aws\":{{\"Timestamp\":{timestamp},\"CloudWatchMetrics\":[{{",
                 "\"Namespace\":\"{namespace}\",\"Dimensions\":[[\"route\"]],\"Metrics\":[{metrics}]",
                 "}}]}},\"route\":\"{route}\",\"total_millis\":{total},\"scan_millis\":{scan},",
-                "\"fold_millis\":{fold},\"matches_folded\":{matches},\"events_read\":{events},",
+                "\"fold_millis\":{fold},\"log_reads\":{reads},\"events_read\":{events},",
                 "\"read_capacity\":{capacity}}}"
             ),
             timestamp = unix_millis(),
@@ -116,7 +121,7 @@ impl Meter {
             total = total_millis,
             scan = scan_millis,
             fold = fold_millis,
-            matches = self.reads(),
+            reads = self.reads(),
             events = self.events(),
             capacity = self.capacity_units(),
         )

@@ -301,7 +301,7 @@ fn the_meter_counts_what_a_lobby_view_cost() {
         std::time::Duration::from_millis(7),
     );
     assert!(line.contains("\"events_read\":6"), "{line}");
-    assert!(line.contains("\"matches_folded\":3"), "{line}");
+    assert!(line.contains("\"log_reads\":3"), "{line}");
     assert!(line.contains("\"route\":\"$default\""), "{line}");
 }
 
