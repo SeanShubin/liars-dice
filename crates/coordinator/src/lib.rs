@@ -57,21 +57,35 @@ pub struct Client {
     variants: Variants,
     game: Option<Game>,
     commitment: Option<Commitment>,
+    /// Every event this client was sent, in order.
+    ///
+    /// What this seat would have seen and nothing else, which is a weaker thing than the
+    /// relay's log: the relay holds a `Deal` for every seat, and a client is only sent its
+    /// own until the round is revealed. A screen that lists events must read this one, or
+    /// it shows the holder of the screen every other seat's dice.
+    received: Vec<Event>,
+    /// What ended the round being shown: the seat that called, and what it called.
+    ///
+    /// `Public` records raises, because a raise is a claim, but not the liar or spot on
+    /// that disputes one. This is how a screen says who ended the round and how, without
+    /// going back to a log to re-derive something the client already knew. Cleared when
+    /// the next round begins.
+    ended_by: Option<(Seat, Call)>,
     /// Whether this round's seed has arrived.
     ///
     /// Not the same as `Game::revealed`, which only turns true when the round is resolved
     /// — and resolving happens after the whole delivery has finished, by which time the
-    /// next round's deals have come and gone. This turns true the moment the seed lands,
-    /// which is the point after which a deal belongs to the next round.
+    /// next round's deals have already come and gone. This turns true the moment the seed
+    /// lands, which is the point after which a deal belongs to the next round.
     revealed: bool,
     /// Dice dealt for the next round, waiting for this one to be left behind.
     ///
     /// The relay reveals a round and opens the next one in the same breath
     /// (`crates/relay/src/lib.rs`, `round_over`), so the next round's commitment and deals
-    /// arrive while this client is still on the round that just ended. Installing one then
-    /// is refused, because that seat is already dealt for the round in progress, and
-    /// `Game::next_round` forgets every die — so a deal that arrived early is lost between
-    /// the two, and the new round begins with nobody holding anything.
+    /// arrive while this client is still showing the round that just ended. Installing one
+    /// then is refused, because that seat is already dealt for the round in progress, and
+    /// `Game::next_round` forgets every die — so a deal that arrived early would be lost
+    /// between the two, and the new round would begin with nobody holding anything.
     next_deal: Vec<(Seat, [u8; SEAT])>,
     /// Problems found while applying events, kept rather than thrown away so a caller can
     /// report that the log disagrees with itself.
@@ -86,6 +100,8 @@ impl Client {
             variants: Variants::default(),
             game: None,
             commitment: None,
+            received: Vec::new(),
+            ended_by: None,
             revealed: false,
             next_deal: Vec::new(),
             complaints: Vec::new(),
@@ -120,6 +136,16 @@ impl Client {
         &self.complaints
     }
 
+    /// Everything this seat has been sent, in order.
+    pub fn stream(&self) -> &[Event] {
+        &self.received
+    }
+
+    /// Who ended the round being shown, and how. `None` while a round is still running.
+    pub fn ended_by(&self) -> Option<(Seat, Call)> {
+        self.ended_by
+    }
+
     /// Offer a call. Refused rather than sent if it is not legal, which is
     /// `A client does not send an illegal claim` enforced where a call originates.
     ///
@@ -143,6 +169,7 @@ impl Client {
 
     /// Take one event from the relay.
     pub fn receive(&mut self, event: &Event) -> Vec<Intent> {
+        self.received.push(event.clone());
         match event {
             Event::PlayerOrder(order) => {
                 self.order = order.iter().map(|seat| seat.0 as usize).collect();
@@ -258,7 +285,10 @@ impl Client {
             Ok(Claimed::Continues) => Vec::new(),
             // Seen the round end, which is all the acknowledgement means. The dice that
             // settle it have not arrived yet.
-            Ok(Claimed::RoundEnded) => vec![Intent::RoundOver],
+            Ok(Claimed::RoundEnded) => {
+                self.ended_by = Some((seat, call));
+                vec![Intent::RoundOver]
+            }
             Err(_) => Vec::new(),
         }
     }
@@ -283,8 +313,9 @@ impl Client {
             }
         }
         // The commitment is not cleared. The next round's arrives with its deals, before
-        // this is called, so clearing it here threw away the thing the next reveal is
-        // checked against — and every reveal after the first went unverified.
+        // this is called, so clearing it here would throw away the thing the next reveal
+        // is checked against — and every reveal after the first would go unverified.
         self.revealed = false;
+        self.ended_by = None;
     }
 }

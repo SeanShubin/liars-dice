@@ -3572,6 +3572,7 @@ version = "0.0.0"
 dependencies = [
  "eframe",
  "integrity",
+ "render-minimal",
  "rules",
  "table",
  "wasm-bindgen-futures",

@@ -8,6 +8,7 @@ publish.workspace = true
 table.workspace = true
 rules.workspace = true
 integrity.workspace = true
+render-minimal.workspace = true
 eframe.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

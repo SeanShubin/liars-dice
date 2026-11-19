@@ -234,8 +234,33 @@ In `apps/hotseat`:
 - The screen's seat changes only through a handover when the next actor is a different
   human seat, and never when the next actor is virtual.
 
+In `apps/hotseat`, over whole matches driven exactly as the screens drive them, with the
+invariant checked at every state they pass through:
+
+- The screen is drawn from the seat holding it and from no other, and while a round is live
+  that seat can reach nobody else's dice.
+- One person is never handed the screen, because it never leaves them.
+- With several people the screen goes only to a seat a person is playing, and never to
+  whoever is already holding it. Checked with five people, which is the most handovers a
+  hotseat match is likely to see.
+- A table of virtual players reaches a winner with nobody handed anything.
+
 And by hand, once, in a browser on the deployed page: a match played to a winner.
 
 ## Status
 
-In progress.
+Built. `crates/render-minimal` is the presentation, `crates/table` steps a match, and
+`apps/hotseat` is the lobby, the handover and the screens. 162 tests pass across the
+workspace, clippy clean with warnings denied. A two-person match was played in a browser:
+Player 1 claimed, the screen said `Pass the screen to Alice`, and after she took it her own
+dice were on the table and Player 1's were five question marks.
+
+Building it turned up one thing worth more than the feature. Drawing the screen from a
+client rather than from the relay's log made it visible that a client had no dice at all
+from the second round onwards — the relay opens the next round in the same breath as it
+reveals the last, so every deal after the first was refused by the round in progress and
+then forgotten by `next_round`. The AI had been claiming from an empty hand for every round
+but the first, and no test caught it because every assertion anyone had written was about a
+round that had already finished. The same clearing discarded each round's commitment, so
+every reveal after the first went unverified. Both are fixed in `crates/coordinator` with
+tests that fail without the fix.
