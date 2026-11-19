@@ -57,6 +57,22 @@ pub struct Client {
     variants: Variants,
     game: Option<Game>,
     commitment: Option<Commitment>,
+    /// Whether this round's seed has arrived.
+    ///
+    /// Not the same as `Game::revealed`, which only turns true when the round is resolved
+    /// — and resolving happens after the whole delivery has finished, by which time the
+    /// next round's deals have come and gone. This turns true the moment the seed lands,
+    /// which is the point after which a deal belongs to the next round.
+    revealed: bool,
+    /// Dice dealt for the next round, waiting for this one to be left behind.
+    ///
+    /// The relay reveals a round and opens the next one in the same breath
+    /// (`crates/relay/src/lib.rs`, `round_over`), so the next round's commitment and deals
+    /// arrive while this client is still on the round that just ended. Installing one then
+    /// is refused, because that seat is already dealt for the round in progress, and
+    /// `Game::next_round` forgets every die — so a deal that arrived early is lost between
+    /// the two, and the new round begins with nobody holding anything.
+    next_deal: Vec<(Seat, [u8; SEAT])>,
     /// Problems found while applying events, kept rather than thrown away so a caller can
     /// report that the log disagrees with itself.
     complaints: Vec<Wrong>,
@@ -70,6 +86,8 @@ impl Client {
             variants: Variants::default(),
             game: None,
             commitment: None,
+            revealed: false,
+            next_deal: Vec::new(),
             complaints: Vec::new(),
         }
     }
@@ -171,12 +189,20 @@ impl Client {
     }
 
     fn take_deal(&mut self, seat: Seat, dice: &[u8]) {
+        let revealed = self.revealed;
         let Some(game) = self.game.as_mut() else {
             return;
         };
         let Ok(dealt) = <[u8; SEAT]>::try_from(dice) else {
             return;
         };
+        // Once this round's seed has arrived the round can take no more dice, so a deal
+        // after that belongs to the next round and waits for it. The reveal's own deals
+        // arrive before the `Reveal` that carries the seed, so they still land here.
+        if revealed {
+            self.next_deal.push((seat, dealt));
+            return;
+        }
         // A seat already dealt is ignored rather than overwritten: a late or duplicated
         // deal must not rewrite a round.
         let _ = game.install(seat.0 as usize, dealt);
@@ -190,6 +216,7 @@ impl Client {
         let Some(seed) = Seed::from_hex(seed) else {
             return Vec::new();
         };
+        self.revealed = true;
         if let Some(commitment) = self.commitment
             && !integrity::verify(&commitment, &seed)
         {
@@ -250,7 +277,14 @@ impl Client {
     pub fn begin_next_round(&mut self, opens: usize) {
         if let Some(game) = self.game.as_mut() {
             game.next_round(opens);
+            // Whatever was dealt while the last round was still being shown.
+            for (seat, dealt) in self.next_deal.drain(..) {
+                let _ = game.install(seat.0 as usize, dealt);
+            }
         }
-        self.commitment = None;
+        // The commitment is not cleared. The next round's arrives with its deals, before
+        // this is called, so clearing it here threw away the thing the next reveal is
+        // checked against — and every reveal after the first went unverified.
+        self.revealed = false;
     }
 }

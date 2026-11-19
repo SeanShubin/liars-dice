@@ -467,3 +467,93 @@ fn stepping_plays_the_same_match_as_taking_turns() {
         "the two ways of driving a table disagreed"
     );
 }
+
+/// Every round is played with dice, not just the first.
+///
+/// The relay reveals a round and opens the next in one breath, so the next round's deal
+/// arrives while the client is still showing the round that ended. It used to be dropped —
+/// refused by the round in progress, then forgotten by `next_round` — and every round
+/// after the first was played by players who could not see their own dice. The AI claimed
+/// from an empty hand, the screen had nothing to draw, and the match still finished,
+/// because the reveal at the end of each round installed the dice it had been missing.
+/// Nothing failed. It was only wrong.
+#[test]
+fn every_round_is_dealt_before_it_is_played() {
+    let mut table = ai_table(3);
+    let mut rounds = 0;
+    let mut guard = 0;
+
+    loop {
+        guard += 1;
+        assert!(guard < 5_000, "the match would not finish");
+        match table.advance() {
+            Waiting::Over => break,
+            Waiting::Call(at) => panic!("an ai seat had no answer at seat {at}"),
+            Waiting::Outcome(_) => {
+                table.resume();
+                if table.over() {
+                    break;
+                }
+                rounds += 1;
+                for player in &table.players {
+                    let seat = player.client.seat().0 as usize;
+                    let view = player.client.view().expect("a view");
+                    if view.public().eliminated(seat) {
+                        continue;
+                    }
+                    // Its own dice, and only its own: a client is not sent another seat's
+                    // until the reveal, so `dice_known` is false here and should be.
+                    let own = view.own_dice().unwrap_or(&[]);
+                    assert_eq!(
+                        own.len(),
+                        view.public().count(seat) as usize,
+                        "seat {seat} cannot see the dice it holds in round {}",
+                        view.public().round()
+                    );
+                }
+            }
+        }
+    }
+
+    assert!(rounds > 3, "only {rounds} rounds, too few to be evidence");
+}
+
+/// And every round's reveal is checked against the commitment published before it.
+///
+/// The commitment for the next round arrives with that round's deals, which is before the
+/// last round is left behind — so clearing it when the next round begins threw away the
+/// only thing the next reveal could be checked against. A tampered seed would have been
+/// believed from round two onwards.
+#[test]
+fn a_tampered_seed_is_caught_in_a_later_round_too() {
+    let mut table = ai_table(3);
+    // Get past the first round, so the commitment under test is one that arrived while an
+    // earlier round was still being shown.
+    let mut rounds = 0;
+    while rounds < 2 {
+        match table.advance() {
+            Waiting::Outcome(_) => {
+                table.resume();
+                rounds += 1;
+            }
+            other => panic!("the match ended early: {other:?}"),
+        }
+    }
+
+    let client = &mut table.players[0].client;
+    assert!(
+        client.complaints().is_empty(),
+        "an honest match should raise no complaint"
+    );
+    // A seed that is not the one this round committed to.
+    client.receive(&Event::Reveal {
+        seed: "ab".repeat(32),
+    });
+    assert!(
+        client
+            .complaints()
+            .iter()
+            .any(|wrong| matches!(wrong, Wrong::SeedDoesNotMatchCommitment)),
+        "a seed that does not match the commitment went unnoticed in round {rounds}"
+    );
+}

@@ -9,7 +9,7 @@
 //! the same table. Swapping `relay::memory` for a transport that speaks over a socket is
 //! the only difference between this and a real networked match.
 
-pub use coordinator::{Client, Decides, Intent};
+pub use coordinator::{Client, Decides, Intent, Wrong};
 use integrity::Secret;
 use protocol::{Account, Event, PROTOCOL_VERSION, Seat};
 use relay::memory::{MemoryConnections, MemoryLog};
