@@ -1,0 +1,186 @@
+name: Verify & Deploy
+
+# One pipeline. A gate that must hold before anything is published, then the
+# deploy, then the rest of the verification as notify-only — a failure there
+# reds the run and tells us, but never undoes a deploy that was already green.
+#
+#   gate ──▶ deploy ──▶ latest-dependencies (notify only)
+#
+# On a pull request the deploy is skipped and both other jobs still run.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+# id-token for the OIDC assume-role; the deploy holds no AWS key, here or anywhere.
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  TRUNK_VERSION: v0.21.7
+  AWS_REGION: us-east-1
+  STACK: seanshubin-com
+
+jobs:
+  gate:
+    name: Gate (fmt · clippy · tests · wasm build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The minimal game still hosts egui inside Bevy, which links these natively.
+      - name: Install Bevy's Linux dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: gate
+
+      - name: Install Trunk
+        run: |
+          curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xzf - -C /usr/local/bin
+          trunk --version
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      # What W14 settled: a warning left standing is a deploy that cannot say it
+      # passed.
+      - name: Clippy, warnings denied
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      # The bundle the deploy publishes is the one the gate built. Nothing is
+      # rebuilt downstream, so nothing downstream can differ.
+      - name: Build the hotseat harness for the browser
+        working-directory: apps/hotseat
+        run: trunk build --release --public-url /liars-dice/hotseat/
+
+      - name: Assemble the site
+        run: |
+          mkdir -p site/liars-dice/hotseat
+          cp web/index.html site/index.html
+          cp -r apps/hotseat/dist/* site/liars-dice/hotseat/
+          find site -type f | sort
+
+      # Nothing is published that cannot be found from the root, and nothing is
+      # linked that was not published. Both ship silently otherwise.
+      - name: Check every page is reachable from the root
+        run: python3 scripts/check-site-links.py site
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: site
+          path: site
+          retention-days: 7
+
+  deploy:
+    name: Deploy to seanshubin.com
+    needs: gate
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://seanshubin.com/
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: site
+          path: site
+
+      - name: Assume the deploy role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update the stack
+        run: |
+          aws cloudformation deploy \
+            --template-file deploy/template.yaml \
+            --stack-name "$STACK" \
+            --capabilities CAPABILITY_IAM \
+            --no-fail-on-empty-changeset
+
+      - name: Read the stack's outputs
+        id: stack
+        run: |
+          outputs() {
+            aws cloudformation describe-stacks --stack-name "$STACK" \
+              --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text
+          }
+          echo "bucket=$(outputs BucketName)" >> "$GITHUB_OUTPUT"
+          echo "distribution=$(outputs DistributionId)" >> "$GITHUB_OUTPUT"
+
+      # Two passes, because the two kinds of file want opposite answers. Assets
+      # carry a content hash in their name, so they can never change under a
+      # given URL and may be cached for a year. HTML names them, so it must be
+      # re-read every time or a deploy would publish assets nobody asks for.
+      - name: Sync the content-hashed assets
+        run: |
+          aws s3 sync site "s3://${{ steps.stack.outputs.bucket }}" \
+            --delete \
+            --exclude "*.html" \
+            --cache-control "public, max-age=31536000, immutable"
+
+      - name: Sync the HTML
+        run: |
+          aws s3 sync site "s3://${{ steps.stack.outputs.bucket }}" \
+            --exclude "*" --include "*.html" \
+            --cache-control "no-cache"
+
+      - name: Invalidate the edge
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id "${{ steps.stack.outputs.distribution }}" \
+            --paths "/*" >/dev/null
+
+      - name: Check what is live
+        run: |
+          for path in / /liars-dice/hotseat/; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" "https://seanshubin.com${path}")
+            echo "${path} -> ${code}"
+            test "$code" = "200"
+          done
+
+  latest-dependencies:
+    name: Verify · against the latest dependencies
+    needs: [gate, deploy]
+    if: always() && needs.gate.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Bevy's Linux dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # D4: checking that an update exists says nothing about whether it works.
+      # The gate builds the committed lockfile so a deploy stays reproducible;
+      # this throws that lockfile away and tests against the newest everything.
+      # A break here reds the run and tells us, and production is untouched.
+      - name: Update every dependency and test
+        run: |
+          cargo update
+          cargo test --workspace

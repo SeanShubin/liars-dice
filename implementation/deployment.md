@@ -50,10 +50,20 @@ One distribution, three behaviours, and a WebSocket endpoint reached directly:
 
 | Pattern | Origin | Caching |
 |---------|--------|---------|
-| `/liars-dice/minimal/*` | S3 | immutable, one year |
-| `/liars-dice/*` | S3 | immutable, one year |
+| `/*` | S3, through an Origin Access Control | the headers the sync sets |
 | `/liars-dice/api/*` | HTTP API, Lambda | disabled, AllViewerExceptHostHeader |
 | `wss://` | WebSocket API, Lambda | not through CloudFront |
+
+Only the first exists so far. The API behaviours arrive with the relay.
+
+**A CloudFront Function rewrites directory requests.** S3 has no directory index
+below the bucket root, so a request for `/liars-dice/hotseat/` finds no object and fails.
+The function appends `index.html` at the edge, before the origin is asked, which is a
+third of a millisecond and no Lambda.
+
+**The bucket is private.** CloudFront reads it with a signed request through an Origin
+Access Control and nothing else can read it at all, so there is no second way in to keep
+secure and no public bucket to misconfigure.
 
 The static and API behaviours follow `vote` exactly, including the reason: the browser
 sees a single origin, so cookies and authorization headers travel same-origin and there
@@ -139,6 +149,20 @@ break a build that was already green. A notify-only job on every build runs `car
 into a throwaway lockfile and runs the full test suite against it: a broken upgrade reds
 the run and notifies, without touching production. That second job is the only thing that
 can make `A broken upgrade is discovered automatically` true of the repository.
+
+### The hotseat harness
+
+`seanshubin.com/liars-dice/hotseat` is the first thing deployed, and it is deliberately
+the cheapest thing that proves the most: it exercises the build, the bucket, the
+distribution, the routing, the directory-index function and the whole game, while needing
+no relay, no authentication and no database. A harness rather than a game — hidden
+information makes one screen nonsense to play seriously — so it shows every seat at once
+instead of pretending otherwise.
+
+Measured: **2.8 MB raw, 1.34 MB gzipped**, against the 44.2 MB and 13.8 MB a Bevy page
+serves. That is the number the host decision was argued on and it is now a measurement.
+Enabling both the `glow` and `wgpu` backends breaks the wasm build outright; `glow` alone
+builds and carries nothing a two dimensional presentation does not use.
 
 ### Desktop builds
 

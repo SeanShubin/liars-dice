@@ -53,6 +53,8 @@
 - The minimal web game is reachable at seanshubin.com/liars-dice/minimal
 - seanshubin.com/liars-dice/pretty redirects to seanshubin.com/liars-dice
 - The data browser is reachable at seanshubin.com/liars-dice/admin
+- The hotseat harness is reachable at seanshubin.com/liars-dice/hotseat
+- Every page is reachable from seanshubin.com
 
 ## Authentication
 - A human player authenticates with Discord

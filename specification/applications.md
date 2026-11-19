@@ -15,6 +15,11 @@
 - A web game is multiplayer
 - A player using one presentation and a player using the other can be in the same match
 
+## Harness
+- The hotseat harness seats every player in one browser
+- The hotseat harness has no network and no authentication
+- A harness is not a game, and no statement about a game applies to it
+
 ## Desktop
 - A desktop game has one human
 - Every opponent in a desktop game is an AI player

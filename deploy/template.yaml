@@ -1,0 +1,163 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  seanshubin.com — the static front: a private S3 bucket, a CloudFront
+  distribution reading it through an Origin Access Control, and the Route 53
+  records pointing the apex at it.
+
+  One hostname resolves to exactly one distribution, so this stack owns
+  seanshubin.com. Other projects will share it by path rather than by taking a
+  distribution of their own.
+
+Parameters:
+  DomainName:
+    Type: String
+    Default: seanshubin.com
+  HostedZoneId:
+    Type: String
+    Default: Z0188529370T15QBJGJXR
+    Description: Route 53 hosted zone for DomainName.
+  CertificateArn:
+    Type: String
+    Default: arn:aws:acm:us-east-1:964638509728:certificate/64638946-345a-45b6-9b45-c96cfbf64777
+    Description: >-
+      An already-issued certificate for DomainName, in us-east-1 because that is
+      the only region CloudFront reads them from.
+
+Resources:
+  SiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      # Named from the stack rather than the domain: a dot in a bucket name breaks
+      # virtual-host style TLS, and CloudFront rejects a dot in its own resource names.
+      BucketName: !Sub "${AWS::StackName}-site"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  # The bucket is private: CloudFront reads it with a signed request and nothing
+  # else can read it at all, so there is no second way in to keep secure.
+  OriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "${AWS::StackName}-oac"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # S3 has no notion of a directory index below the root, so a request for
+  # /liars-dice/hotseat/ would find no object and fail. This rewrites a trailing
+  # slash to the index.html inside it, at the edge, before the origin is asked.
+  DirectoryIndex:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: !Sub "${AWS::StackName}-directory-index"
+      AutoPublish: true
+      FunctionConfig:
+        Comment: Append index.html to a request for a directory.
+        Runtime: cloudfront-js-2.0
+      FunctionCode: |
+        function handler(event) {
+          var request = event.request;
+          if (request.uri.endsWith('/')) {
+            request.uri += 'index.html';
+          } else if (!request.uri.split('/').pop().includes('.')) {
+            request.uri += '/index.html';
+          }
+          return request;
+        }
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub "${DomainName} static front"
+        Aliases:
+          - !Ref DomainName
+        DefaultRootObject: index.html
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        # Only the cheapest edge locations. A handful of players do not need the
+        # rest, and T16 puts the whole account under five dollars a month.
+        PriceClass: PriceClass_100
+        ViewerCertificate:
+          AcmCertificateArn: !Ref CertificateArn
+          MinimumProtocolVersion: TLSv1.2_2021
+          SslSupportMethod: sni-only
+        Origins:
+          - Id: site
+            DomainName: !GetAtt SiteBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt OriginAccessControl.Id
+            S3OriginConfig: {}
+        DefaultCacheBehavior:
+          TargetOriginId: site
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          # CachingOptimized, an AWS-managed policy. It honours the Cache-Control
+          # headers the deploy sets, which is what makes the two-pass sync work:
+          # HTML no-cache, content-hashed assets immutable for a year.
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          FunctionAssociations:
+            - EventType: viewer-request
+              FunctionARN: !GetAtt DirectoryIndex.FunctionMetadata.FunctionARN
+
+  BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref SiteBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${SiteBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${Distribution}"
+
+  # Z2FDTNDATAQYW2 is CloudFront's own hosted zone, the same for every
+  # distribution in every account. It is a constant, not a lookup.
+  ApexRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Sub "${DomainName}."
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt Distribution.DomainName
+        HostedZoneId: Z2FDTNDATAQYW2
+        EvaluateTargetHealth: false
+
+  ApexRecordV6:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Sub "${DomainName}."
+      Type: AAAA
+      AliasTarget:
+        DNSName: !GetAtt Distribution.DomainName
+        HostedZoneId: Z2FDTNDATAQYW2
+        EvaluateTargetHealth: false
+
+Outputs:
+  BucketName:
+    Description: Where the deploy syncs the built site.
+    Value: !Ref SiteBucket
+  DistributionId:
+    Description: What the deploy invalidates after a sync.
+    Value: !Ref Distribution
+  DistributionDomain:
+    Value: !GetAtt Distribution.DomainName
+  SiteUrl:
+    Value: !Sub "https://${DomainName}/"
