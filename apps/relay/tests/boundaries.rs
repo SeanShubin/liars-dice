@@ -39,7 +39,13 @@ fn the_relay_service_depends_only_on_storage_and_the_format() {
         assert!(
             matches!(
                 name,
-                "relay" | "protocol" | "integrity" | "aws-config" | "aws-sdk-dynamodb" | "tokio"
+                "relay"
+                    | "wire"
+                    | "protocol"
+                    | "integrity"
+                    | "aws-config"
+                    | "aws-sdk-dynamodb"
+                    | "tokio"
             ),
             "unexpected dependency {name}: adding one here widens what the deployed relay \
              can know, which is the thing the library's own boundary test exists to prevent"

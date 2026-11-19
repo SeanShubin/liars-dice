@@ -5986,6 +5986,7 @@ dependencies = [
  "protocol",
  "relay",
  "tokio",
+ "wire",
 ]
 
 [[package]]
@@ -8134,6 +8135,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8c3b93199df0ab874cdf0c6a94f0a0dc3423fe41f1cafb62b8bd7b1deb277aef"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "wire"
+version = "0.0.0"
+dependencies = [
+ "protocol",
+ "relay",
+ "serde_json",
 ]
 
 [[package]]

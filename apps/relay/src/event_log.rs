@@ -104,7 +104,7 @@ impl Log for DynamoLog {
                 self.meter.capacity(capacity);
             }
             for item in page.items() {
-                let event = codec::from_item(item).unwrap_or_else(|why| {
+                let event = codec::event_from_item(item).unwrap_or_else(|why| {
                     // Refusing to continue is the point. A log that reads as all but one
                     // of its events replays as a different match, and does it quietly.
                     panic!("{} holds an item this build cannot read: {why}", match_id.0)

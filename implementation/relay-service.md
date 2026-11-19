@@ -57,37 +57,60 @@ did not have to be bent to fit; it was shaped around this.
 `read` is a Query on the partition, ordered by the sort key, which is the position. Events
 are appended once and never changed, so the read is consistent without being made so.
 
-### What an item holds
+### One decomposition, three renderings
 
-One item per event, and the event is stored field by field: the kind in its own attribute,
-then one attribute per field of that variant. Numbers as numbers, seats as numbers, names
-as strings.
+A value has to survive three crossings: into a DynamoDB item, out to a client, and in
+from one. Three independent mappings would be three places to drift, and
+`protocol.md` had recorded the opposite property — *the format remains the only
+representation* — on the premise that nothing read a log back. The relay reads its log
+back on every message, so that premise is gone and the property needs a mechanism instead
+of an assumption.
 
-Encoding is an exhaustive `match` on `Event` with no wildcard arm, so adding an event to
-the protocol is a compile error here rather than an event that silently stores as nothing.
-Decoding matches on the kind and treats an unknown one as an error, not as a line to skip:
-a log that can be partially read is not a log that may be partially trusted, and the
-position it sits at is exactly where a replay would go quietly wrong.
+So `crates/wire` holds one decomposition: a `Shape` — a kind, and named `Value`s, where a
+`Value` is text, a count, the one float, a flag, a list of counts, or a nested shape.
+`Event` and `Message` each decompose by an exhaustive `match` with no wildcard arm, so
+adding a variant to either stops the build rather than arriving as nothing. Renderings are
+then mechanical:
+
+| Rendering | Where | Why there |
+|-----------|-------|-----------|
+| JSON | `crates/wire` | A browser client and the service both speak it, and so does everything on the path: API Gateway, CloudWatch, and whatever connects later that is not this Rust client. |
+| DynamoDB item | `apps/relay` | `AttributeValue` is an AWS type, and the browser must never compile it. |
+
+Both read an unknown kind as an error rather than as something to skip: a log that can be
+partially read is not a log that may be partially trusted, and the position it sits at is
+exactly where a replay would go quietly wrong.
+
+`Value` is narrow on purpose. It is every kind of value the log and the message format
+actually hold, so a rendering answers for a finite set of cases and a new kind of value
+cannot be introduced without every rendering being made to handle it.
 
 **Not the archive's line format.** `Display` already turns an `Event` into one line, and
-reusing it here would mean one format instead of two. It is the wrong format, because it
-is a rendering and renderings round: `percent` cuts odds to two places, and `token`
-collapses whitespace, so a player called `Mary Jane` comes back as `Mary-Jane` and is
-renamed by their own reconnection. The archive is allowed to do that — it is defending a
-line-based format for a reader who never needs more precision than that. A record is not
-allowed to do that. So `Display` stays the archive's, and the archive stays derived.
+reusing it would have meant one representation instead of two. It is the wrong one,
+because it is a rendering for a person and renderings round: `percent` cuts odds to two
+places, and `token` collapses whitespace, so a player called `Mary Jane` comes back as
+`Mary-Jane` and is renamed by their own reconnection. The archive is allowed to do that.
+The only copy of what happened is not. So `Display` stays the archive's, and the archive
+stays derived.
 
-**Not serde.** `protocol` declares no dependencies, which is load-bearing: it is the crate
-every other crate agrees on, including the one that compiles to wasm. `Event::Variant`
-also holds a `&'static str`, which nothing can deserialize into without leaking a string
-or consulting a list of the names the relay actually writes. Consulting the list is the
-better answer and it belongs beside the storage, so `relay::VARIANTS` becomes public: the
-names are part of the log this service writes, and whatever reads that log back needs to
-know them.
+**Not serde derives.** `protocol` and `relay` declare no dependency on serde and gain
+none: `protocol` is the crate every other crate agrees on, including the one that compiles
+to wasm. `serde_json` is used inside `wire` to parse and write the JSON text, because
+escapes and unicode in a hand-rolled parser are a bug waiting for a player with an
+interesting name. The mapping is `Shape`; the library types stay plain.
 
-`Moment` is stored as unix nanoseconds, so `protocol` gains the inverse of the
+`Event::Variant` holds a `&'static str`, which nothing can deserialize into without
+leaking a string or consulting a list of the names the relay writes. Consulting the list
+is the better answer, so `relay::VARIANTS` is public and an unknown name is refused:
+guessing which rules were in force is the one thing a replay must never do.
+
+`Moment` is carried as unix nanoseconds, so `protocol` gains the inverse of the
 `from_unix_nanos` it already has — a reversible pair tested against each other, rather
-than a date formatted into a string that something here would have to parse.
+than a date formatted into a string that something would have to parse back.
+
+Keys are written in alphabetical order, which is `serde_json`'s default and worth keeping:
+a frame's bytes are then a function of what the shape holds, not of the order somebody
+declared the fields in.
 
 ### The connection table
 
@@ -159,13 +182,15 @@ projection of open matches fixes it.
 
 ## Boundaries
 
-- **Depends on** `crates/relay`, `protocol`, `integrity`, and the AWS SDK.
+- **Depends on** `crates/relay`, `wire`, `protocol`, `integrity`, and the AWS SDK.
 - **Does not depend on** `rules`. The library's boundary test reads its manifest and
   fails if `rules` ever appears; this crate carries the same test, because a composition
   root is exactly where someone would reach for the rules to answer a question the relay
   is not supposed to be asking.
-- **Owns** `DynamoLog`, `GatewayConnections`, the three handlers, and the SSM read that
-  produces the `Secret`.
+- **Owns** `DynamoLog`, `GatewayConnections`, the DynamoDB rendering of a `Shape`, the
+  three handlers, and the SSM read that produces the `Secret`.
+- **Does not own** the decomposition. `crates/wire` does, because a client needs it too,
+  and a format only one side of a socket agrees with is not a format.
 - **Does not own** identity. A `Message` arrives carrying an `Account`; who decided that
   account is the identity service's business and gets its own document.
 - **Nothing depends on this.** It is a binary.
@@ -229,7 +254,13 @@ one would silently make every commitment unverifiable.
 
 ## Testing
 
-- **The codec round-trips, with no AWS at all.** One of every `Event` variant, encoded to
+- **Both renderings round-trip, against one list.** `wire::examples::every_event` and
+  `every_message` are public and part of the crate rather than of a test, because more
+  than one rendering has to be held to them. Two lists would drift, and the one that
+  drifted would be the one not covering the variant that broke. Adding a variant is
+  already a compile error in `shape_of`; adding it to that list is what makes it handled
+  *correctly*, in every rendering at once.
+- **The item rendering round-trips, with no AWS at all.** One of every `Event` variant, encoded to
   an item and decoded back, compared for equality. This is the test that matters most and
   the one that needs nothing running, so it is an ordinary unit test in the gate. The
   encoder's exhaustive `match` forces a new variant to be handled; only this list forces
@@ -297,6 +328,13 @@ winner, `matches()` lists a match once however many events it holds, the reverse
 answers `$disconnect`, and the meter reports one scan, three reads and six events for a
 lobby view over three matches. They are `#[ignore]` so a machine without Docker still
 gets an honest green, and the gate runs them with `--include-ignored`.
+
+`crates/wire` is written and tested: one `Shape` decomposition for `Event` and `Message`,
+the JSON rendering, and the DynamoDB rendering in `apps/relay` over the same shapes. The
+round-trip test for the item rendering found a real collision while the wire format was
+being added — `Message::Join` has a field genuinely called `match`, and the item reader
+was assuming the word always meant the log's partition key, so it dropped it. Nothing in
+production would have found that, because a message is never stored.
 
 Not started: the three handlers, the SSM read for the `Secret`, the two tables in
 CloudFormation, and the Lambda artifact in the pipeline. Until those exist this crate

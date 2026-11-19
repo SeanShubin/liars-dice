@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 relay.workspace = true
+wire.workspace = true
 protocol.workspace = true
 aws-sdk-dynamodb.workspace = true
 tokio.workspace = true

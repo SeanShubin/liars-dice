@@ -1,0 +1,206 @@
+//! One decomposition of an event or a message, and the renderings of it.
+//!
+//! `implementation/protocol.md` records a property worth keeping: *the format remains the
+//! only representation, there is no second serialization to keep in step*. When it was
+//! written nothing read a log back. The relay now reads its log back on every message and
+//! sends events over a socket, so there are three places a value has to survive: a
+//! DynamoDB item, a frame to a client, and a frame from one.
+//!
+//! Three mappings would be three places to drift. So there is one decomposition — a
+//! [`Shape`]: a kind, and named [`Value`]s — and the renderings are mechanical. JSON lives
+//! here, because a browser client and the service both speak it. The DynamoDB rendering
+//! lives in `apps/relay`, because `AttributeValue` is an AWS type and the browser must
+//! never compile it.
+//!
+//! The archive's line format is still not one of these. It is a rendering for a person:
+//! it rounds odds to two places and collapses the spaces in a name, which is right for a
+//! line somebody reads and wrong for the only copy of what happened.
+
+use protocol::Account;
+
+pub mod event;
+pub mod examples;
+pub mod json;
+pub mod message;
+
+/// The key naming the variant, in every rendering. Not a field, so nothing may have one
+/// called this.
+pub const KIND: &str = "kind";
+
+/// One field of a shape.
+///
+/// Narrow on purpose: these are every kind of value the log and the message format
+/// actually hold, so a rendering has a finite set of cases to answer for and a new one
+/// cannot be added without every rendering being made to handle it.
+#[derive(Clone, PartialEq, Debug)]
+pub enum Value {
+    Text(String),
+    /// An unsigned integer: a seat, a quantity, a face, a version, a position.
+    Count(u64),
+    /// The one float in the format. Written at full precision everywhere but the archive.
+    Chance(f64),
+    Flag(bool),
+    /// Order and repeats both matter, so this is a list and never a set.
+    Counts(Vec<u64>),
+    /// A whole shape as a field. Only `Message::Claim` needs it, which carries an event.
+    Nested(Box<Shape>),
+}
+
+/// What something is, and what it holds.
+///
+/// The kind is a `String` because a shape comes from outside as often as it is built
+/// here, and the whole point of reading one is to find out whether it names something
+/// this build knows.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Shape {
+    pub kind: String,
+    pub fields: Vec<(String, Value)>,
+}
+
+/// Something that is not an event or a message this build can read.
+///
+/// Carries what was wrong rather than a unit, because the only time anyone reads one is
+/// while looking at something that will not load, and the field name is the first thing
+/// they need.
+#[derive(Clone, PartialEq, Debug)]
+pub enum Malformed {
+    /// Not a shape at all: no kind, or the text was not the rendering it claimed to be.
+    NotAShape(String),
+    /// A kind this build does not know. Deliberately an error and not a skip: an event
+    /// nobody can read is still an event that happened, and replaying a log without it
+    /// would quietly produce a different match.
+    UnknownKind(String),
+    /// The kind was known but a field it needs is absent or the wrong type.
+    Field { kind: String, field: String },
+    /// A variant name the relay does not write. See `relay::VARIANTS`.
+    UnknownVariant(String),
+    /// An account that is neither a Discord id, an AI, nor the local player.
+    UnknownAccount(String),
+}
+
+impl std::fmt::Display for Malformed {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Malformed::NotAShape(why) => write!(out, "not a shape: {why}"),
+            Malformed::UnknownKind(kind) => write!(out, "unknown kind {kind}"),
+            Malformed::Field { kind, field } => {
+                write!(out, "{kind} is missing or misreads {field}")
+            }
+            Malformed::UnknownVariant(name) => write!(out, "unknown variant name {name}"),
+            Malformed::UnknownAccount(account) => write!(out, "unknown account {account}"),
+        }
+    }
+}
+
+impl std::error::Error for Malformed {}
+
+impl Shape {
+    pub fn of(kind: &str, fields: Vec<(&str, Value)>) -> Self {
+        Self {
+            kind: kind.to_string(),
+            fields: fields
+                .into_iter()
+                .map(|(name, value)| (name.to_string(), value))
+                .collect(),
+        }
+    }
+
+    fn wrong(&self, field: &str) -> Malformed {
+        Malformed::Field {
+            kind: self.kind.clone(),
+            field: field.to_string(),
+        }
+    }
+
+    pub fn get(&self, field: &str) -> Option<&Value> {
+        self.fields
+            .iter()
+            .find(|(name, _)| name == field)
+            .map(|(_, value)| value)
+    }
+
+    pub fn text(&self, field: &str) -> Result<&str, Malformed> {
+        match self.get(field) {
+            Some(Value::Text(text)) => Ok(text),
+            _ => Err(self.wrong(field)),
+        }
+    }
+
+    pub fn count<T: TryFrom<u64>>(&self, field: &str) -> Result<T, Malformed> {
+        match self.get(field) {
+            Some(Value::Count(count)) => T::try_from(*count).map_err(|_| self.wrong(field)),
+            _ => Err(self.wrong(field)),
+        }
+    }
+
+    /// Odds that happen to be whole may arrive as a count, which must not be refused.
+    pub fn chance(&self, field: &str) -> Result<f64, Malformed> {
+        match self.get(field) {
+            Some(Value::Chance(odds)) => Ok(*odds),
+            Some(Value::Count(whole)) => Ok(*whole as f64),
+            _ => Err(self.wrong(field)),
+        }
+    }
+
+    pub fn flag(&self, field: &str) -> Result<bool, Malformed> {
+        match self.get(field) {
+            Some(Value::Flag(flag)) => Ok(*flag),
+            _ => Err(self.wrong(field)),
+        }
+    }
+
+    pub fn counts<T: TryFrom<u64>>(&self, field: &str) -> Result<Vec<T>, Malformed> {
+        match self.get(field) {
+            Some(Value::Counts(counts)) => counts
+                .iter()
+                .map(|count| T::try_from(*count).map_err(|_| self.wrong(field)))
+                .collect(),
+            _ => Err(self.wrong(field)),
+        }
+    }
+
+    pub fn nested(&self, field: &str) -> Result<&Shape, Malformed> {
+        match self.get(field) {
+            Some(Value::Nested(shape)) => Ok(shape),
+            _ => Err(self.wrong(field)),
+        }
+    }
+}
+
+/// `discord:<snowflake>`, `ai` or `local`.
+///
+/// Built here rather than with `Account`'s `Display`, which passes the id through the
+/// archive's collapsing and would alter anything it considered unsafe for a line.
+pub fn account_text(account: &Account) -> String {
+    match account {
+        Account::Discord(id) => format!("discord:{id}"),
+        Account::Ai => "ai".to_string(),
+        Account::Local => "local".to_string(),
+    }
+}
+
+pub fn account_of(text: &str) -> Result<Account, Malformed> {
+    match text {
+        "ai" => Ok(Account::Ai),
+        "local" => Ok(Account::Local),
+        // Split once, so a colon inside an id cannot change who the account is.
+        other => match other.split_once(':') {
+            Some(("discord", id)) => Ok(Account::Discord(id.to_string())),
+            _ => Err(Malformed::UnknownAccount(other.to_string())),
+        },
+    }
+}
+
+/// The `&'static str` a stored or received variant name refers to.
+///
+/// `Event::Variant` holds a static name, so a name from outside has to be matched against
+/// the ones the relay writes rather than leaked into one. An unknown name is an error: it
+/// means something knew a variant this build does not, and guessing which rules were in
+/// force is the one thing a replay must never do.
+pub fn variant_named(name: &str) -> Result<&'static str, Malformed> {
+    relay::VARIANTS
+        .iter()
+        .find(|(known, _)| *known == name)
+        .map(|(known, _)| *known)
+        .ok_or_else(|| Malformed::UnknownVariant(name.to_string()))
+}

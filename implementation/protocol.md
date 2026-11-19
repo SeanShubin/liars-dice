@@ -154,9 +154,19 @@ Nothing here touches the exact side except by making it narrower: a seat is an i
 version is an integer, and the one float in the format is still the odds, still written for
 a person, still never read back.
 
-The format remains the only representation. There is no second serialization to keep in
-step, which is the property that makes `Verification requires nothing beyond the event log`
-achievable rather than aspirational.
+The format remains the only representation a person reads, and the only one verification
+uses, which is what makes `Verification requires nothing beyond the event log` achievable
+rather than aspirational.
+
+It is no longer the only representation. That sentence rested on `Nothing reads a log back
+yet`, above, and the deployed relay reads its log back on every message; it also sends
+events over a socket and receives messages from one. Three machine representations were
+the risk, so there is one decomposition in `crates/wire` and the renderings of it are
+mechanical — see `relay-service.md`. The line format is deliberately not one of them: it
+rounds odds to two places and collapses the spaces in a name, which is correct for a line
+somebody reads and wrong for the only copy of what happened. `the one float in the format
+is still the odds, still written for a person, still never read back` holds of the archive
+and no longer of the log.
 
 ## Testing
 

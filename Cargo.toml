@@ -9,6 +9,7 @@ members = [
     "crates/protocol",
     "crates/integrity",
     "crates/relay",
+    "crates/wire",
     "crates/table",
     "crates/render",
     "crates/render-minimal",
@@ -45,6 +46,7 @@ hmac = "0.13.0"
 # The relay service only. The library it serves depends on none of this, which is
 # what lets a whole match run in a unit test with no AWS and no runtime.
 aws-sdk-dynamodb = "1.140.0"
+serde_json = "1.0"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros"] }
 dice-render = { path = "crates/dice-render" }
 rules = { path = "crates/rules" }
@@ -55,5 +57,6 @@ readout = { path = "crates/readout" }
 integrity = { path = "crates/integrity" }
 coordinator = { path = "crates/coordinator" }
 relay = { path = "crates/relay" }
+wire = { path = "crates/wire" }
 table = { path = "crates/table" }
 render-minimal = { path = "crates/render-minimal" }
