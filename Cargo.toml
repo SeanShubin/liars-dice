@@ -9,6 +9,7 @@ members = [
     "crates/protocol",
     "crates/integrity",
     "crates/relay",
+    "crates/table",
     "crates/render",
     "crates/render-minimal",
     "crates/render-pretty",
@@ -20,6 +21,7 @@ members = [
     "apps/admin",
     "apps/prototype",
     "apps/minimal",
+    "apps/hotseat",
 ]
 
 [workspace.package]
@@ -30,6 +32,11 @@ publish = false
 [workspace.dependencies]
 bevy = "0.20"
 bevy_egui = "0.43"
+# glow alone: wgpu doubles the bundle and brings nothing a two dimensional
+# presentation uses. default-features off drops the persistence and accesskit extras.
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow"] }
+wasm-bindgen-futures = "0.4"
+web-sys = "0.3"
 sha2 = "0.11.1"
 hmac = "0.13.0"
 dice-render = { path = "crates/dice-render" }
@@ -41,4 +48,5 @@ readout = { path = "crates/readout" }
 integrity = { path = "crates/integrity" }
 coordinator = { path = "crates/coordinator" }
 relay = { path = "crates/relay" }
+table = { path = "crates/table" }
 render-minimal = { path = "crates/render-minimal" }

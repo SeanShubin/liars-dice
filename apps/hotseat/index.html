@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Liars Dice — hotseat harness</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #111; overflow: hidden; overscroll-behavior: none; }
+      canvas { display: block; width: 100%; height: 100%; outline: none; touch-action: none; user-select: none; -webkit-user-select: none; }
+    </style>
+  </head>
+  <body>
+    <canvas id="table"></canvas>
+    <link data-trunk rel="rust" data-bin="hotseat" data-wasm-opt="z" />
+  </body>
+</html>

@@ -5,7 +5,9 @@
 //! simulated is the transport.
 
 use super::*;
+use integrity::Secret;
 use integrity::{Commitment, Seed};
+use protocol::{Event, Seat};
 use rules::SEAT;
 
 fn secret() -> Secret {

@@ -5,6 +5,8 @@ POSIX shell version, with the same name and the same behaviour.
 
 | Script | What it does |
 |--------|--------------|
+| `run-hotseat` | The hotseat harness. A whole match in one window, every seat a virtual player. |
+| `build-hotseat-web` | The same harness, built for the browser with trunk. |
 | `run-minimal` | The minimal game. One human against AI players, two dimensional, single touch. |
 | `run-prototype` | The die rendering prototype. One die, a ground, and live appearance settings. |
 | `verify` | Formats check, builds everything, runs every test. What continuous integration should run. |
