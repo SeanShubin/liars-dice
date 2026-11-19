@@ -208,12 +208,22 @@ cannot create a bucket and read an object out of it in the same deploy.
 
 ### Building a Rust Lambda in the gate
 
-Ubuntu's glibc is newer than Amazon Linux 2023's, so a plain `cargo build` on the runner
-links against symbols the runtime does not have. It compiles, it uploads, it deploys, and
-it fails at the first invocation — the worst available order. `cargo-lambda` links with
-zig against an older glibc, which is why it is in the gate rather than a `cargo build`
-with a different target: `aws-lc-sys` is a C library, so the musl route would need a musl C
-toolchain as well.
+The runner's glibc is newer than Amazon Linux 2023's, so a plain `cargo build` there links
+against symbols the runtime does not have. It compiles, it uploads, it deploys, and it
+fails at the first invocation — the worst available order.
+
+The binary is built **inside the image the function runs on**, with Docker, in the gate.
+The alternatives all answer the glibc question; this one removes it. Zig can target an
+older glibc, but then the build depends on a particular zig and `cargo-zigbuild` being
+compatible, which is a question with an answer that changes. A static musl build would
+need a musl C toolchain, because `aws-lc-sys` is a C library. Building in `al2023` needs
+none of that: the thing that defines the target is doing the compiling.
+
+Measured rather than assumed, which is the only reason to believe any of the above: the
+binary needs at most `GLIBC_2.34`, the image provides `glibc-2.34`, and it links nothing
+but `libc`, `libm` and `libgcc_s`. Stripped it is 20 MB, and 7.1 MB zipped. The whole
+build takes under two minutes from a cold container, which is cheaper than the cross
+-compiling toolchain it replaces.
 
 The zip the deploy publishes is the one the gate built, as with the browser bundle. The
 object's key carries the commit, which is what makes CloudFormation replace the function's
@@ -389,10 +399,13 @@ being added — `Message::Join` has a field genuinely called `match`, and the it
 was assuming the word always meant the log's partition key, so it dropped it. Nothing in
 production would have found that, because a message is never stored.
 
-Not run: the Lambda build and the deploy. Neither can be proven on a Windows machine with
-no zig, so the gate is the first thing to run them, and the first run is expected to find
-something. Before it can go green, two things have to exist that no commit can create: the
-artifact bucket, by updating the bootstrap stack, and the secret, by putting the parameter.
+The Lambda build has been run, locally, in the same container the gate uses and with the
+same command: it produces a 7.1 MB zip holding one file called `bootstrap` that needs no
+glibc newer than the runtime's. The artifact bucket and the SSM secret both exist.
+
+Not run: the deploy. The stack has never been created, and a CloudFormation stack that
+fails during its first creation rolls back to `ROLLBACK_COMPLETE`, which `deploy` cannot
+update — it has to be deleted before a retry.
 
 Not started: the command line client that plays a whole match over a real socket, which is
 what would actually prove any of this. Until then `relay::memory` remains the only

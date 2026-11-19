@@ -27,7 +27,6 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   TRUNK_VERSION: v0.21.7
-  CARGO_LAMBDA_VERSION: 1.9.2
   AWS_REGION: us-east-1
   STACK: seanshubin-com
   RELAY_STACK: liars-dice-relay
@@ -70,16 +69,6 @@ jobs:
             | tar -xzf - -C /usr/local/bin
           trunk --version
 
-      # Cross-compiling for the Lambda runtime, not for this runner. Ubuntu's glibc
-      # is newer than Amazon Linux 2023's, so a native build links against symbols
-      # the runtime does not have, and fails at the first invocation rather than at
-      # the build. cargo-lambda links with zig against an older glibc, which is the
-      # whole reason it is here instead of a plain cargo build. The action rather
-      # than a curl, because it installs zig too and zig is the part that matters.
-      - uses: cargo-lambda/cargo-lambda-action@v1
-        with:
-          version: ${{ env.CARGO_LAMBDA_VERSION }}
-
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -110,18 +99,42 @@ jobs:
           AWS_ENDPOINT_URL_DYNAMODB: http://localhost:8000
         run: cargo test --workspace -- --include-ignored
 
-      # The zip the deploy publishes is the one the gate built, as with the bundle
-      # below. `--output-format zip` produces the single `bootstrap` file the
-      # provided runtime execs.
+      # Built inside the runtime rather than cross-compiled for it. This runner's
+      # glibc is newer than Amazon Linux 2023's, so a build here links against
+      # symbols the runtime does not have: it compiles, it uploads, it deploys, and
+      # it fails at the first invocation, which is the worst available order. Zig
+      # can target an older glibc, but then the build depends on a zig and
+      # cargo-zigbuild pair being compatible, which is a question. Building in the
+      # image the function runs on removes the question instead of answering it.
+      #
+      # Measured rather than assumed: the binary needs at most GLIBC_2.34 and this
+      # image provides 2.34, and it links only libc, libm and libgcc_s. The
+      # `--target-dir` is inside the container on purpose — a root-owned target/ in
+      # the workspace is something the cargo cache would later trip over.
+      #
+      # `bootstrap` is the name the provided runtime execs, which is why the zip
+      # holds one file by that name.
       - name: Build the relay for Lambda
         run: |
-          cargo lambda build --release --output-format zip -p relay-service
-          ls -l target/lambda/relay-service/bootstrap.zip
+          docker run --rm -v "$PWD":/src -w /src \
+            public.ecr.aws/amazonlinux/amazonlinux:2023 bash -lc '
+              set -e
+              dnf -y -q install gcc gcc-c++ make cmake perl tar gzip zip binutils findutils
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
+                | sh -s -- -y --profile minimal --default-toolchain stable
+              . "$HOME/.cargo/env"
+              cargo build --release -p relay-service --target-dir /tmp/lambda
+              cd /tmp/lambda/release
+              cp relay-service bootstrap
+              strip bootstrap
+              zip -q -9 /src/bootstrap.zip bootstrap
+            '
+          ls -l bootstrap.zip
 
       - uses: actions/upload-artifact@v4
         with:
           name: relay
-          path: target/lambda/relay-service/bootstrap.zip
+          path: bootstrap.zip
           retention-days: 7
 
       # The bundle the deploy publishes is the one the gate built. Nothing is
