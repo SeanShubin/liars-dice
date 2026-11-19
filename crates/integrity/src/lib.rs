@@ -52,6 +52,24 @@ impl Secret {
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
+
+    /// Read a secret from 64 hexadecimal digits, which is how a parameter store holds it.
+    ///
+    /// `None` rather than a default, and the caller is expected to fail: a secret that was
+    /// invented because the real one could not be read would make every commitment in
+    /// every match unverifiable, and nothing would say so.
+    pub fn from_hex(text: &str) -> Option<Self> {
+        unhex(text).map(Secret)
+    }
+
+    /// Deliberately not `Display`, and deliberately not public.
+    ///
+    /// There is no way to render a secret, because the only reasons to render one are to
+    /// log it or to send it, and both are the one thing this type exists to prevent.
+    #[cfg(test)]
+    fn to_hex(self) -> String {
+        hex(&self.0)
+    }
 }
 
 impl Seed {
@@ -195,6 +213,24 @@ const ORDER_STREAM: u8 = 0xff;
 
 #[cfg(test)]
 mod tests {
+    /// `assert!` rather than `assert_eq!` throughout: `Secret` implements no `Debug`, so
+    /// a failing comparison cannot print it. That is the point of the type, and a test is
+    /// not a reason to weaken it.
+    #[test]
+    fn a_secret_reads_back_from_its_hexadecimal() {
+        let secret = Secret::from_bytes([7; 32]);
+        assert!(Secret::from_hex(&secret.to_hex()) == Some(secret));
+    }
+
+    /// A parameter store holding something that is not a secret must not produce one.
+    #[test]
+    fn text_that_is_not_a_secret_is_not_read_as_one() {
+        assert!(Secret::from_hex("").is_none());
+        assert!(Secret::from_hex("not hexadecimal").is_none());
+        assert!(Secret::from_hex(&"ab".repeat(31)).is_none(), "too short");
+        assert!(Secret::from_hex(&"ab".repeat(33)).is_none(), "too long");
+    }
+
     use super::*;
 
     fn secret() -> Secret {

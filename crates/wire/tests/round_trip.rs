@@ -2,7 +2,7 @@
 
 use protocol::{Account, Event, Seat};
 use relay::{MatchId, Message};
-use wire::{Malformed, Shape, Value, event, examples, json, message};
+use wire::{Malformed, Shape, Value, answer, event, examples, json, message};
 
 #[test]
 fn every_event_survives_the_wire() {
@@ -189,4 +189,40 @@ fn a_discord_id_keeps_everything_after_the_first_colon() {
             account: Account::Discord("a:b".to_string())
         })
     );
+}
+
+#[test]
+fn every_answer_survives_the_wire() {
+    for original in examples::every_answer() {
+        let text = json::write(&answer::shape_of(&original));
+        let shape = json::read(&text).unwrap_or_else(|why| panic!("{text} did not parse: {why}"));
+        let read = answer::from_shape(&shape)
+            .unwrap_or_else(|why| panic!("{original:?} did not read back from {text}: {why}"));
+        assert_eq!(read, original, "{original:?} changed on the wire as {text}");
+    }
+}
+
+/// The two kinds the service adds must belong to no event, or a refusal would arrive as
+/// something that happened.
+#[test]
+fn no_event_claims_the_kinds_an_answer_adds() {
+    for event in examples::every_event() {
+        let kind = event::shape_of(&event).kind;
+        assert_ne!(kind, answer::REFUSED, "{event} collides with a refusal");
+        assert_ne!(
+            kind,
+            answer::CREATED,
+            "{event} collides with a created match"
+        );
+    }
+}
+
+/// A refusal this build does not know is not quietly read as an event.
+#[test]
+fn an_unknown_reason_is_refused_rather_than_read_as_an_event() {
+    let shape = json::read(r#"{"kind":"refused","why":"out-of-cheese"}"#).expect("a shape");
+    assert!(matches!(
+        answer::from_shape(&shape),
+        Err(Malformed::UnknownKind(_))
+    ));
 }

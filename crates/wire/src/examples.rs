@@ -10,7 +10,9 @@
 //! rendering at once.
 
 use protocol::{Account, Event, Moment, Seat};
-use relay::{MatchId, Message};
+use relay::{MatchId, Message, Refused};
+
+use crate::answer::Answer;
 
 /// A name with a space and an account with a colon: the first is what the archive's line
 /// format would hyphenate, the second is what a careless account encoding would split on.
@@ -139,4 +141,26 @@ pub fn every_message() -> Vec<Message> {
             account: Account::Local,
         },
     ]
+}
+
+/// One of every answer the service can put back on the socket, refusals included.
+pub fn every_answer() -> Vec<Answer> {
+    let mut answers = vec![
+        Answer::Created(MatchId("match-7".to_string())),
+        Answer::Refused(Refused::NoSuchMatch),
+        Answer::Refused(Refused::VersionMismatch {
+            match_version: 3,
+            yours: 2,
+        }),
+        Answer::Refused(Refused::AlreadyStarted),
+        Answer::Refused(Refused::Barred),
+        Answer::Refused(Refused::ColourTaken),
+        Answer::Refused(Refused::MatchIsFull),
+        Answer::Refused(Refused::NotTheHost),
+        Answer::Refused(Refused::NotInThisMatch),
+        Answer::Refused(Refused::SeatIsAbsent),
+        Answer::Refused(Refused::NotYourSeat),
+    ];
+    answers.extend(every_event().into_iter().map(Answer::Event));
+    answers
 }

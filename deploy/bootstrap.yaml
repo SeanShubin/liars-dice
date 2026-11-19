@@ -46,6 +46,35 @@ Parameters:
       Keeps this role away from the vote and arcade stacks in the same account.
 
 Resources:
+  # Where the pipeline puts a built Lambda before CloudFormation reads it. Here
+  # rather than in the relay stack, because a stack cannot create a bucket and
+  # read an object out of it in the same deploy. Nothing here is the artifact of
+  # record: the zip is reproducible from the commit its key names, and a build
+  # older than a fortnight has no reader.
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ResourcePrefix}-artifacts-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: forget-old-builds
+            Status: Enabled
+            ExpirationInDays: 14
+            NoncurrentVersionExpirationInDays: 14
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+
   DeployRole:
     Type: AWS::IAM::Role
     Properties:
@@ -133,3 +162,6 @@ Outputs:
   DeployRoleArn:
     Description: Set this as the GitHub Actions repository variable or secret.
     Value: !GetAtt DeployRole.Arn
+  ArtifactBucketName:
+    Description: Where the deploy uploads the relay's zip before deploying the stack.
+    Value: !Ref ArtifactBucket

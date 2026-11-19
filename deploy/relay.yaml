@@ -1,0 +1,262 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  The liars-dice relay: the event log, the connection table, the WebSocket API
+  and the function that serves its three routes.
+
+  Its own stack rather than part of seanshubin-com, which owns the hostname and
+  is shared by path. This is one project's backend and nothing else depends on
+  it, so it can be torn down and rebuilt without touching the site.
+
+  The HMAC secret is NOT created here. CloudFormation cannot create a
+  SecureString parameter, and a plaintext one would put the key in the template,
+  the change set and the stack events. It is put once, by hand, by someone at a
+  terminal:
+
+    aws ssm put-parameter --name /liars-dice/relay/secret \
+      --type SecureString --value <64 hexadecimal digits>
+
+  A missing or malformed parameter fails the cold start rather than inventing a
+  secret, because an invented one would make every commitment in every match
+  unverifiable and nothing would say so.
+
+Parameters:
+  ArtifactBucket:
+    Type: String
+    Description: >-
+      Where the pipeline uploaded the function's zip. An output of the bootstrap
+      stack, because a bucket cannot be created by the same stack that reads an
+      object out of it.
+  ArtifactKey:
+    Type: String
+    Description: >-
+      The zip's key, which carries the commit. Changing it is what makes
+      CloudFormation replace the function's code, so a deploy of the same commit
+      is a no-op and a deploy of a new one is not.
+  SecretParameter:
+    Type: String
+    Default: /liars-dice/relay/secret
+    Description: The SSM SecureString holding the HMAC key the round seeds derive from.
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+    Description: >-
+      How long the function's own logs are kept. The event log is in DynamoDB and
+      is permanent; this is the operational trail, and the metric line that says
+      what a lobby view cost lives in it.
+
+Resources:
+  # The only thing that cannot be reconstructed from something else, which is why
+  # it is the one resource here with point-in-time recovery turned on.
+  LogTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: liars-dice-log
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: match
+          AttributeType: S
+        - AttributeName: position
+          AttributeType: N
+      KeySchema:
+        - AttributeName: match
+          KeyType: HASH
+        # The sort key is the position, so a read comes back in order without
+        # being sorted, and the conditional write on it is what gives the log a
+        # total order without a lock.
+        - AttributeName: position
+          KeyType: RANGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      DeletionProtectionEnabled: true
+
+  # Transport plumbing, not state: every row here can be rebuilt by clients
+  # reconnecting, which is why it has neither recovery nor deletion protection.
+  ConnectionTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: liars-dice-connections
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: match
+          AttributeType: S
+        - AttributeName: connection
+          AttributeType: S
+      KeySchema:
+        - AttributeName: match
+          KeyType: HASH
+        - AttributeName: connection
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        # $disconnect knows the connection id and nothing else, so it needs the
+        # key the other way round. KEYS_ONLY because the base table's keys are
+        # the whole answer to the one question this index is asked.
+        - IndexName: by-connection
+          KeySchema:
+            - AttributeName: connection
+              KeyType: HASH
+          Projection:
+            ProjectionType: KEYS_ONLY
+
+  Api:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: liars-dice-relay
+      ProtocolType: WEBSOCKET
+      # Every message goes to $default. The relay decides what a frame is, and a
+      # route selection that read the body would be a second place that decides.
+      RouteSelectionExpression: $request.body.kind
+
+  Function:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: liars-dice-relay
+      Description: Serves $connect, $disconnect and $default for the relay.
+      # A Rust binary is its own runtime. `bootstrap` is the name the provided
+      # runtime execs, which is why the zip holds one file by that name.
+      Runtime: provided.al2023
+      Handler: bootstrap
+      Architectures:
+        - x86_64
+      Role: !GetAtt FunctionRole.Arn
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+      # A message folds one match's log and posts to every connected seat. Ten
+      # seconds is far more than that takes and far less than the socket's idle
+      # timeout, so a stuck invocation fails before a client gives up on it.
+      Timeout: 10
+      MemorySize: 256
+      Environment:
+        Variables:
+          LOG_TABLE: !Ref LogTable
+          CONNECTION_TABLE: !Ref ConnectionTable
+          SECRET_PARAMETER: !Ref SecretParameter
+
+  # Declared rather than left to the first invocation, so the retention above is
+  # applied from the first line and not after thirty days of unbounded logs.
+  FunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/liars-dice-relay
+      RetentionInDays: !Ref LogRetentionDays
+
+  FunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: liars-dice-relay-function
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: TheLogAndTheConnections
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # No DeleteItem and no UpdateItem on the log: it is append-only,
+              # and the permission is where that is enforced rather than hoped
+              # for. A bug that tried to rewrite history would be refused by IAM.
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: !GetAtt LogTable.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                Resource:
+                  - !GetAtt ConnectionTable.Arn
+                  - !Sub "${ConnectionTable.Arn}/index/by-connection"
+        - PolicyName: TheSecret
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Exactly that parameter, and nothing else under /liars-dice/. The
+              # Discord client secret lives in the same prefix and this function
+              # has no business reading it.
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SecretParameter}"
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource: !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/ssm"
+        - PolicyName: AnswerTheSocket
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: execute-api:ManageConnections
+                Resource: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${Api}/*/*/@connections/*"
+        - PolicyName: ItsOwnLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "${FunctionLogGroup.Arn}:*"
+
+  Integration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref Api
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Function.Arn}/invocations"
+
+  ConnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: $connect
+      Target: !Sub "integrations/${Integration}"
+
+  DisconnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: $disconnect
+      Target: !Sub "integrations/${Integration}"
+
+  DefaultRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: $default
+      Target: !Sub "integrations/${Integration}"
+
+  Stage:
+    Type: AWS::ApiGatewayV2::Stage
+    DependsOn:
+      - ConnectRoute
+      - DisconnectRoute
+      - DefaultRoute
+    Properties:
+      ApiId: !Ref Api
+      StageName: live
+      AutoDeploy: true
+
+  InvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref Function
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${Api}/*"
+
+Outputs:
+  SocketUrl:
+    Description: What a client connects to.
+    Value: !Sub "wss://${Api}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
+  LogTableName:
+    Value: !Ref LogTable
+  ConnectionTableName:
+    Value: !Ref ConnectionTable
+  FunctionName:
+    Value: !Ref Function

@@ -11,11 +11,14 @@
 pub mod codec;
 pub mod connections;
 pub mod event_log;
+pub mod incoming;
 pub mod meter;
+pub mod service;
 
 pub use connections::GatewayConnections;
 pub use event_log::DynamoLog;
 pub use meter::Meter;
+pub use service::Service;
 
 /// The CloudWatch namespace the metric line reports under.
 pub const NAMESPACE: &str = "LiarsDice/Relay";

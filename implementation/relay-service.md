@@ -180,6 +180,46 @@ Two separate timers because they fail for different reasons and have different f
 slow fold is answered by the projection. A slow scan is answered by not scanning, and no
 projection of open matches fixes it.
 
+### The stack it deploys to
+
+Its own stack, `liars-dice-relay`, rather than part of `seanshubin-com`. That one owns the
+hostname and is shared by path; this is one project's backend, nothing else depends on it,
+and it can be torn down and rebuilt without touching the site.
+
+| Resource | Note |
+|----------|------|
+| The log table | Point-in-time recovery on, and deletion protection. The one thing that cannot be rebuilt from something else. |
+| The connection table | Neither, deliberately: every row in it can be rebuilt by clients reconnecting. |
+| The WebSocket API | Three routes, all to one integration. `RouteSelectionExpression` is set and unused, because the relay decides what a frame is and a route that read the body would be a second place deciding. |
+| The function | `provided.al2023`, a Rust binary named `bootstrap`, ten second timeout. |
+| Its log group | Declared rather than left to the first invocation, so retention applies from the first line instead of after thirty days of unbounded logs. |
+
+The execution role grants `PutItem`, `Query` and `Scan` on the log and **not** `DeleteItem`
+or `UpdateItem`. The log is append-only, and this is where that is enforced rather than
+hoped for: a bug that tried to rewrite history would be refused by IAM before it reached
+the table. It reads exactly one SSM parameter — the Discord client secret lives under the
+same prefix and this function has no business reading it.
+
+**Two things are done by hand, once.** CloudFormation cannot create a `SecureString`
+parameter, and a plaintext one would put the HMAC key in the template, the change set and
+the stack events. So the secret is put at a terminal, as the Discord client secret already
+was. The artifact bucket is in the bootstrap stack rather than this one, because a stack
+cannot create a bucket and read an object out of it in the same deploy.
+
+### Building a Rust Lambda in the gate
+
+Ubuntu's glibc is newer than Amazon Linux 2023's, so a plain `cargo build` on the runner
+links against symbols the runtime does not have. It compiles, it uploads, it deploys, and
+it fails at the first invocation — the worst available order. `cargo-lambda` links with
+zig against an older glibc, which is why it is in the gate rather than a `cargo build`
+with a different target: `aws-lc-sys` is a C library, so the musl route would need a musl C
+toolchain as well.
+
+The zip the deploy publishes is the one the gate built, as with the browser bundle. The
+object's key carries the commit, which is what makes CloudFormation replace the function's
+code: redeploying the same commit is a no-op and deploying a new one cannot be mistaken
+for it.
+
 ## Boundaries
 
 - **Depends on** `crates/relay`, `wire`, `protocol`, `integrity`, and the AWS SDK.
@@ -294,6 +334,16 @@ one would silently make every commitment unverifiable.
 
 ## Open Items
 
+**Nothing asks for the lobby.** `Relay::open_matches` exists and no `Message` reaches it,
+so a client on a socket cannot list open matches — the in-process harness calls the method
+directly, and a browser cannot. That is a gap in `crates/relay` rather than here, and it
+needs a message, an answer frame and a statement about who may ask. Deliberately not
+added as part of the transport: a host learns its match id from the `created` frame and a
+joiner can be told it out of band, which is enough for two command line clients to play a
+whole match and prove the service. It also means the measurement in this document reports
+`events_read` for per-message folds and nothing for a lobby view, because there are none
+yet.
+
 The pipeline does not build a Lambda yet. A Rust function needs a cross-compiled artifact
 for the Lambda runtime, which is a new toolchain step in the gate and a new upload in the
 deploy. That is part of this unit of work, not a separate one, since nothing here can be
@@ -322,6 +372,9 @@ and is in the gate. `protocol` gained `Moment::to_unix_nanos`, and the test that
 inverses `from_unix_nanos` found an overflow in it on the first run, in the year 2262,
 where nanoseconds pass `i64`.
 
+The three handlers, the SSM read, the stack and the pipeline step are written. Everything
+up to the point of deploying has been run; nothing has been deployed.
+
 The seven tests against DynamoDB Local pass: the conditional write refuses a taken
 position without overwriting it, eight threads racing one position produce exactly one
 winner, `matches()` lists a match once however many events it holds, the reverse index
@@ -336,7 +389,11 @@ being added — `Message::Join` has a field genuinely called `match`, and the it
 was assuming the word always meant the log's partition key, so it dropped it. Nothing in
 production would have found that, because a message is never stored.
 
-Not started: the three handlers, the SSM read for the `Secret`, the two tables in
-CloudFormation, and the Lambda artifact in the pipeline. Until those exist this crate
-deploys nowhere, and `relay::memory` remains the only arrangement that plays a whole
-match.
+Not run: the Lambda build and the deploy. Neither can be proven on a Windows machine with
+no zig, so the gate is the first thing to run them, and the first run is expected to find
+something. Before it can go green, two things have to exist that no commit can create: the
+artifact bucket, by updating the bootstrap stack, and the secret, by putting the parameter.
+
+Not started: the command line client that plays a whole match over a real socket, which is
+what would actually prove any of this. Until then `relay::memory` remains the only
+arrangement that plays a whole match, and the deployed service has served no message.

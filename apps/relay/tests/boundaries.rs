@@ -43,7 +43,11 @@ fn the_relay_service_depends_only_on_storage_and_the_format() {
                     | "wire"
                     | "protocol"
                     | "integrity"
+                    | "serde_json"
+                    | "lambda_runtime"
                     | "aws-config"
+                    | "aws-sdk-apigatewaymanagement"
+                    | "aws-sdk-ssm"
                     | "aws-sdk-dynamodb"
                     | "tokio"
             ),
