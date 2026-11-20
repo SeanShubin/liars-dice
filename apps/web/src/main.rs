@@ -26,7 +26,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use eframe::egui;
-use protocol::Account;
+use protocol::Who;
 use render_minimal::palette::{PALETTE, index_of};
 use render_minimal::{
     Seating, calls, dialler, die, history, odds, opening_claim, palette_picker, ranking, standing,
@@ -41,6 +41,13 @@ use seat::{Ending, Listed, MatchId, Seated, Stopped, lobby};
 /// design, and nothing else is coming. So this is a threshold on what has been *heard*,
 /// never a claim about who is there, and crossing it changes no rule and sends no message.
 const QUIET: f64 = 20.0;
+
+/// What to say when a ticket cannot be read at all.
+///
+/// Not reachable while this page only ever builds a guest, and here rather than as an
+/// `expect` so that the Discord path has to answer for it rather than panicking in front
+/// of somebody.
+const UNREADABLE_TICKET: &str = "Your sign-in has gone stale. Reload the page and sign in again.";
 
 /// How often the page redraws while a match is live.
 ///
@@ -224,9 +231,21 @@ struct Page {
     /// Where the relay is. Read from the page, and editable so a local build can reach a
     /// deployed relay.
     relay: String,
-    /// What this person is called. Also what the relay is told their account is — asserted,
-    /// never proven, which is the hole the identity service closes.
+    /// What this person is called. Theirs to choose, and recorded at the join like any
+    /// other name: `An unauthenticated player chooses their own name`.
     name: String,
+    /// This browser's guest id, from local storage.
+    ///
+    /// Sixteen random bytes in hexadecimal, generated once and kept. It replaces deriving
+    /// the account from the typed name, which the relay's log has already demonstrated the
+    /// cost of: two people who both typed the same name were one account, and the second
+    /// would land on the first's seat.
+    ///
+    /// Local storage rather than session storage, because the point of a stable id is that
+    /// closing a tab does not lose a seat. The cost is that a shared browser shares an
+    /// identity, which on the unranked side of the line is not worth paying anything to
+    /// avoid.
+    guest: String,
     colour: usize,
     /// The name the host gives the match, which is what its identity is derived from. Host
     /// twice under one name and the relay answers with the match that already exists, which
@@ -267,6 +286,7 @@ impl Page {
         Self {
             relay: socket::relay_from_page(),
             name: String::new(),
+            guest: socket::guest_id(),
             colour: 1,
             match_name: String::new(),
             paste: String::new(),
@@ -290,12 +310,16 @@ impl Page {
 
     /// The account this client asserts.
     ///
-    /// Derived from the typed name so that nothing taken from a clock reaches the log, and
-    /// so that hosting the same match name twice really is the same request. Two people
-    /// who type the same name share an account, which is exactly the hole recorded under
-    /// Decisions in the document: the relay is given an account it cannot check.
-    fn account(&self) -> Account {
-        Account::Discord(format!("web-{}", self.name.trim()))
+    /// What this page says it is.
+    ///
+    /// A guest: the id this browser kept, and the name typed on the entry screen. Not an
+    /// `Account` — a client does not send one. It says who it is and the relay decides what
+    /// that means, which is why a page cannot claim a Discord account without a ticket.
+    fn who(&self) -> Who {
+        Who::Guest {
+            id: self.guest.clone(),
+            name: self.name.trim().to_string(),
+        }
     }
 
     /// Open a socket and ask what is open.
@@ -310,7 +334,7 @@ impl Page {
         self.open = Vec::new();
         self.answered = false;
         self.heard = now;
-        let asking = lobby::ask(&self.account());
+        let asking = lobby::ask(&self.who());
         match socket::open(&self.relay, &asking, &self.arrivals, &self.mishap) {
             Ok(wire) => self.wire = Some(wire),
             Err(why) => {
@@ -333,7 +357,7 @@ impl Page {
     /// Ask again what is open. A listing is only true of the moment it was read.
     fn look_again(&mut self) {
         self.answered = false;
-        let asking = lobby::ask(&self.account());
+        let asking = lobby::ask(&self.who());
         self.say(vec![asking]);
     }
 
@@ -671,24 +695,32 @@ impl Page {
             return;
         }
 
+        // `Seated::hosting` and `joining` answer `None` only for an `Authenticated` whose
+        // ticket cannot be read, and this page builds a guest, so the seat always exists.
+        // Said with a `let else` rather than an `expect` so that adding the Discord path
+        // later has to answer the question here instead of panicking in front of somebody.
         if hosting {
             let seated = Seated::hosting(
-                self.account(),
-                self.name.trim(),
+                self.who(),
                 PALETTE[self.colour].name,
                 self.match_name.trim(),
                 Box::new(self.hand.clone()),
             );
-            self.sit(seated);
+            match seated {
+                Some(seated) => self.sit(seated),
+                None => self.trouble = Some(UNREADABLE_TICKET.to_string()),
+            }
         } else if let Some(match_id) = joining {
             let seated = Seated::joining(
-                self.account(),
-                self.name.trim(),
+                self.who(),
                 PALETTE[self.colour].name,
                 match_id,
                 Box::new(self.hand.clone()),
             );
-            self.sit(seated);
+            match seated {
+                Some(seated) => self.sit(seated),
+                None => self.trouble = Some(UNREADABLE_TICKET.to_string()),
+            }
         }
     }
 
@@ -1053,6 +1085,69 @@ mod socket {
     /// built in the gate, which has no AWS credentials and must not have any.
     const PLACEHOLDER: &str = "RELAY_SOCKET_URL";
 
+    /// Where this browser keeps its guest id.
+    const GUEST_KEY: &str = "liars-dice-guest";
+
+    /// This browser's guest id: the one it already had, or a new one it will keep.
+    ///
+    /// Sixteen bytes from `crypto.getRandomValues`, in hexadecimal. This is the one new
+    /// non-determinism the identity unit adds, and it is an *input* rather than a derived
+    /// value — an identity is something the world hands the program, like a keystroke.
+    /// What the architecture statements forbid is deriving a value from an unrepeatable
+    /// source and putting it in the log, and nothing here is derived: it is read once,
+    /// stored, and passed inward.
+    ///
+    /// A reversal worth naming. The page used to derive the account from the typed name
+    /// specifically so that nothing from a clock could reach the log, and that was right
+    /// while there was nowhere to keep an id. With local storage there is somewhere, and a
+    /// stable random id is strictly better: it collides with nobody, where a typed name
+    /// collides with everybody who typed it.
+    ///
+    /// If local storage cannot be reached — a browser with it disabled, or a page opened
+    /// from a file — the id is still generated and still works for this page's lifetime.
+    /// It is a seat that does not survive a reload, which is worse than the alternative
+    /// and better than not playing.
+    pub fn guest_id() -> String {
+        let storage = web_sys::window().and_then(|window| window.local_storage().ok().flatten());
+        if let Some(storage) = &storage
+            && let Ok(Some(kept)) = storage.get_item(GUEST_KEY)
+            && kept.len() == 32
+            && kept.chars().all(|digit| digit.is_ascii_hexdigit())
+        {
+            return kept;
+        }
+        let made = fresh_id();
+        if let Some(storage) = &storage {
+            // A failure here is a quota or a private-browsing refusal, and there is
+            // nothing useful to do about either: the id works, it just will not outlive
+            // the tab.
+            let _ = storage.set_item(GUEST_KEY, &made);
+        }
+        made
+    }
+
+    /// Sixteen random bytes, in hexadecimal.
+    ///
+    /// `getRandomValues` is the browser's CSPRNG. If it cannot be reached there is no
+    /// second source to fall back to and inventing one would be worse than it looks — a
+    /// predictable guest id is somebody else's seat — so this gives up and the page says
+    /// so rather than quietly handing out a guessable identity.
+    fn fresh_id() -> String {
+        let mut bytes = [0u8; 16];
+        let drawn = web_sys::window()
+            .and_then(|window| window.crypto().ok())
+            .is_some_and(|crypto| crypto.get_random_values_with_u8_array(&mut bytes).is_ok());
+        if !drawn {
+            return String::new();
+        }
+        let mut id = String::with_capacity(32);
+        for byte in bytes {
+            id.push(char::from_digit(u32::from(byte >> 4), 16).expect("a nibble"));
+            id.push(char::from_digit(u32::from(byte & 0x0f), 16).expect("a nibble"));
+        }
+        id
+    }
+
     /// Where the relay is, according to the page.
     pub fn relay_from_page() -> String {
         let Some(document) = web_sys::window().and_then(|window| window.document()) else {
@@ -1178,6 +1273,11 @@ mod socket {
 
     pub fn relay_from_page() -> String {
         String::new()
+    }
+
+    /// Fixed, because a desktop build of this page is a compile check and not a client.
+    pub fn guest_id() -> String {
+        "0".repeat(32)
     }
 
     pub fn open(
@@ -1421,20 +1521,43 @@ mod tests {
         }
     }
 
-    /// An account is derived from the name and from nothing else, so hosting the same match
-    /// name twice really is the same request — `A repeated request to host creates no second
-    /// match` — and nothing taken from a clock reaches the log.
+    /// A page says it is a guest, with the id this browser keeps and the name typed on it.
+    ///
+    /// This test used to assert the opposite — that the account *was* the typed name — and
+    /// the relay's log has since shown what that cost: two people who both typed the same
+    /// name were one account, and the second would land on the first's seat. The name is
+    /// now display and the id is identity.
     #[test]
-    fn the_account_is_the_typed_name_and_nothing_else() {
+    fn a_page_says_it_is_a_guest_with_the_id_this_browser_keeps() {
         let mut page = Page::new();
         page.name = "  Sean ".to_string();
-        let once = page.account();
-        assert_eq!(once, page.account(), "asking twice gives the same account");
+        let once = page.who();
+        assert_eq!(once, page.who(), "asking twice gives the same answer");
         assert_eq!(
             once,
-            Account::Discord("web-Sean".to_string()),
+            Who::Guest {
+                id: page.guest.clone(),
+                name: "Sean".to_string(),
+            },
             "the name is trimmed, so a stray space is not a different person"
         );
+    }
+
+    /// Two pages with different ids are different players, whatever they are called.
+    ///
+    /// The collision this closes was live on the published page: the account was
+    /// `web-<name>`, so everybody called Ada was one account.
+    #[test]
+    fn the_same_name_in_two_browsers_is_two_players() {
+        let mut one = Page::new();
+        let mut other = Page::new();
+        one.name = "Ada".to_string();
+        other.name = "Ada".to_string();
+        // The desktop build has no local storage, so the ids are equal there and the test
+        // sets them apart to say what the browser's `guest_id` guarantees.
+        one.guest = "1".repeat(32);
+        other.guest = "2".repeat(32);
+        assert_ne!(one.who(), other.who());
     }
 
     /// Outside a browser there is no socket, and the entry screen is told so rather than

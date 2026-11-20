@@ -25,7 +25,7 @@ use aws_sdk_dynamodb::types::{
     ProjectionType, ScalarAttributeType,
 };
 use integrity::Secret;
-use protocol::{Account, Event, Moment, Seat};
+use protocol::{Account, Event, Moment, Seat, Who};
 use relay::{ConnectionId, Connections, Log, MatchId, Message, Outcome, Relay, Role, Taken};
 use relay_service::connections::{BY_CONNECTION, CONNECTION, PLACE, place_of};
 use relay_service::{DynamoLog, GatewayConnections, Meter, codec};
@@ -417,8 +417,10 @@ fn relay_over(
 
 fn host_message(at: usize) -> Message {
     Message::Host {
-        account: Account::Discord(format!("account-{at}")),
-        name: format!("Player {at}"),
+        who: Who::Guest {
+            id: format!("account-{at}"),
+            name: format!("Player {at}"),
+        },
         colour: ["red", "blue", "green", "white"][at].to_string(),
         version: protocol::PROTOCOL_VERSION,
         nonce: format!("nonce-{at}"),
@@ -721,8 +723,7 @@ fn two_joins_at_once_take_two_seats() {
             scope.spawn(move || {
                 let mut relay = relay_over(&client, &log_table, &place_table, handle);
                 let Message::Host {
-                    account,
-                    name,
+                    who,
                     colour,
                     version,
                     ..
@@ -734,8 +735,7 @@ fn two_joins_at_once_take_two_seats() {
                     &ConnectionId(format!("socket-{at}")),
                     Message::Join {
                         match_id,
-                        account,
-                        name,
+                        who,
                         colour,
                         version,
                     },

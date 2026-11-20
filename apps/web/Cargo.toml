@@ -13,14 +13,17 @@ render-minimal.workspace = true
 eframe.workspace = true
 
 # The socket. `WebSocket`, `MessageEvent` and `BinaryType` are the transport; `Document`
-# and `Element` are how the page is asked where the relay is.
+# and `Element` are how the page is asked where the relay is; `Crypto` and `Storage` are
+# how a guest gets an id that survives closing the tab.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures.workspace = true
 web-sys = { workspace = true, features = [
     "BinaryType",
+    "Crypto",
     "Document",
     "Element",
     "MessageEvent",
+    "Storage",
     "WebSocket",
     "Window",
 ] }

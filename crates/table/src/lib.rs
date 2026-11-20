@@ -11,7 +11,7 @@
 
 pub use coordinator::{Client, Decides, Intent, Wrong};
 use integrity::Secret;
-use protocol::{Account, Event, Moment, PROTOCOL_VERSION, Seat};
+use protocol::{Event, Moment, PROTOCOL_VERSION, Seat, Who};
 use relay::memory::{MemoryConnections, MemoryLog};
 use relay::{ConnectionId, Log, MatchId, Message, Relay};
 pub use rules::Resolution;
@@ -127,19 +127,23 @@ impl Table {
 
         for (at, (name, driver)) in drivers.into_iter().enumerate() {
             let connection = ConnectionId(format!("connection-{at}"));
-            let account = Account::Discord(format!("account-{at}"));
+            // A guest, with an id that is a function of the seat rather than random:
+            // the harness's whole value is that a match replays exactly. Nobody at this
+            // table is authenticated, because there is no exchange here to mint a ticket
+            // and nothing in a local match asks whether there was one.
+            let who = Who::Guest {
+                id: format!("table-{at}"),
+                name,
+            };
             let colour = colours[at % colours.len()].to_string();
             let outcome = match &match_id {
                 None => relay.receive(
                     &connection,
                     Message::Host {
-                        account,
-                        name,
+                        who,
                         colour,
                         version: PROTOCOL_VERSION,
-                        // Fixed, not generated: the harness's whole value is that a
-                        // match replays exactly, and a random nonce would give the
-                        // same script a different match id every run.
+                        // Fixed, not generated, for the same reason as the id above.
                         nonce: "table".to_string(),
                     },
                     now,
@@ -148,8 +152,7 @@ impl Table {
                     &connection,
                     Message::Join {
                         match_id: MatchId(id.to_string()),
-                        account,
-                        name,
+                        who,
                         colour,
                         version: PROTOCOL_VERSION,
                     },

@@ -9,7 +9,7 @@
 //! and `message::shape_of`. Adding it *here* is what makes it handled correctly, in every
 //! rendering at once.
 
-use protocol::{Account, Event, Moment, Seat};
+use protocol::{Account, Event, Moment, Seat, Who};
 use relay::{Listed, MatchId, Message, Refused};
 
 use crate::answer::Answer;
@@ -98,22 +98,39 @@ pub fn every_event() -> Vec<Event> {
 pub fn every_message() -> Vec<Message> {
     let match_id = MatchId("match-7".to_string());
     vec![
+        // A ticket, which is opaque text and may hold a dot and hexadecimal either side
+        // of it — the one shape a format that split on punctuation would mangle.
         Message::Host {
-            account: Account::Discord("450853396908343307".to_string()),
-            name: awkward_name(),
+            who: Who::Authenticated {
+                ticket: "0011aabb.ffee0000".to_string(),
+            },
+            colour: "dark red".to_string(),
+            version: protocol::PROTOCOL_VERSION,
+            nonce: "a nonce with a space".to_string(),
+        },
+        // And a guest, whose name is theirs to choose and is awkward on purpose.
+        Message::Host {
+            who: Who::Guest {
+                id: "0123456789abcdef0123456789abcdef".to_string(),
+                name: awkward_name(),
+            },
             colour: "dark red".to_string(),
             version: protocol::PROTOCOL_VERSION,
             nonce: "a nonce with a space".to_string(),
         },
         Message::Join {
             match_id: match_id.clone(),
-            account: Account::Ai,
-            name: "Ada".to_string(),
+            who: Who::Guest {
+                id: "fedcba9876543210fedcba9876543210".to_string(),
+                name: "Ada".to_string(),
+            },
             colour: "blue".to_string(),
             version: protocol::PROTOCOL_VERSION,
         },
         Message::List {
-            account: Account::Discord("450853396908343307".to_string()),
+            who: Who::Authenticated {
+                ticket: "0011aabb.ffee0000".to_string(),
+            },
         },
         Message::Bar {
             match_id: match_id.clone(),
@@ -158,7 +175,10 @@ pub fn every_message() -> Vec<Message> {
         },
         Message::Resume {
             match_id,
-            account: Account::Local,
+            who: Who::Guest {
+                id: "0123456789abcdef0123456789abcdef".to_string(),
+                name: "Ada".to_string(),
+            },
         },
     ]
 }
@@ -179,6 +199,7 @@ pub fn every_answer() -> Vec<Answer> {
         Answer::Refused(Refused::NotTheHost),
         Answer::Refused(Refused::NotInThisMatch),
         Answer::Refused(Refused::MatchIsOver),
+        Answer::Refused(Refused::BadTicket),
         // Zero and not zero. The relay never sends zero — a refusal means at least one
         // second remains — but zero is the number a rendering is most likely to omit or
         // read back as absent, so the format is held to it anyway.
@@ -194,11 +215,15 @@ pub fn every_answer() -> Vec<Answer> {
                 match_id: MatchId("match-7".to_string()),
                 host: awkward_name(),
                 players: 1,
+                ranked: false,
             },
+            // Both values of the flag, because a rendering that dropped it would come
+            // back as one of them and look right half the time.
             Listed {
                 match_id: MatchId("match-8".to_string()),
                 host: "Ada".to_string(),
                 players: 9,
+                ranked: true,
             },
         ]),
     ];

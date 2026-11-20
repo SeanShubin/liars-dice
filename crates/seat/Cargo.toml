@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 coordinator.workspace = true
+integrity.workspace = true
 protocol.workspace = true
 relay.workspace = true
 rules.workspace = true
@@ -13,5 +14,3 @@ wire.workspace = true
 ai.workspace = true
 readout.workspace = true
 
-[dev-dependencies]
-integrity.workspace = true

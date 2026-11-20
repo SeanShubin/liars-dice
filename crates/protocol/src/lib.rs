@@ -165,24 +165,70 @@ impl fmt::Display for Seat {
 
 /// Who is behind a seat.
 ///
-/// Three cases because there are three kinds of player. A desktop game has no
-/// authentication, so the human at the keyboard has no account id; an AI player has no
-/// account at all; a web player has a Discord snowflake. An optional id would make the
-/// first two indistinguishable.
+/// Four cases because there are four kinds of player. A desktop game has no
+/// authentication, so the human at the keyboard has no account id; an AI player in a
+/// desktop game has no account at all; a web player either proved who they are or did
+/// not. An optional id would make several of these indistinguishable.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Account {
     /// A web player, authenticated with Discord. The snowflake, not the display name.
     Discord(String),
+    /// A web player who has not authenticated, identified by an id their own client
+    /// generated and keeps.
+    ///
+    /// Not checked, and deliberately not: anybody who learns somebody else's guest id can
+    /// take their seat in an unranked match, and that is accepted. The whole of the
+    /// security budget is spent on the one question a ranked match rests on, which is
+    /// whether a Discord account is really that account.
+    ///
+    /// An AI player in a hosted match holds one of these. The relay cannot tell it from a
+    /// person, which is the property that makes a bot working say anything about a person
+    /// working — see `An AI player is a driver, never an account` in
+    /// /implementation/identity.md.
+    Guest(String),
     /// An AI player. Desktop games only.
     Ai,
     /// The human at the keyboard of a desktop game.
     Local,
 }
 
+impl Account {
+    /// Whether this account was proved rather than claimed.
+    ///
+    /// `A match is ranked when every seat in it is held by an authenticated player` turns
+    /// on this and nothing else. Only Discord proves anything: a guest id is a claim, a
+    /// desktop player has nobody to prove themselves to, and an AI player is not a person.
+    pub fn is_proven(&self) -> bool {
+        matches!(self, Account::Discord(_))
+    }
+}
+
+/// How a client says who it is: exactly one of the two, never both.
+///
+/// A message that could carry an account *and* a ticket is a message where the two can
+/// disagree, and then something has to decide which wins. So they are one field, and a
+/// client cannot claim a Discord account without a ticket because there is no field in
+/// which to claim one.
+/// The name travels with the identity rather than beside it, which is a change from what
+/// /implementation/identity.md first described. `An authenticated player's name is their
+/// Discord display name` and `An unauthenticated player chooses their own name`, so a
+/// message carrying a `Who` *and* a name would be a message where those two can disagree
+/// — the same defect, one field along, that putting the account and the ticket together
+/// was meant to remove. Here there is nowhere to claim a name you were not given.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Who {
+    /// An id a client generated for itself, and the name they chose. Neither is checked.
+    Guest { id: String, name: String },
+    /// A ticket from the exchange. Checked, and both the account and the name come out of
+    /// it.
+    Authenticated { ticket: String },
+}
+
 impl fmt::Display for Account {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Account::Discord(id) => write!(out, "discord:{}", token(id)),
+            Account::Guest(id) => write!(out, "guest:{}", token(id)),
             Account::Ai => write!(out, "ai"),
             Account::Local => write!(out, "local"),
         }
@@ -357,7 +403,7 @@ pub enum Event {
     Abandon,
 }
 
-/// An account as text, losslessly: `discord:<snowflake>`, `ai`, or `local`.
+/// An account as text, losslessly: `discord:<snowflake>`, `guest:<id>`, `ai`, or `local`.
 ///
 /// Not `Display`, which renders for the archive's line format and passes the id through
 /// [`token`]. This is the canonical form — the one a match id is derived from and the one
@@ -367,6 +413,7 @@ pub enum Event {
 pub fn account_text(account: &Account) -> String {
     match account {
         Account::Discord(id) => format!("discord:{id}"),
+        Account::Guest(id) => format!("guest:{id}"),
         Account::Ai => "ai".to_string(),
         Account::Local => "local".to_string(),
     }
@@ -380,6 +427,7 @@ pub fn account_from_text(text: &str) -> Option<Account> {
         // Split once, so a colon inside an id cannot change who the account is.
         other => match other.split_once(':') {
             Some(("discord", id)) => Some(Account::Discord(id.to_string())),
+            Some(("guest", id)) => Some(Account::Guest(id.to_string())),
             _ => None,
         },
     }

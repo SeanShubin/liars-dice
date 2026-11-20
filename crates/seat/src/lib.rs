@@ -11,7 +11,7 @@
 
 use ai::Seen;
 use coordinator::{Client, Decides, Intent};
-use protocol::{Account, Event, PROTOCOL_VERSION, Seat};
+use protocol::{Account, Event, PROTOCOL_VERSION, Seat, Who};
 use relay::Message;
 use rules::{Call, Claim, Resolution, View};
 use wire::answer::Answer;
@@ -98,8 +98,16 @@ enum Opening {
 
 /// One player, waiting on frames.
 pub struct Seated {
+    /// What this client says it is: a guest id, or a ticket.
+    who: Who,
+    /// Which account the relay will call this client, read out of `who`.
+    ///
+    /// Derived rather than given, so there is one answer to *who am I* and not two that
+    /// can disagree. For a guest it is the id; for an authenticated player it is read out
+    /// of the client's own ticket by `integrity::ticket_claims`, which does not verify and
+    /// does not need to — the client holds no secret, and recognising its own `join`
+    /// coming back is not a decision about anybody's identity.
     account: Account,
-    name: String,
     colour: String,
     opening: Opening,
     match_id: Option<MatchId>,
@@ -144,17 +152,32 @@ pub struct Seated {
     still_active: Option<u32>,
 }
 
+/// Which account a client will be called, from what it says it is.
+///
+/// `None` only for an `Authenticated` whose ticket this build cannot read, which means the
+/// client was handed something that is not a ticket. A `Seated` built on one would never
+/// recognise its own `join` and would sit at the table forever waiting to be dealt in, so
+/// the constructors refuse it instead.
+fn account_claimed(who: &Who) -> Option<Account> {
+    match who {
+        Who::Guest { id, .. } => Some(Account::Guest(id.clone())),
+        Who::Authenticated { ticket } => {
+            let claims = integrity::ticket_claims(ticket)?;
+            protocol::account_from_text(&claims.account)
+        }
+    }
+}
+
 impl Seated {
+    /// `None` if `who` is an `Authenticated` holding something that is not a ticket.
     pub fn hosting(
-        account: Account,
-        name: impl Into<String>,
+        who: Who,
         colour: impl Into<String>,
         nonce: impl Into<String>,
         driver: Box<dyn Decides>,
-    ) -> Self {
+    ) -> Option<Self> {
         Self::new(
-            account,
-            name,
+            who,
             colour,
             Opening::Host {
                 nonce: nonce.into(),
@@ -163,30 +186,30 @@ impl Seated {
         )
     }
 
+    /// `None` if `who` is an `Authenticated` holding something that is not a ticket.
     pub fn joining(
-        account: Account,
-        name: impl Into<String>,
+        who: Who,
         colour: impl Into<String>,
         match_id: MatchId,
         driver: Box<dyn Decides>,
-    ) -> Self {
-        Self::new(account, name, colour, Opening::Join { match_id }, driver)
+    ) -> Option<Self> {
+        Self::new(who, colour, Opening::Join { match_id }, driver)
     }
 
     fn new(
-        account: Account,
-        name: impl Into<String>,
+        who: Who,
         colour: impl Into<String>,
         opening: Opening,
         driver: Box<dyn Decides>,
-    ) -> Self {
+    ) -> Option<Self> {
         let match_id = match &opening {
             Opening::Host { .. } => None,
             Opening::Join { match_id } => Some(match_id.clone()),
         };
-        Self {
+        let account = account_claimed(&who)?;
+        Some(Self {
+            who,
             account,
-            name: name.into(),
             colour: colour.into(),
             opening,
             match_id,
@@ -199,23 +222,21 @@ impl Seated {
             over: false,
             ending: None,
             still_active: None,
-        }
+        })
     }
 
     /// The first frame to put on the socket.
     pub fn opening(&self) -> String {
         let message = match &self.opening {
             Opening::Host { nonce } => Message::Host {
-                account: self.account.clone(),
-                name: self.name.clone(),
+                who: self.who.clone(),
                 colour: self.colour.clone(),
                 version: PROTOCOL_VERSION,
                 nonce: nonce.clone(),
             },
             Opening::Join { match_id } => Message::Join {
                 match_id: match_id.clone(),
-                account: self.account.clone(),
-                name: self.name.clone(),
+                who: self.who.clone(),
                 colour: self.colour.clone(),
                 version: PROTOCOL_VERSION,
             },
@@ -630,16 +651,14 @@ fn odds_of(view: &rules::View<'_>, call: rules::Call) -> f64 {
 /// which is the same socket a [`Seated`] later speaks on, since a client connects before
 /// it knows whether it will host, join, or look first.
 pub mod lobby {
-    use protocol::Account;
+    use protocol::Who;
     use relay::{Listed, Message};
     use wire::answer::Answer;
     use wire::{json, message};
 
     /// The frame that asks what is open.
-    pub fn ask(account: &Account) -> String {
-        json::write(&message::shape_of(&Message::List {
-            account: account.clone(),
-        }))
+    pub fn ask(who: &Who) -> String {
+        json::write(&message::shape_of(&Message::List { who: who.clone() }))
     }
 
     /// What a frame says about the lobby, or `None` if it is not about the lobby.

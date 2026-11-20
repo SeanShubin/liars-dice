@@ -5,7 +5,7 @@
 //! proved before any infrastructure exists.
 
 use integrity::Secret;
-use protocol::{Account, Event, Moment, PROTOCOL_VERSION, Seat};
+use protocol::{Account, Event, Moment, PROTOCOL_VERSION, Seat, Who};
 use relay::memory::{MemoryConnections, MemoryLog};
 use relay::{
     ABANDON_AFTER_SECONDS, CANCEL_AFTER_SECONDS, Connected, ConnectionId, Connections, Ending, Log,
@@ -35,8 +35,26 @@ fn relay() -> Relay<MemoryLog, MemoryConnections> {
     Relay::new(MemoryLog::new(), MemoryConnections::new(), secret())
 }
 
-fn discord(id: &str) -> Account {
+/// An unauthenticated account, which is what a client can actually produce.
+///
+/// These tests used to say `discord`, and could, because a client sent whatever account it
+/// liked. Now a `Discord` account exists only behind a ticket the relay verifies, so a
+/// test that wants one mints it — see the ranked tests.
+fn guest(id: &str) -> Account {
+    Account::Guest(id.to_string())
+}
+
+/// A proven account, which only a ticket can produce.
+fn discord_account(id: &str) -> Account {
     Account::Discord(id.to_string())
+}
+
+/// What a client sends to say who it is.
+fn guest_who(id: &str, name: &str) -> Who {
+    Who::Guest {
+        id: id.to_string(),
+        name: name.to_string(),
+    }
 }
 
 fn connection(name: &str) -> ConnectionId {
@@ -47,8 +65,7 @@ fn host<L: Log, C: Connections>(relay: &mut Relay<L, C>, who: &ConnectionId) -> 
     let outcome = relay.receive(
         who,
         Message::Host {
-            account: discord("1"),
-            name: "Alice".to_string(),
+            who: guest_who("1", "Alice"),
             colour: "red".to_string(),
             version: PROTOCOL_VERSION,
             nonce: "alice-hosts".to_string(),
@@ -72,8 +89,7 @@ fn join<L: Log, C: Connections>(
             who,
             Message::Join {
                 match_id: match_id.clone(),
-                account: discord(account),
-                name: name.to_string(),
+                who: guest_who(account, name),
                 colour: colour.to_string(),
                 version: PROTOCOL_VERSION,
             },
@@ -138,7 +154,7 @@ fn asking_what_is_open_lists_the_matches_that_are() {
     let empty = relay.receive(
         &looking,
         Message::List {
-            account: discord("9"),
+            who: guest_who("9", "asking"),
         },
         moment(),
     );
@@ -153,7 +169,7 @@ fn asking_what_is_open_lists_the_matches_that_are() {
         .receive(
             &looking,
             Message::List {
-                account: discord("9"),
+                who: guest_who("9", "asking"),
             },
             moment(),
         )
@@ -172,7 +188,7 @@ fn asking_what_is_open_lists_the_matches_that_are() {
         .receive(
             &looking,
             Message::List {
-                account: discord("9"),
+                who: guest_who("9", "asking"),
             },
             moment(),
         )
@@ -206,7 +222,7 @@ fn a_listing_is_answered_for_whoever_asked() {
         .receive(
             &bob,
             Message::List {
-                account: discord("2"),
+                who: guest_who("2", "asking"),
             },
             moment(),
         )
@@ -218,7 +234,7 @@ fn a_listing_is_answered_for_whoever_asked() {
         .receive(
             &connection("carol"),
             Message::List {
-                account: discord("3"),
+                who: guest_who("3", "asking"),
             },
             moment(),
         )
@@ -243,8 +259,8 @@ fn a_barred_player_is_not_shown_the_match_and_cannot_join() {
         },
         moment(),
     );
-    assert!(relay.open_matches(Some(&discord("2")), moment()).is_empty());
-    assert_eq!(relay.open_matches(Some(&discord("3")), moment()).len(), 1);
+    assert!(relay.open_matches(Some(&guest("2")), moment()).is_empty());
+    assert_eq!(relay.open_matches(Some(&guest("3")), moment()).len(), 1);
 
     relay.receive(
         &alice,
@@ -255,7 +271,7 @@ fn a_barred_player_is_not_shown_the_match_and_cannot_join() {
         moment(),
     );
     assert_eq!(
-        relay.open_matches(Some(&discord("2")), moment()).len(),
+        relay.open_matches(Some(&guest("2")), moment()).len(),
         1,
         "lifting a bar shows the match again"
     );
@@ -306,8 +322,7 @@ fn a_join_is_refused_for_a_mismatched_version_a_taken_colour_or_a_started_match(
         &connection("old"),
         Message::Join {
             match_id: match_id.clone(),
-            account: discord("9"),
-            name: "Old".to_string(),
+            who: guest_who("9", "Old"),
             colour: "green".to_string(),
             version: PROTOCOL_VERSION - 1,
         },
@@ -645,7 +660,7 @@ fn joining_twice_returns_the_seat_already_held() {
     assert_eq!(seats(&relay, &match_id), 2, "and it is not a second seat");
 
     let view = relay.view(&match_id);
-    assert_eq!(view.seat_of_account(&discord("2")), Some(Seat(1)));
+    assert_eq!(view.seat_of_account(&guest("2")), Some(Seat(1)));
     assert_eq!(
         view.name_of(Seat(1)),
         "Bob",
@@ -677,8 +692,7 @@ fn coming_back_is_not_refused_by_your_own_seat() {
         &connection("alice-again"),
         Message::Join {
             match_id: match_id.clone(),
-            account: discord("1"),
-            name: "Alice".to_string(),
+            who: guest_who("1", "Alice"),
             colour: "red".to_string(),
             version: PROTOCOL_VERSION,
         },
@@ -698,8 +712,7 @@ fn coming_back_is_not_refused_by_your_own_seat() {
         &connection("alice-third"),
         Message::Join {
             match_id: match_id.clone(),
-            account: discord("1"),
-            name: "Alice".to_string(),
+            who: guest_who("1", "Alice"),
             colour: "red".to_string(),
             version: PROTOCOL_VERSION,
         },
@@ -841,7 +854,7 @@ fn a_returning_player_resumes_their_seat_and_learns_nothing_extra() {
         &back,
         Message::Resume {
             match_id: match_id.clone(),
-            account: discord("2"),
+            who: guest_who("2", "asking"),
         },
         moment(),
     );
@@ -881,7 +894,7 @@ fn a_stranger_cannot_resume_a_seat() {
                 &connection("nobody"),
                 Message::Resume {
                     match_id,
-                    account: discord("404"),
+                    who: guest_who("404", "asking"),
                 },
                 moment()
             )
@@ -923,8 +936,7 @@ fn hosting_the_same_request_twice_creates_one_match() {
         Secret::from_bytes(MEDDLED_SECRET),
     );
     let request = Message::Host {
-        account: meddled_host(),
-        name: "Host".to_string(),
+        who: meddled_host_who(),
         colour: "red".to_string(),
         version: PROTOCOL_VERSION,
         nonce: HOST_NONCE.to_string(),
@@ -969,8 +981,7 @@ fn hosting_twice_on_purpose_creates_two_matches() {
         Secret::from_bytes(MEDDLED_SECRET),
     );
     let request = |nonce: &str| Message::Host {
-        account: meddled_host(),
-        name: "Host".to_string(),
+        who: meddled_host_who(),
         colour: "red".to_string(),
         version: PROTOCOL_VERSION,
         nonce: nonce.to_string(),
@@ -994,7 +1005,14 @@ const MEDDLED_SECRET: [u8; 32] = [3; 32];
 const HOST_NONCE: &str = "host-once";
 
 fn meddled_host() -> Account {
-    Account::Discord("account-host".to_string())
+    Account::Guest("account-host".to_string())
+}
+
+fn meddled_host_who() -> Who {
+    Who::Guest {
+        id: "account-host".to_string(),
+        name: "Host".to_string(),
+    }
 }
 
 /// The match `seat_a_host` will create.
@@ -1104,8 +1122,7 @@ fn a_join_survives_interference_at_every_append() {
         let outcome = relay.receive(
             &ConnectionId("host".to_string()),
             Message::Host {
-                account: meddled_host(),
-                name: "Host".to_string(),
+                who: meddled_host_who(),
                 colour: "red".to_string(),
                 version: PROTOCOL_VERSION,
                 nonce: HOST_NONCE.to_string(),
@@ -1129,8 +1146,7 @@ fn a_join_survives_interference_at_every_append() {
             &ConnectionId("late".to_string()),
             Message::Join {
                 match_id: created.clone(),
-                account: Account::Discord("account-late".to_string()),
-                name: "Late".to_string(),
+                who: guest_who("account-late", "Late"),
                 colour: "green".to_string(),
                 version: PROTOCOL_VERSION,
             },
@@ -1194,8 +1210,7 @@ fn a_join_decided_against_a_stale_log_is_decided_again() {
         &ConnectionId("late".to_string()),
         Message::Join {
             match_id: match_id.clone(),
-            account: Account::Discord("account-late".to_string()),
-            name: "Late".to_string(),
+            who: guest_who("account-late", "Late"),
             colour: "green".to_string(),
             version: PROTOCOL_VERSION,
         },
@@ -1249,8 +1264,7 @@ fn a_colour_taken_while_a_join_was_decided_is_refused_on_the_retry() {
         &ConnectionId("late".to_string()),
         Message::Join {
             match_id: match_id.clone(),
-            account: Account::Discord("account-late".to_string()),
-            name: "Late".to_string(),
+            who: guest_who("account-late", "Late"),
             // Free when this was decided. Taken by the time it tried to land.
             colour: "green".to_string(),
             version: PROTOCOL_VERSION,
@@ -1288,8 +1302,7 @@ fn seat_a_host<L: Log, C: Connections>(relay: &mut Relay<L, C>, expected: &Match
         .receive(
             &ConnectionId("host".to_string()),
             Message::Host {
-                account: meddled_host(),
-                name: "Host".to_string(),
+                who: meddled_host_who(),
                 colour: "red".to_string(),
                 version: PROTOCOL_VERSION,
                 nonce: HOST_NONCE.to_string(),
@@ -1604,7 +1617,7 @@ fn a_match_with_no_recorded_time_is_abandoned_at_once() {
                 seat: Seat(0),
                 name: "Mary Jane".to_string(),
                 colour: "red".to_string(),
-                account: discord("1"),
+                account: guest("1"),
             },
             Event::Host { seat: Seat(0) },
         ],
@@ -1724,7 +1737,7 @@ fn nothing_is_recorded_in_a_match_that_is_over() {
         &bob,
         Message::Resume {
             match_id: match_id.clone(),
-            account: discord("2"),
+            who: guest_who("2", "asking"),
         },
         later(CANCEL_AFTER_SECONDS),
     );
@@ -1904,4 +1917,353 @@ fn an_event_resets_the_hour() {
         Some(Ending::Abandoned),
         "and an hour after that it is"
     );
+}
+
+// ---------------------------------------------------------------------------------------
+// Identity: /implementation/identity.md
+// ---------------------------------------------------------------------------------------
+
+/// A ticket for a Discord account, minted under the secret this relay holds.
+fn ticket_for(id: &str, name: &str) -> Who {
+    Who::Authenticated {
+        ticket: integrity::ticket(
+            &secret(),
+            &protocol::account_text(&Account::Discord(id.to_string())),
+            name,
+            // Well after `moment()`, which is what every message in these tests arrives
+            // at. Expiry has its own test; this is every other test's ticket.
+            u64::MAX,
+        ),
+    }
+}
+
+/// Seat somebody, saying who they are however they say it.
+fn seat<L: Log, C: Connections>(
+    relay: &mut Relay<L, C>,
+    at: &ConnectionId,
+    match_id: &MatchId,
+    who: Who,
+    colour: &str,
+) -> Option<Refused> {
+    relay
+        .receive(
+            at,
+            Message::Join {
+                match_id: match_id.clone(),
+                who,
+                colour: colour.to_string(),
+                version: PROTOCOL_VERSION,
+            },
+            moment(),
+        )
+        .refused
+}
+
+/// A ticket is the only way to be a Discord account, and the relay reads both out of it.
+///
+/// `An authenticated player is identified by their Discord account id` and `An
+/// authenticated player's name is their Discord display name`: the client sends neither,
+/// so neither can be claimed.
+#[test]
+fn a_ticket_seats_the_account_and_the_name_it_proves() {
+    let mut relay = relay();
+    let alice = connection("alice");
+    let outcome = relay.receive(
+        &alice,
+        Message::Host {
+            who: ticket_for("450853396908343307", "Ada Lovelace"),
+            colour: "red".to_string(),
+            version: PROTOCOL_VERSION,
+            nonce: "once".to_string(),
+        },
+        moment(),
+    );
+    assert_eq!(outcome.refused, None);
+    let match_id = outcome.created.expect("a match");
+    let view = relay.view(&match_id);
+    assert_eq!(
+        view.seat_of_account(&discord_account("450853396908343307")),
+        Some(Seat(0)),
+        "the account came out of the ticket"
+    );
+    assert_eq!(view.name_of(Seat(0)), "Ada Lovelace");
+    assert!(view.ranked(), "one authenticated seat and nothing else");
+}
+
+/// A guest id is never checked, asserted directly.
+///
+/// An accidental check would be a feature nobody asked for that fails closed in
+/// production, so this is worth a test of its own rather than being left to follow from
+/// the absence of code.
+#[test]
+fn a_guest_id_is_taken_as_given() {
+    let mut relay = relay();
+    for id in [
+        "",
+        " ",
+        "discord:450853396908343307",
+        "../../etc",
+        "\u{1f3b2}",
+    ] {
+        let outcome = relay.receive(
+            &connection(id),
+            Message::Host {
+                who: Who::Guest {
+                    id: id.to_string(),
+                    name: "Anybody".to_string(),
+                },
+                colour: "red".to_string(),
+                version: PROTOCOL_VERSION,
+                nonce: format!("nonce-{id}"),
+            },
+            moment(),
+        );
+        assert_eq!(outcome.refused, None, "{id:?} was checked");
+        let match_id = outcome.created.expect("a match");
+        assert_eq!(
+            relay.view(&match_id).seat_of_account(&guest(id)),
+            Some(Seat(0)),
+            "{id:?} is the account, verbatim"
+        );
+    }
+}
+
+/// A guest id that reads like a Discord account is still a guest.
+///
+/// The one case where taking a guest id verbatim could have gone wrong: `Account::Guest`
+/// and `Account::Discord` are different variants, so a guest saying `discord:1` is
+/// `guest:discord:1` and shares nothing with the real account.
+#[test]
+fn a_guest_cannot_spell_its_way_into_a_discord_account() {
+    let mut relay = relay();
+    let impostor = relay
+        .receive(
+            &connection("impostor"),
+            Message::Host {
+                who: Who::Guest {
+                    id: "discord:450853396908343307".to_string(),
+                    name: "Ada Lovelace".to_string(),
+                },
+                colour: "red".to_string(),
+                version: PROTOCOL_VERSION,
+                nonce: "impostor".to_string(),
+            },
+            moment(),
+        )
+        .created
+        .expect("a match");
+    let view = relay.view(&impostor);
+    assert_eq!(
+        view.seat_of_account(&discord_account("450853396908343307")),
+        None,
+        "spelling a prefix is not holding an account"
+    );
+    assert!(!view.ranked(), "and it certainly is not ranked");
+}
+
+/// A ticket that does not verify is refused, and the seat is not taken.
+#[test]
+fn a_ticket_that_proves_nothing_seats_nobody() {
+    let mut relay = relay();
+    let alice = connection("alice");
+    let match_id = host(&mut relay, &alice);
+    let before = relay.view(&match_id).seats.len();
+
+    let forgeries = [
+        ("nonsense", "not a ticket".to_string()),
+        ("empty", String::new()),
+        (
+            "another secret",
+            integrity::ticket(
+                &Secret::from_bytes([99; 32]),
+                "discord:450853396908343307",
+                "Ada",
+                u64::MAX,
+            ),
+        ),
+        (
+            "expired",
+            integrity::ticket(
+                &secret(),
+                "discord:450853396908343307",
+                "Ada",
+                // A second before every message in these tests arrives.
+                moment().to_unix_nanos() / 1_000_000_000 - 1,
+            ),
+        ),
+        (
+            // Nothing mints one of these, and if anything ever did it must not count as
+            // proven — which is what the guard in `identify` is for.
+            "a ticket naming a guest",
+            integrity::ticket(&secret(), "guest:1", "Ada", u64::MAX),
+        ),
+    ];
+    for (what, ticket) in forgeries {
+        assert_eq!(
+            seat(
+                &mut relay,
+                &connection(what),
+                &match_id,
+                Who::Authenticated { ticket },
+                "blue"
+            ),
+            Some(Refused::BadTicket),
+            "{what} was accepted"
+        );
+    }
+    assert_eq!(
+        relay.view(&match_id).seats.len(),
+        before,
+        "and none of them took a seat"
+    );
+}
+
+/// `A match is ranked when every seat in it is held by an authenticated player`, over
+/// every combination of seat kinds up to a small width.
+///
+/// All authenticated is ranked; one guest anywhere is not; an empty match is not. Over
+/// combinations rather than examples, because the property is about *every* seat and a
+/// test over two or three cases would pass for an implementation that looked at the first.
+#[test]
+fn ranked_is_every_seat_and_not_most_of_them() {
+    let colours = ["red", "blue", "green", "white"];
+    for width in 1..4usize {
+        for shape in 0..(1u32 << width) {
+            let proven: Vec<bool> = (0..width).map(|at| shape >> at & 1 == 1).collect();
+            let mut relay = relay();
+            let mut match_id = None;
+            for (at, &is_proven) in proven.iter().enumerate() {
+                let who = if is_proven {
+                    ticket_for(&format!("4508533969083433{at:02}"), &format!("Proven {at}"))
+                } else {
+                    guest_who(&format!("guest-{at}"), &format!("Guest {at}"))
+                };
+                let socket = connection(&format!("socket-{at}"));
+                match &match_id {
+                    None => {
+                        let outcome = relay.receive(
+                            &socket,
+                            Message::Host {
+                                who,
+                                colour: colours[at].to_string(),
+                                version: PROTOCOL_VERSION,
+                                nonce: "ranked".to_string(),
+                            },
+                            moment(),
+                        );
+                        assert_eq!(outcome.refused, None);
+                        match_id = outcome.created;
+                    }
+                    Some(id) => {
+                        assert_eq!(seat(&mut relay, &socket, id, who, colours[at]), None);
+                    }
+                }
+            }
+            let match_id = match_id.expect("a match");
+            let view = relay.view(&match_id);
+            assert_eq!(
+                view.ranked(),
+                proven.iter().all(|proven| *proven),
+                "{proven:?} was judged {}",
+                view.ranked()
+            );
+        }
+    }
+    // And a log with no seats in it at all.
+    let relay = relay();
+    assert!(
+        !relay.view(&MatchId("nothing".to_string())).ranked(),
+        "a match nobody played is not a ranked match"
+    );
+}
+
+/// `Whether a match is ranked is settled when it starts` — leaving afterwards does not
+/// change it.
+///
+/// Falls out rather than being enforced: `A player cannot join a match that has started`
+/// fixes the seats, and a seat that left is still a seat in the log.
+#[test]
+fn leaving_a_started_match_does_not_change_whether_it_is_ranked() {
+    let mut relay = relay();
+    let alice = connection("alice");
+    let bob = connection("bob");
+    let match_id = relay
+        .receive(
+            &alice,
+            Message::Host {
+                who: ticket_for("1", "Ada"),
+                colour: "red".to_string(),
+                version: PROTOCOL_VERSION,
+                nonce: "ranked".to_string(),
+            },
+            moment(),
+        )
+        .created
+        .expect("a match");
+    assert_eq!(
+        seat(&mut relay, &bob, &match_id, ticket_for("2", "Bob"), "blue"),
+        None
+    );
+    relay.receive(
+        &alice,
+        Message::Start {
+            match_id: match_id.clone(),
+        },
+        moment(),
+    );
+    assert!(relay.view(&match_id).ranked());
+
+    relay.receive(
+        &bob,
+        Message::Leave {
+            match_id: match_id.clone(),
+        },
+        moment(),
+    );
+    assert!(
+        relay.view(&match_id).ranked(),
+        "a seat that left is still a seat in the log"
+    );
+}
+
+/// `Listed` says whether a match is ranked, from the same fold as the host and the count.
+#[test]
+fn a_listing_says_which_matches_are_ranked() {
+    let mut relay = relay();
+    let proven = relay
+        .receive(
+            &connection("ada"),
+            Message::Host {
+                who: ticket_for("1", "Ada"),
+                colour: "red".to_string(),
+                version: PROTOCOL_VERSION,
+                nonce: "proven".to_string(),
+            },
+            moment(),
+        )
+        .created
+        .expect("a match");
+    let unproven = relay
+        .receive(
+            &connection("sean"),
+            Message::Host {
+                who: guest_who("sean", "Sean"),
+                colour: "blue".to_string(),
+                version: PROTOCOL_VERSION,
+                nonce: "unproven".to_string(),
+            },
+            moment(),
+        )
+        .created
+        .expect("a match");
+
+    let listed = relay.open_matches(None, moment());
+    let ranked_of = |id: &MatchId| {
+        listed
+            .iter()
+            .find(|open| &open.match_id == id)
+            .map(|open| open.ranked)
+    };
+    assert_eq!(ranked_of(&proven), Some(true));
+    assert_eq!(ranked_of(&unproven), Some(false));
 }

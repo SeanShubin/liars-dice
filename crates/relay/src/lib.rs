@@ -11,7 +11,7 @@
 //! DynamoDB for production, or to [`memory`] to play a whole match in one process.
 
 use integrity::Secret;
-use protocol::{Account, Event, Moment, PROTOCOL_VERSION, Seat};
+use protocol::{Account, Event, Moment, PROTOCOL_VERSION, Seat, Who};
 
 pub mod memory;
 mod view;
@@ -271,8 +271,7 @@ impl<T: Connections + ?Sized> Connections for &mut T {
 #[derive(Clone, PartialEq, Debug)]
 pub enum Message {
     Host {
-        account: Account,
-        name: String,
+        who: Who,
         colour: String,
         version: u32,
         /// Which request this is, so the match it makes has a name.
@@ -284,8 +283,7 @@ pub enum Message {
     },
     Join {
         match_id: MatchId,
-        account: Account,
-        name: String,
+        who: Who,
         colour: String,
         version: u32,
     },
@@ -334,16 +332,20 @@ pub enum Message {
     /// What is open to join.
     ///
     /// The one message that names no match, because asking which there are is the thing a
-    /// client does before it has one. The account is carried so a barred player is not
-    /// shown the match they are barred from, which is the only reason the relay needs to
-    /// know who is asking.
+    /// client does before it has one. Who is asking is carried so a barred player is not
+    /// shown the match they are barred from.
+    ///
+    /// A `Who` like every other message that names a player, rather than an `Account`: a
+    /// client never sends an account. It says who it is, and the relay decides what that
+    /// means — which is the whole of why a client cannot claim a Discord account it does
+    /// not hold.
     List {
-        account: Account,
+        who: Who,
     },
     /// Reattach to a seat already in the match.
     Resume {
         match_id: MatchId,
-        account: Account,
+        who: Who,
     },
 }
 
@@ -413,6 +415,13 @@ pub enum Refused {
     /// that cannot begin is cancelling it, and two refusals for *this match is finished*
     /// was one too many. How it ended is in the log, for anybody the log is sent to.
     MatchIsOver,
+    /// The ticket does not verify, has expired, or does not name a Discord account.
+    ///
+    /// One refusal for all of those, because `check_ticket` gives one answer for all of
+    /// them: a relay that could tell a forged ticket from an expired one is a relay that
+    /// can be asked which it was. The client's answer either way is to authenticate
+    /// again, and it already knows its own ticket's expiry because the exchange told it.
+    BadTicket,
     /// The host asked to cancel a started match too soon. `seconds` remain.
     ///
     /// Carries a number because there is something to say beyond the name: a button that
@@ -460,6 +469,14 @@ pub struct Listed {
     pub match_id: MatchId,
     pub host: String,
     pub players: usize,
+    /// Whether every seat taken so far is held by an authenticated player.
+    ///
+    /// Derived in the same fold that produces the host and the player count, so the lobby
+    /// can say which matches are which before anybody joins one. True of a match that is
+    /// still filling says only that it is ranked *so far*: `Whether a match is ranked is
+    /// settled when it starts`, and one guest joining before then settles it the other
+    /// way.
+    pub ranked: bool,
 }
 
 /// A match has at most ten players.
@@ -542,6 +559,7 @@ impl<L: Log, C: Connections> Relay<L, C> {
                     .map(|seat| view.name_of(seat).to_string())
                     .unwrap_or_default(),
                 players: view.seats.len(),
+                ranked: view.ranked(),
             });
         }
         listed.sort_by(|left, right| left.match_id.cmp(&right.match_id));
@@ -594,39 +612,43 @@ impl<L: Log, C: Connections> Relay<L, C> {
         }
         match message {
             Message::Host {
-                account,
-                name,
+                who,
                 colour,
                 version,
                 nonce,
-            } => self.host(
-                from,
-                Sitting {
-                    account,
-                    name,
-                    colour,
-                    version,
-                },
-                nonce,
-                now,
-            ),
+            } => match self.identify(who, now) {
+                Ok((account, name)) => self.host(
+                    from,
+                    Sitting {
+                        account,
+                        name,
+                        colour,
+                        version,
+                    },
+                    nonce,
+                    now,
+                ),
+                Err(why) => Ok(Outcome::refused(why)),
+            },
             Message::Join {
                 match_id,
-                account,
-                name,
+                who,
                 colour,
                 version,
-            } => self.join(
-                from,
-                match_id,
-                Sitting {
-                    account,
-                    name,
-                    colour,
-                    version,
-                },
-                now,
-            ),
+            } => match self.identify(who, now) {
+                Ok((account, name)) => self.join(
+                    from,
+                    match_id,
+                    Sitting {
+                        account,
+                        name,
+                        colour,
+                        version,
+                    },
+                    now,
+                ),
+                Err(why) => Ok(Outcome::refused(why)),
+            },
             Message::Bar { match_id, seat } => self.bar(from, match_id, seat, true, now),
             Message::Lift { match_id, seat } => self.bar(from, match_id, seat, false, now),
             Message::Start { match_id } => self.start(from, match_id, now),
@@ -635,8 +657,50 @@ impl<L: Log, C: Connections> Relay<L, C> {
             Message::RoundOver { match_id } => self.round_over(from, match_id, now),
             Message::Over { match_id } => self.match_over(from, match_id, now),
             Message::Cancel { match_id } => self.cancel(from, match_id, now),
-            Message::List { account } => self.list(&account, now),
-            Message::Resume { match_id, account } => self.resume(from, match_id, account, now),
+            Message::List { who } => match self.identify(who, now) {
+                Ok((account, _)) => self.list(&account, now),
+                Err(why) => Ok(Outcome::refused(why)),
+            },
+            Message::Resume { match_id, who } => match self.identify(who, now) {
+                Ok((account, _)) => self.resume(from, match_id, account, now),
+                Err(why) => Ok(Outcome::refused(why)),
+            },
+        }
+    }
+
+    /// Turn a claim about who somebody is into an account and a name.
+    ///
+    /// The one place a ticket is checked, and the only way a `Discord` account can come
+    /// into existence from a message — so `A match is ranked when every seat in it is
+    /// held by an authenticated player` rests on a check that happens here and nowhere
+    /// else.
+    ///
+    /// A guest id is taken as given and nothing looks at it. That is the decision rather
+    /// than an oversight: anybody who learns somebody else's guest id can take their seat
+    /// in an unranked match, and the whole of the security budget is spent on the one
+    /// question a ranked match turns on.
+    fn identify(&self, who: Who, now: Moment) -> Result<(Account, String), Refused> {
+        match who {
+            Who::Guest { id, name } => Ok((Account::Guest(id), name)),
+            Who::Authenticated { ticket } => {
+                // Seconds, from the one reading this message was given. The relay never
+                // calls Discord: an outbound call on the hot path would turn a Discord
+                // outage into a relay outage, and there is nothing it could learn that
+                // the ticket does not already carry.
+                let seconds = now.to_unix_nanos() / 1_000_000_000;
+                let proved = integrity::check_ticket(&self.secret, &ticket, seconds)
+                    .ok_or(Refused::BadTicket)?;
+                let account =
+                    protocol::account_from_text(&proved.account).ok_or(Refused::BadTicket)?;
+                // A ticket may only ever prove an account that counts as proven. Nothing
+                // mints one for a guest, so this is unreachable — and it is what makes
+                // `Who::Authenticated` yield a proven account by construction rather than
+                // by the exchange having been careful.
+                if !account.is_proven() {
+                    return Err(Refused::BadTicket);
+                }
+                Ok((account, proved.name))
+            }
         }
     }
 

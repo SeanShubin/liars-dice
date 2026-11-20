@@ -14,7 +14,7 @@
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use protocol::Account;
+use protocol::Who;
 use relay::MatchId;
 use seat::{Ai, Seated, Stopped};
 use tungstenite::{Message as Frame, connect};
@@ -50,13 +50,20 @@ fn main() {
     let host_nonce = nonce.clone();
 
     let host = std::thread::spawn(move || {
+        // A guest, because the probe has no exchange to mint it a ticket and nothing
+        // it checks depends on being authenticated. It could not claim a Discord account
+        // if it wanted to: a client sends a `Who`, and the only way to produce a Discord
+        // account from one is a ticket the relay verifies.
         let seated = Seated::hosting(
-            Account::Discord("probe-host".to_string()),
-            "Host",
+            Who::Guest {
+                id: "probe-host".to_string(),
+                name: "Host".to_string(),
+            },
             "red",
             host_nonce,
             Box::new(Ai),
-        );
+        )
+        .expect("a guest is always a seat");
         play("host", &host_url, seated, Some(tell))
     });
 
@@ -77,12 +84,15 @@ fn main() {
 
     let guest = std::thread::spawn(move || {
         let seated = Seated::joining(
-            Account::Discord("probe-guest".to_string()),
-            "Guest",
+            Who::Guest {
+                id: "probe-guest".to_string(),
+                name: "Guest".to_string(),
+            },
             "blue",
             match_id,
             Box::new(Ai),
-        );
+        )
+        .expect("a guest is always a seat");
         play("guest", &url, seated, None)
     });
 

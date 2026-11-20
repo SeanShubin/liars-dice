@@ -7,10 +7,10 @@
 //! As with events, the match on `Message` has no wildcard arm, so a new message stops
 //! this compiling rather than arriving as nothing.
 
-use protocol::Seat;
+use protocol::{Seat, Who};
 use relay::{MatchId, Message};
 
-use crate::{Malformed, Shape, Value, account_of, account_text, event};
+use crate::{Malformed, Shape, Value, event};
 
 fn text(value: &str) -> Value {
     Value::Text(value.to_string())
@@ -20,40 +20,68 @@ fn of(match_id: &MatchId) -> (&'static str, Value) {
     ("match", text(&match_id.0))
 }
 
+/// A `Who` as fields, flat, the way a refusal names its own variant.
+///
+/// `who` says which it is and the remaining keys are that variant's. Flat rather than
+/// nested because the format is flat except for the event a claim carries, and
+/// self-describing because a client that could send both an id and a ticket could send two
+/// different answers to one question.
+fn who_of(who: &Who) -> Vec<(&'static str, Value)> {
+    match who {
+        Who::Guest { id, name } => vec![
+            ("who", text("guest")),
+            ("id", text(id)),
+            ("name", text(name)),
+        ],
+        Who::Authenticated { ticket } => {
+            vec![("who", text("authenticated")), ("ticket", text(ticket))]
+        }
+    }
+}
+
+fn who_from(shape: &Shape) -> Result<Who, Malformed> {
+    match shape.text("who")? {
+        "guest" => Ok(Who::Guest {
+            id: shape.text("id")?.to_string(),
+            name: shape.text("name")?.to_string(),
+        }),
+        "authenticated" => Ok(Who::Authenticated {
+            ticket: shape.text("ticket")?.to_string(),
+        }),
+        other => Err(Malformed::UnknownKind(format!("who:{other}"))),
+    }
+}
+
 pub fn shape_of(message: &Message) -> Shape {
     match message {
         Message::Host {
-            account,
-            name,
+            who,
             colour,
             version,
             nonce,
-        } => Shape::of(
-            "host",
-            vec![
-                ("account", text(&account_text(account))),
-                ("name", text(name)),
+        } => {
+            let mut fields = who_of(who);
+            fields.extend([
                 ("colour", text(colour)),
                 ("version", Value::Count(u64::from(*version))),
                 ("nonce", text(nonce)),
-            ],
-        ),
+            ]);
+            Shape::of("host", fields)
+        }
         Message::Join {
             match_id,
-            account,
-            name,
+            who,
             colour,
             version,
-        } => Shape::of(
-            "join",
-            vec![
-                of(match_id),
-                ("account", text(&account_text(account))),
-                ("name", text(name)),
+        } => {
+            let mut fields = vec![of(match_id)];
+            fields.extend(who_of(who));
+            fields.extend([
                 ("colour", text(colour)),
                 ("version", Value::Count(u64::from(*version))),
-            ],
-        ),
+            ]);
+            Shape::of("join", fields)
+        }
         Message::Bar { match_id, seat } => Shape::of(
             "bar",
             vec![of(match_id), ("seat", Value::Count(u64::from(seat.0)))],
@@ -76,13 +104,12 @@ pub fn shape_of(message: &Message) -> Shape {
         Message::RoundOver { match_id } => Shape::of("round-over", vec![of(match_id)]),
         Message::Over { match_id } => Shape::of("over", vec![of(match_id)]),
         Message::Cancel { match_id } => Shape::of("cancel", vec![of(match_id)]),
-        Message::List { account } => {
-            Shape::of("list", vec![("account", text(&account_text(account)))])
+        Message::List { who } => Shape::of("list", who_of(who)),
+        Message::Resume { match_id, who } => {
+            let mut fields = vec![of(match_id)];
+            fields.extend(who_of(who));
+            Shape::of("resume", fields)
         }
-        Message::Resume { match_id, account } => Shape::of(
-            "resume",
-            vec![of(match_id), ("account", text(&account_text(account)))],
-        ),
     }
 }
 
@@ -92,16 +119,14 @@ pub fn from_shape(shape: &Shape) -> Result<Message, Malformed> {
     let seat = || -> Result<Seat, Malformed> { Ok(Seat(shape.count("seat")?)) };
     match shape.kind.as_str() {
         "host" => Ok(Message::Host {
-            account: account_of(shape.text("account")?)?,
-            name: shape.text("name")?.to_string(),
+            who: who_from(shape)?,
             colour: shape.text("colour")?.to_string(),
             version: shape.count("version")?,
             nonce: shape.text("nonce")?.to_string(),
         }),
         "join" => Ok(Message::Join {
             match_id: match_id()?,
-            account: account_of(shape.text("account")?)?,
-            name: shape.text("name")?.to_string(),
+            who: who_from(shape)?,
             colour: shape.text("colour")?.to_string(),
             version: shape.count("version")?,
         }),
@@ -133,11 +158,11 @@ pub fn from_shape(shape: &Shape) -> Result<Message, Malformed> {
             match_id: match_id()?,
         }),
         "list" => Ok(Message::List {
-            account: account_of(shape.text("account")?)?,
+            who: who_from(shape)?,
         }),
         "resume" => Ok(Message::Resume {
             match_id: match_id()?,
-            account: account_of(shape.text("account")?)?,
+            who: who_from(shape)?,
         }),
         other => Err(Malformed::UnknownKind(other.to_string())),
     }

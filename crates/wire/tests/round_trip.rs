@@ -157,17 +157,24 @@ fn every_variant_the_relay_writes_reads_back() {
     }
 }
 
+/// On a `join`, because that is the only place an account crosses the socket now.
+///
+/// A client sends a `Who` and never an account: it says who it is, and the relay decides
+/// what that means. So these two tests moved from the `resume` message to the event the
+/// relay writes, which is where account text is still read back.
 #[test]
-fn an_account_that_is_none_of_the_three_is_refused() {
+fn an_account_that_is_none_of_the_four_is_refused() {
     let shape = Shape::of(
-        "resume",
+        "join",
         vec![
-            ("match", Value::Text("m".to_string())),
+            ("seat", Value::Count(0)),
+            ("name", Value::Text("Ada".to_string())),
+            ("colour", Value::Text("red".to_string())),
             ("account", Value::Text("steam:7".to_string())),
         ],
     );
     assert_eq!(
-        message::from_shape(&shape),
+        event::from_shape(&shape),
         Err(Malformed::UnknownAccount("steam:7".to_string()))
     );
 }
@@ -176,19 +183,36 @@ fn an_account_that_is_none_of_the_three_is_refused() {
 #[test]
 fn a_discord_id_keeps_everything_after_the_first_colon() {
     let shape = Shape::of(
-        "resume",
+        "join",
         vec![
-            ("match", Value::Text("m".to_string())),
+            ("seat", Value::Count(0)),
+            ("name", Value::Text("Ada".to_string())),
+            ("colour", Value::Text("red".to_string())),
             ("account", Value::Text("discord:a:b".to_string())),
         ],
     );
     assert_eq!(
-        message::from_shape(&shape),
-        Ok(Message::Resume {
-            match_id: MatchId("m".to_string()),
-            account: Account::Discord("a:b".to_string())
+        event::from_shape(&shape),
+        Ok(Event::Join {
+            seat: protocol::Seat(0),
+            name: "Ada".to_string(),
+            colour: "red".to_string(),
+            account: Account::Discord("a:b".to_string()),
         })
     );
+}
+
+/// A guest account round-trips, and is not mistaken for a Discord one.
+#[test]
+fn a_guest_account_is_its_own_kind() {
+    let original = Event::Join {
+        seat: protocol::Seat(2),
+        name: "Mary Jane".to_string(),
+        colour: "dark red".to_string(),
+        account: Account::Guest("0123456789abcdef0123456789abcdef".to_string()),
+    };
+    let shape = json::read(&json::write(&event::shape_of(&original))).expect("a shape");
+    assert_eq!(event::from_shape(&shape), Ok(original));
 }
 
 #[test]

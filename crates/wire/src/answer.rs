@@ -59,8 +59,10 @@ pub fn shape_of(answer: &Answer) -> Shape {
 /// One match in a listing: what to join, who is waiting, and how many are there.
 ///
 /// `A listed match shows its host` and `A listed match shows how many players have
-/// joined`, which is the whole of what a listing may say. Not the seats, not the
-/// accounts, not the colours: a lobby is read by people who are not in the match.
+/// joined`, which with whether it is ranked is the whole of what a listing may say. Not
+/// the seats, not the accounts, not the colours: a lobby is read by people who are not in
+/// the match. Ranked is a property of the match rather than of anybody in it, which is
+/// why it may be said out loud.
 fn listed_shape(open: &Listed) -> Shape {
     Shape::of(
         "open",
@@ -68,6 +70,7 @@ fn listed_shape(open: &Listed) -> Shape {
             ("match", text(&open.match_id.0)),
             ("host", text(&open.host)),
             ("players", Value::Count(open.players as u64)),
+            ("ranked", Value::Flag(open.ranked)),
         ],
     )
 }
@@ -95,6 +98,7 @@ fn refusal(why: &Refused) -> Shape {
         Refused::MatchIsFull => named("match-is-full"),
         Refused::NotTheHost => named("not-the-host"),
         Refused::NotInThisMatch => named("not-in-this-match"),
+        Refused::BadTicket => named("bad-ticket"),
         Refused::MatchIsOver => named("match-is-over"),
         Refused::StillActive { seconds } => Shape::of(
             REFUSED,
@@ -131,6 +135,7 @@ fn listed_of(shape: &Shape) -> Result<Listed, Malformed> {
         match_id: MatchId(shape.text("match")?.to_string()),
         host: shape.text("host")?.to_string(),
         players: shape.count("players")?,
+        ranked: shape.flag("ranked")?,
     })
 }
 
@@ -147,6 +152,7 @@ fn why(shape: &Shape) -> Result<Refused, Malformed> {
         "match-is-full" => Ok(Refused::MatchIsFull),
         "not-the-host" => Ok(Refused::NotTheHost),
         "not-in-this-match" => Ok(Refused::NotInThisMatch),
+        "bad-ticket" => Ok(Refused::BadTicket),
         "match-is-over" => Ok(Refused::MatchIsOver),
         "still-active" => Ok(Refused::StillActive {
             seconds: shape.count("seconds")?,

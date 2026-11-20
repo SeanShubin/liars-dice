@@ -11,7 +11,7 @@
 
 use integrity::Secret;
 use protocol::Moment;
-use protocol::{Account, Event};
+use protocol::{Event, Who};
 use relay::memory::{MemoryConnections, MemoryLog};
 use relay::{ConnectionId, Relay};
 use seat::{Ai, Seated};
@@ -71,12 +71,15 @@ fn two_seats_play_a_whole_match_through_the_wire() {
     let guest_socket = ConnectionId("socket-guest".to_string());
 
     let mut host = Seated::hosting(
-        Account::Discord("host".to_string()),
-        "Host",
+        Who::Guest {
+            id: "host-id".to_string(),
+            name: "Host".to_string(),
+        },
         "red",
         "one",
         Box::new(Ai),
-    );
+    )
+    .expect("a guest is always a seat");
     let mut guest_pending: Option<Seated> = None;
 
     // (which socket sent it, the frame)
@@ -104,12 +107,15 @@ fn two_seats_play_a_whole_match_through_the_wire() {
             && let Some(match_id) = host.match_id()
         {
             let guest = Seated::joining(
-                Account::Discord("guest".to_string()),
-                "Guest",
+                Who::Guest {
+                    id: "guest-id".to_string(),
+                    name: "Guest".to_string(),
+                },
                 "blue",
                 match_id.clone(),
                 Box::new(Ai),
-            );
+            )
+            .expect("a guest is always a seat");
             pending.push((guest_socket.clone(), guest.opening()));
             guest_pending = Some(guest);
         }

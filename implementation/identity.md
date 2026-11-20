@@ -84,17 +84,38 @@ disagree, and then something has to decide which wins. So they are one field:
 
 ```rust
 pub enum Who {
-    /// An id a client generated for itself. Not checked, by design.
-    Guest { id: String },
-    /// A ticket from the exchange. Checked, and the account comes out of it.
+    /// An id a client generated for itself, and the name they chose. Neither is checked.
+    Guest { id: String, name: String },
+    /// A ticket from the exchange. Checked, and both the account and the name come out of
+    /// it.
     Authenticated { ticket: String },
 }
 ```
 
-`Message::Host`, `Message::Join` and `Message::Resume` carry a `Who` where they carry an
-`Account` today. The relay turns one into an `Account` and refuses a ticket that does not
-verify or has expired. A client cannot claim a Discord account without a ticket, because
-there is no field in which to claim one.
+**The name travels inside `Who`, which is a correction to what this document first said.**
+It had the name staying beside the `Who` as its own field, and that is the same defect one
+field along: `An authenticated player's name is their Discord display name` and `An
+unauthenticated player chooses their own name`, so a message carrying both a `Who` and a
+name is a message where those two can disagree — and the relay would have had to ignore a
+field it was sent. Inside, there is nowhere to claim a name you were not given.
+
+`Message::Host`, `Message::Join`, `Message::Resume` **and `Message::List`** carry a `Who`
+where they carried an `Account` today. `List` is in that set for the same reason as the
+rest: one way to say who you are, not two. The result is worth stating as an invariant —
+**a client never sends an account.** It says who it is, and the relay decides what that
+means. An `Account` now appears on the wire only in an event, written by the relay.
+
+The relay turns a `Who` into an `Account` in `identify`, the one place a ticket is checked.
+It refuses `BadTicket` for a ticket that does not parse, does not verify, has expired, or
+names an account that does not count as proven — one refusal for all of them, because
+`check_ticket` gives one answer for all of them, and a relay that could tell a forgery from
+an expiry is a relay that can be asked which it was.
+
+**A client reads its own ticket without verifying it.** A `Seated` has to know which account
+the relay will call it, so that it can recognise its own `join` coming back — and it holds
+no secret. So `integrity` exposes `ticket_claims`, which parses and does not verify, named
+so that using it to decide anything reads as the mistake it would be. `Seated` derives its
+account from its `Who` and nothing else, so there is one answer to *who am I*.
 
 ### AI players take guest accounts
 
@@ -106,8 +127,21 @@ which is the only basis on which a bot working says anything about a person work
 
 `An AI player's turn is taken by the client that added it`, which is forced rather than
 chosen: `crates/relay` may not depend on `rules` — a test enforces it — so the relay cannot
-play a bot even if it wanted to. The host's client runs one `Seated` per bot over the same
-socket, each with `seat::Ai` as its driver.
+play a bot even if it wanted to. The host's client runs one `Seated` per bot, each with
+`seat::Ai` as its driver.
+
+**One socket per seat, bot or not, which is the second correction to this document.** It
+said the bots would run *over the same socket* as the host, and that does not work:
+`Connections::attach` evicts a connection from wherever else it was, because a socket is in
+one place — which is the invariant that decides who is sent whose dice, fixed deliberately
+when the place table was reshaped. So the second seat on a socket takes the first's
+connection away. `crates/seat/tests/bots.rs` was written against the one-socket design
+first and failed with `NotTheHost`: the host's socket had been moved to the last bot's
+seat, so the relay did not believe the host was the host.
+
+A socket each costs nothing but sockets, and it makes a bot *exactly* a player at the
+transport layer as well as in the log — which is more of the property this section is for,
+not less.
 
 Two consequences worth having written down. A host who closes their tab takes the bots with
 them, and the match halts at the next bot's turn exactly as it halts for any absent player
@@ -134,12 +168,20 @@ count, so the lobby can say which matches are which before anybody joins one.
 
 ## Boundaries
 
-- **`crates/integrity`** gains `ticket` and `check_ticket`. It already owns the HMAC, the
-  secret and the tagging; a second place doing HMAC would be a second place to get it
-  wrong.
+- **`crates/integrity`** gains `ticket`, `check_ticket` and `ticket_claims`. It already
+  owns the HMAC, the secret and the tagging; a second place doing HMAC would be a second
+  place to get it wrong. The ticket's payload is **length-prefixed**, not NUL-separated the
+  way `name_for` is: a separator has to be a byte that cannot appear in a field, and here
+  there is none — a display name may hold anything, and an expiry's big-endian bytes are
+  mostly zeros for every plausible timestamp. The first version did separate on NUL and
+  split inside the expiry, which the round-trip test caught at once.
 - **`crates/protocol`** gains `Account::Guest(String)` and `Who`. No dependency changes.
 - **`crates/relay`** turns a `Who` into an `Account` and refuses what does not verify. It
-  gains the secret it already holds — nothing new reaches it.
+  gains the secret it already holds — nothing new reaches it. `MatchView` gains `ranked()`
+  and `Listed` gains `ranked`.
+- **`crates/seat`** gains `integrity` as a dependency, for `ticket_claims` alone. Its
+  constructors return `Option<Seated>`, because an `Authenticated` holding something that
+  is not a ticket is a client that could never recognise its own join.
 - **`apps/auth`** is new: the exchange, one Lambda, one function URL, no database. It is
   the only thing that ever holds the Discord client secret, and the only thing that talks
   to Discord.
@@ -247,5 +289,25 @@ page rather than letting somebody discover it.
 thing the pipeline builds and the deploy updates — and the first piece of the system that
 talks to something outside AWS.
 
+**The registered redirect URI does not match this design.** SSM holds
+`/liars-dice/discord/redirect-uri` = `https://seanshubin.com/liars-dice/api/auth/discord/callback`,
+which was copied from the Pairwise Vote pattern and which nothing serves: the distribution
+has one behaviour and it points at S3. This document wants the redirect to come back to the
+multiplayer page itself, so the parameter and the Discord application's registration both
+have to say `https://seanshubin.com/liars-dice/multiplayer/`. Discord compares the
+`redirect_uri` exactly, so all three have to agree, and the registration can only be changed
+by hand in the Discord developer portal.
+
+**The page learns the client id and the redirect URI from the exchange**, in one `GET` at
+startup, rather than from the bundle. That keeps the configuration in one place — SSM, read
+by the one thing that already reads SSM — so the pipeline needs no second placeholder to
+`sed` and the deploy role needs no new permission. It also makes `A missing Discord config
+disables login rather than failing` fall out: the exchange answers *not configured*, and the
+page offers guest only and says why. The cost is one request per page load, including for
+guests, and a failure to reach the exchange reads as *not configured*.
+
 ## Status
-Not started.
+In progress. Built: `Account::Guest`, `Who`, the ticket in `integrity`, the relay's
+`identify`, `ranked`, the guest id in local storage, and AI players as guests. Not built:
+the Discord flow itself — `apps/auth`, the authorize redirect, and the page's sign-in
+button — which is waiting on the redirect URI registered with Discord. See Open Items.

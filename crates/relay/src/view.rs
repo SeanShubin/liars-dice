@@ -137,6 +137,24 @@ impl MatchView {
         self.acknowledged.len()
     }
 
+    /// `A match is ranked when every seat in it is held by an authenticated player`.
+    ///
+    /// Derived, never recorded. Recording it would be a second copy of something the log
+    /// already says, and it would have to be trusted; derived, anybody replaying the log
+    /// reaches the same answer without trusting the relay at all — the same argument the
+    /// commitment scheme rests on.
+    ///
+    /// `Whether a match is ranked is settled when it starts` falls out rather than being
+    /// enforced: `A player cannot join a match that has started` fixes the seats at the
+    /// start, so nothing afterwards can change the answer. Leaving does not, because a
+    /// seat that left is still a seat in the log.
+    ///
+    /// An empty match is not ranked. A match with nobody in it is not a match anybody
+    /// played, and `all` over nothing would say otherwise.
+    pub fn ranked(&self) -> bool {
+        !self.seats.is_empty() && self.seats.iter().all(|seat| seat.account.is_proven())
+    }
+
     /// Whether the match has stopped, however it stopped.
     pub fn over(&self) -> bool {
         self.ending.is_some()
