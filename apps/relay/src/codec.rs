@@ -17,13 +17,20 @@
 use std::collections::HashMap;
 
 use aws_sdk_dynamodb::types::AttributeValue;
-use protocol::Event;
+use protocol::{Event, Moment};
 use wire::{KIND, Malformed, Shape, Value, event};
 
 /// The partition key: which match this event belongs to.
 pub const MATCH: &str = "match";
 /// The sort key: where in the log it sits. The conditional write is on this.
 pub const POSITION: &str = "position";
+/// When the relay recorded this row, in unix nanoseconds.
+///
+/// `The relay records when it received each event`, and deliberately beside the event
+/// rather than inside it: `event_from_item` excludes this attribute along with the key, so
+/// an `Event` never carries it and no fold can see it. A time in an event would reach the
+/// archive's line format, every golden-file test and every client's view of the match.
+pub const RECORDED: &str = "recorded";
 
 /// The key of one event, for a Query or a conditional Put.
 pub fn key(match_id: &str, position: u64) -> HashMap<String, AttributeValue> {
@@ -36,16 +43,31 @@ pub fn key(match_id: &str, position: u64) -> HashMap<String, AttributeValue> {
     ])
 }
 
-/// The whole item: the key, then the event.
-pub fn item(match_id: &str, position: u64, event: &Event) -> HashMap<String, AttributeValue> {
+/// The whole item: the key, when it was recorded, then the event.
+pub fn item(
+    match_id: &str,
+    position: u64,
+    event: &Event,
+    now: Moment,
+) -> HashMap<String, AttributeValue> {
     let mut item = key(match_id, position);
+    item.insert(
+        RECORDED.to_string(),
+        AttributeValue::N(now.to_unix_nanos().to_string()),
+    );
     item.extend(written(&event::shape_of(event)));
     item
 }
 
 /// The event an item describes, or why it is not one.
 pub fn event_from_item(item: &HashMap<String, AttributeValue>) -> Result<Event, Malformed> {
-    event::from_shape(&shape_from_item(item, &[MATCH, POSITION])?)
+    event::from_shape(&shape_from_item(item, &[MATCH, POSITION, RECORDED])?)
+}
+
+/// When an item was recorded, or `None` for one written before times were recorded.
+pub fn recorded_at(item: &HashMap<String, AttributeValue>) -> Option<Moment> {
+    let nanos = item.get(RECORDED)?.as_n().ok()?.parse().ok()?;
+    Some(Moment::from_unix_nanos(nanos))
 }
 
 /// A shape's attributes, without the key.

@@ -54,12 +54,18 @@ its own fact.
 
 ### `No event is recorded in a match that is over`
 
-One guard, in one place: `attempt`, before dispatch, after the match is read. This
-statement is the general form of what started as a cancel-specific rule, and the general
-form earns its keep three times over — it refuses a start, a claim, a join and a leave
-into a dead match with one line; it stops the hour rule from cancelling a match somebody
-already won, which would silently overwrite a real ending; and it makes the expiry sweep
-idempotent by construction instead of by a guard somebody has to remember.
+One guard for messages, in `attempt`, before dispatch. This statement is the general form
+of what started as a cancel-specific rule, and the general form earns its keep — it
+refuses a start, a claim, a join and a leave into a dead match with one line, and it stops
+the hour rule from cancelling a match somebody already won, which would silently overwrite
+a real ending.
+
+The expiry sweep needs its own test of the same thing, because the sweep is not a message:
+nobody sent it and nobody is answered, so the predicate in `attempt` cannot reach it. In
+`open_matches` one `view.over()` does both jobs — it implements `A match that is over is
+not listed`, and being ahead of the hour check it is what makes abandoning idempotent: an
+abandoned match is over, so the next pass stops there. Two statements, one test, and no
+separate guard against writing a second `Abandon`.
 
 The guard cannot be blanket, because two messages must still work on a match that is over:
 `List`, which is about every match, and `Resume`, because somebody reconnecting to a
@@ -204,9 +210,13 @@ already states the convention this fits — refusals *"carry numbers only where 
 something to say beyond the name"* — and `VersionMismatch` is the precedent, so the wire
 needs no new machinery. On the wire: `why: "still-active"`, `seconds: Count`.
 
-`Refused::Cancelled` replaces `Refused::HostHasLeft`, because `A host who leaves a match
-that has not started cancels it` makes a host's departure a cancellation rather than a
-second thing that resembles one.
+`Refused::MatchIsOver` is the only other refusal, and it replaces `HostHasLeft`. One
+refusal for all three endings, because `No event is recorded in a match that is over` is
+one rule: it is what a join into a cancelled match gets and what a claim into a finished
+one gets. A separate `Cancelled` was drafted and dropped while this was built — it would
+have been a second name for *this match is finished*, which is the duplication that
+folding `HostHasLeft` away was meant to remove. How a match ended is in the log, for
+anybody the log is sent to, which is how the Over screen names it.
 
 The client counts the refusal down locally from the number it was given, on the browser's
 own frame clock. That is display, not a decision, and nothing from it reaches the log.
@@ -228,7 +238,11 @@ goes to 8: three new events, two new messages, two refusals changed.
   `Event::MatchOver`, with their archive lines. No dependency changes.
 - **`crates/relay`** owns `Ending`, the inactivity rule, the two thresholds as named
   constants, the completion count, and the expiry inside the lobby pass. It owns the
-  `Recording` shape and the `now` parameter.
+  `Recording` shape and the `now` parameter. `present_seats` was extracted while this was
+  built: the reveal and the completion both ask *who are we waiting for*, and two copies of
+  that question would be two answers to it. `Sitting` likewise — hosting and joining ask
+  the same four things, and the clock pushed both parameter lists past what a lint will
+  tolerate, which was a fair warning.
 - **`crates/wire`** renders and parses the four events and the changed refusals. A client
   that cannot read a frame it is sent is what the version line exists to prevent, so this
   is what makes the version bump necessary.
@@ -236,7 +250,9 @@ goes to 8: three new events, two new messages, two refusals changed.
   `rules`.
 - **`apps/relay`** writes the `recorded` attribute in `DynamoLog::append` and reads it back
   in `read`. Nothing else in the service changes; the role already grants `PutItem`.
-- **`apps/web`** owns the button, the countdown and the three endings on screen.
+- **`apps/web`** owns the button, the countdown and the three endings on screen. The
+  countdown is `remaining`, a free function over `(seconds, when)` and `now`, for the same
+  reason `screen_for` is one: the arithmetic is the part that can be wrong.
 - **The lobby unit** owns what a listing contains and which matches appear in it. This unit
   owns only the expiry that happens during that pass. Both touch `open_matches`, and the
   lobby document is where its final shape is written down.
@@ -337,4 +353,4 @@ not stop its rows being scanned. `relay-service.md`'s open item about a projecti
 this unit intact.
 
 ## Status
-Not started.
+Built.

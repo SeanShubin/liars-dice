@@ -11,7 +11,7 @@
 
 pub use coordinator::{Client, Decides, Intent, Wrong};
 use integrity::Secret;
-use protocol::{Account, Event, PROTOCOL_VERSION, Seat};
+use protocol::{Account, Event, Moment, PROTOCOL_VERSION, Seat};
 use relay::memory::{MemoryConnections, MemoryLog};
 use relay::{ConnectionId, Log, MatchId, Message, Relay};
 pub use rules::Resolution;
@@ -104,12 +104,23 @@ pub struct Table {
     /// same however often it is asked, so without this the match would report its last
     /// outcome forever and never say it was over.
     final_outcome_seen: bool,
+    /// The clock reading every message at this table is served.
+    ///
+    /// Fixed, and public so a test can move it. The harness's whole value is that a match
+    /// replays exactly, so time does not pass unless a test says it does: with this
+    /// unchanged every match is perfectly active, nothing is ever abandoned, and no
+    /// inactivity gate ever opens. A test that wants one open moves this forward.
+    pub now: Moment,
 }
+
+/// The moment a table starts at. Arbitrary, round, and in the past.
+pub const TABLE_EPOCH_NANOS: u64 = 1_700_000_000_000_000_000;
 
 impl Table {
     /// Host a match, seat everyone, and start it.
     pub fn seat(secret: Secret, drivers: Vec<(String, Box<dyn Decides>)>) -> Self {
         let mut relay = Relay::new(MemoryLog::new(), MemoryConnections::new(), secret);
+        let now = Moment::from_unix_nanos(TABLE_EPOCH_NANOS);
         let colours = ["red", "blue", "green", "white", "black"];
         let mut players = Vec::new();
         let mut match_id: Option<String> = None;
@@ -131,6 +142,7 @@ impl Table {
                         // same script a different match id every run.
                         nonce: "table".to_string(),
                     },
+                    now,
                 ),
                 Some(id) => relay.receive(
                     &connection,
@@ -141,6 +153,7 @@ impl Table {
                         colour,
                         version: PROTOCOL_VERSION,
                     },
+                    now,
                 ),
             };
             assert_eq!(outcome.refused, None, "a player could not be seated");
@@ -160,6 +173,7 @@ impl Table {
             players,
             match_id,
             final_outcome_seen: false,
+            now,
         };
         let host = table.players[0].connection.clone();
         let started = table.relay.receive(
@@ -167,6 +181,7 @@ impl Table {
             Message::Start {
                 match_id: table.match_id.clone(),
             },
+            now,
         );
         assert_eq!(started.refused, None, "the match could not be started");
         table.deliver(started.sends);
@@ -208,7 +223,7 @@ impl Table {
                 match_id: self.match_id.clone(),
             },
         };
-        self.relay.receive(&connection, message).sends
+        self.relay.receive(&connection, message, self.now).sends
     }
 
     /// Settle the round if it can be settled, without leaving it behind.
@@ -339,7 +354,7 @@ impl Table {
     }
 
     pub fn log(&self) -> Vec<Event> {
-        self.relay.log().read(&self.match_id)
+        self.relay.log().read(&self.match_id).events
     }
 }
 

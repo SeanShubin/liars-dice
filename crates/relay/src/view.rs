@@ -20,6 +20,22 @@ pub struct SeatInfo {
     pub account: Account,
 }
 
+/// How a match stopped.
+///
+/// One field rather than three booleans, because the three are exclusive and a reader
+/// should not be able to ask a question that has two answers. `A log says whether its
+/// match is complete`, `A log says whether its match was cancelled` and `A log says
+/// whether a cancelled match was cancelled by its host` are all one `match` on this.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Ending {
+    /// Every seat present said so, and the relay recorded that they agreed.
+    Complete,
+    /// The host ended it, by the button or by leaving before the start.
+    Cancelled { by: Seat },
+    /// Nothing was recorded in it for an hour.
+    Abandoned,
+}
+
 /// A match, folded from its log.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct MatchView {
@@ -28,9 +44,14 @@ pub struct MatchView {
     pub started: bool,
     /// Which round the match is in, counting from zero. A reveal ends one.
     pub round: u32,
+    /// How it stopped, or `None` while it is still going.
+    pub ending: Option<Ending>,
     host: Option<Seat>,
     barred: Vec<Seat>,
     acknowledged: Vec<Seat>,
+    /// Seats that have said the match is over. The relay counts these; it does not check
+    /// them, because checking one would mean knowing a rule.
+    finished: Vec<Seat>,
     /// Seats that have left for good. Membership, so it comes from the log; presence does
     /// not, and lives in the connection table.
     left: Vec<Seat>,
@@ -43,9 +64,11 @@ impl MatchView {
             seats: Vec::new(),
             started: false,
             round: 0,
+            ending: None,
             host: None,
             barred: Vec::new(),
             acknowledged: Vec::new(),
+            finished: Vec::new(),
             left: Vec::new(),
         };
         for event in events {
@@ -80,10 +103,23 @@ impl MatchView {
                         view.acknowledged.push(*seat);
                     }
                 }
+                Event::MatchOver { seat } => {
+                    if !view.finished.contains(seat) {
+                        view.finished.push(*seat);
+                    }
+                }
                 Event::Reveal { .. } => {
                     view.round += 1;
                     view.acknowledged.clear();
                 }
+                // The three endings. First one wins, which is not a tie-break anybody has
+                // to think about: `No event is recorded in a match that is over` means a
+                // second one is never appended.
+                Event::Complete => view.ending = view.ending.or(Some(Ending::Complete)),
+                Event::Cancel { seat } => {
+                    view.ending = view.ending.or(Some(Ending::Cancelled { by: *seat }));
+                }
+                Event::Abandon => view.ending = view.ending.or(Some(Ending::Abandoned)),
                 _ => {}
             }
         }
@@ -99,6 +135,16 @@ impl MatchView {
     /// the round.
     pub fn round_over_count(&self) -> usize {
         self.acknowledged.len()
+    }
+
+    /// Whether the match has stopped, however it stopped.
+    pub fn over(&self) -> bool {
+        self.ending.is_some()
+    }
+
+    /// Whether this seat has said the match is over.
+    pub fn has_finished(&self, seat: Seat) -> bool {
+        self.finished.contains(&seat)
     }
 
     /// Whether this seat has left the match for good.

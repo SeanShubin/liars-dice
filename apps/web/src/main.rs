@@ -33,7 +33,7 @@ use render_minimal::{
     table, tap, verdict,
 };
 use rules::{Call, Claim, View};
-use seat::{Listed, MatchId, Seated, Stopped, lobby};
+use seat::{Ending, Listed, MatchId, Seated, Stopped, lobby};
 
 /// How long another seat may go quiet before the screen says so.
 ///
@@ -198,6 +198,23 @@ fn screen_for(connected: bool, stance: Option<Stance>, quiet: bool) -> Screen {
 ///
 /// The dialler stays, because dialling commits nothing and thinking ahead is the point of
 /// having one.
+/// Seconds still to wait, counted down from what the relay last said.
+///
+/// A free function for the same reason `screen_for` is one: the arithmetic is the part
+/// that can be wrong, and it is worth checking at the boundaries rather than reasoning
+/// about. Rounds up, so the number here never contradicts the relay's own — which also
+/// rounds up — and reaches `None` rather than zero, because zero seconds to go is
+/// nothing left to say.
+fn remaining(countdown: Option<(u32, f64)>, now: f64) -> Option<u32> {
+    let (seconds, at) = countdown?;
+    let left = f64::from(seconds) - (now - at);
+    if left <= 0.0 {
+        None
+    } else {
+        Some(left.ceil() as u32)
+    }
+}
+
 fn may_call(stance: Stance) -> bool {
     stance.started && !stance.over && stance.playing && stance.my_turn
 }
@@ -236,6 +253,12 @@ struct Page {
     pending: Claim,
     /// When a frame last arrived, on the frame loop's clock.
     heard: f64,
+    /// How long the host must still wait to cancel, and when the relay said so.
+    ///
+    /// Display only. The relay decides whether a cancel may happen — it is the only thing
+    /// that knows when the match last moved — and this exists so the number counts down
+    /// while somebody watches it instead of sitting still. Nothing here is a decision.
+    countdown: Option<(u32, f64)>,
     log_shown: usize,
 }
 
@@ -260,6 +283,7 @@ impl Page {
                 face: 1,
             },
             heard: 0.0,
+            countdown: None,
             log_shown: 10,
         }
     }
@@ -317,6 +341,9 @@ impl Page {
     fn leave_seat(&mut self, trouble: Option<String>) {
         self.seated = None;
         self.trouble = trouble;
+        // Belongs to the match being left. Carrying it into the next one would show a
+        // stale countdown over a match nothing has been asked about.
+        self.countdown = None;
         self.look_again();
     }
 
@@ -326,6 +353,7 @@ impl Page {
         self.seated = None;
         self.open = Vec::new();
         self.answered = false;
+        self.countdown = None;
         self.trouble = trouble;
     }
 
@@ -373,6 +401,12 @@ impl Page {
                     return;
                 }
             }
+        }
+        // The one refusal that does not end the seat. `Seated::receive` keeps it rather
+        // than returning `Stopped`, because a refused Cancel is an answer to the button and
+        // not the relay declining to have this client in the match.
+        if let Some(seconds) = self.seated.as_mut().and_then(Seated::take_still_active) {
+            self.countdown = Some((seconds, now));
         }
         let Some(seated) = &mut self.seated else {
             return;
@@ -458,18 +492,18 @@ impl Page {
         match screen_for(self.wire.is_some(), stance, quiet) {
             Screen::Entry => self.entry(ui, now),
             Screen::Lobby => self.lobby(ui),
-            Screen::Waiting => self.waiting(ui),
+            Screen::Waiting => self.waiting(ui, now),
             // The three table screens differ in what they draw and not in what they are,
             // so they are one function given the same facts the choice was made from.
             Screen::Playing | Screen::Watching => {
                 if let Some(stance) = stance {
-                    self.at_the_table(ui, stance, None);
+                    self.at_the_table(ui, stance, None, now);
                 }
             }
             Screen::Halted => {
                 let waiting_on = self.waiting_on();
                 if let Some(stance) = stance {
-                    self.at_the_table(ui, stance, waiting_on);
+                    self.at_the_table(ui, stance, waiting_on, now);
                 }
             }
             Screen::Over => self.over(ui),
@@ -659,7 +693,7 @@ impl Page {
     }
 
     /// In a match that has not started.
-    fn waiting(&mut self, ui: &mut egui::Ui) {
+    fn waiting(&mut self, ui: &mut egui::Ui, now: f64) {
         let Some(seated) = &self.seated else {
             return;
         };
@@ -728,6 +762,42 @@ impl Page {
         if let Some(frame) = leave {
             self.say(vec![frame]);
         }
+        self.cancelling(ui, now);
+    }
+
+    /// The host's Cancel button, and why it did not work if it did not.
+    ///
+    /// Always enabled. The relay decides whether a cancel may happen, and a button greyed
+    /// out by this page's own clock would be a second opinion about the time — one that
+    /// could disagree with the only one that counts. So it asks, and shows the answer.
+    /// Pressing it again simply refreshes the number.
+    fn cancelling(&mut self, ui: &mut egui::Ui, now: f64) {
+        let Some(seated) = &self.seated else {
+            return;
+        };
+        if !seated.host() {
+            return;
+        }
+        ui.add_space(6.0);
+        let asked = if tap(ui, "Cancel the match", true) {
+            seated.cancel()
+        } else {
+            None
+        };
+        if let Some(remaining) = remaining(self.countdown, now) {
+            ui.label(
+                egui::RichText::new(format!(
+                    "Not yet. Somebody has moved in the last minute — {remaining}s to go."
+                ))
+                .size(13.0),
+            );
+        }
+        if let Some(frame) = asked {
+            // Cleared on the way out, so the old number is not shown beside a fresh
+            // answer that has not come back yet.
+            self.countdown = None;
+            self.say(vec![frame]);
+        }
     }
 
     /// This seat's own view: the table, the history, and the dialler if it has one.
@@ -737,7 +807,13 @@ impl Page {
     /// whether a line is added saying who has gone quiet. The `View` already returns nothing
     /// this seat may not see, so an eliminated seat watching reveals nothing a playing seat
     /// would not have seen.
-    fn at_the_table(&mut self, ui: &mut egui::Ui, stance: Stance, waiting_on: Option<String>) {
+    fn at_the_table(
+        &mut self,
+        ui: &mut egui::Ui,
+        stance: Stance,
+        waiting_on: Option<String>,
+        now: f64,
+    ) {
         let Some(seated) = &self.seated else {
             return;
         };
@@ -769,7 +845,8 @@ impl Page {
                     "Nothing has arrived for a while. They may be thinking, or they may \
                      have closed their tab — this page cannot tell the two apart. The match \
                      waits for them however long it takes, and goes on the moment they \
-                     claim. Leaving it costs nobody else their match.",
+                     claim. Leaving it costs nobody else their match, and the host can end \
+                     it once a minute has passed with nothing happening.",
                 )
                 .size(12.0),
             );
@@ -846,6 +923,12 @@ impl Page {
         if let Some(frame) = leave {
             self.say(vec![frame]);
         }
+        // Offered whenever the host is at the table, not only when the screen has noticed
+        // the match going quiet. A host whose opponent is thinking for a long time and a
+        // host whose opponent has gone are the same picture from here, and the relay is
+        // the one that can tell them apart — so the button is always there and the answer
+        // says whether it is too soon.
+        self.cancelling(ui, now);
 
         ui.separator();
         self.events(ui);
@@ -858,7 +941,36 @@ impl Page {
         };
         let seating = Self::seating(seated);
 
-        ui.heading("Match over");
+        // What the heading says depends on the relay's word, not on this seat having
+        // worked out that the match was finished. A cancelled match has no winner, and
+        // presenting one would be inventing it.
+        match seated.ending() {
+            Some(Ending::Cancelled { by }) => {
+                ui.heading("Match cancelled");
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} ended it. Nobody won.",
+                        seating.name(by.0 as usize)
+                    ))
+                    .size(15.0),
+                );
+            }
+            Some(Ending::Abandoned) => {
+                ui.heading("Match abandoned");
+                ui.label(
+                    egui::RichText::new(
+                        "Nothing happened in it for an hour, so it was ended. Nobody won.",
+                    )
+                    .size(15.0),
+                );
+            }
+            // , or an ending this seat derived before the relay confirmed it —
+            // which is the ordinary case, since a seat knows the match is over the moment
+            // it folds the last reveal.
+            _ => {
+                ui.heading("Match over");
+            }
+        }
         if let Some(showing) = seated.showing() {
             ui.label(
                 egui::RichText::new(verdict(
@@ -1366,5 +1478,33 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The countdown the host is shown, at the boundaries.
+    ///
+    /// Rounding up matters in both directions. A number that rounded down would say
+    /// *zero* while the relay still refuses, which is a button that looks broken; and it
+    /// has to stop at nothing rather than go negative, because a countdown that has run
+    /// out has nothing to say.
+    #[test]
+    fn the_countdown_rounds_up_and_runs_out() {
+        assert_eq!(remaining(None, 100.0), None, "nothing was refused");
+        // The relay said sixty at frame-clock time ten.
+        let said = Some((60u32, 10.0));
+        assert_eq!(remaining(said, 10.0), Some(60), "as it was answered");
+        assert_eq!(remaining(said, 10.5), Some(60), "59.5 left reads as 60");
+        assert_eq!(remaining(said, 11.0), Some(59));
+        assert_eq!(remaining(said, 68.8), Some(2), "1.2 left reads as 2");
+        assert_eq!(
+            remaining(said, 69.5),
+            Some(1),
+            "half a second is still a second"
+        );
+        assert_eq!(
+            remaining(said, 70.0),
+            None,
+            "and then there is nothing to say"
+        );
+        assert_eq!(remaining(said, 600.0), None, "never negative");
     }
 }

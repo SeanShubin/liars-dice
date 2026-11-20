@@ -33,6 +33,7 @@ pub fn every_event() -> Vec<Event> {
         Event::Left { seat },
         Event::Start,
         Event::RoundOver { seat },
+        Event::MatchOver { seat },
         Event::Join {
             seat,
             name: awkward_name(),
@@ -86,6 +87,11 @@ pub fn every_event() -> Vec<Event> {
         Event::Eliminate { seat },
         Event::NextTurn { seat },
         Event::Winner { seat },
+        // The three endings. Two of them carry nothing, which is the case a rendering
+        // that assumes every event has fields gets wrong.
+        Event::Complete,
+        Event::Cancel { seat },
+        Event::Abandon,
     ]
 }
 
@@ -144,6 +150,12 @@ pub fn every_message() -> Vec<Message> {
         Message::RoundOver {
             match_id: match_id.clone(),
         },
+        Message::Over {
+            match_id: match_id.clone(),
+        },
+        Message::Cancel {
+            match_id: match_id.clone(),
+        },
         Message::Resume {
             match_id,
             account: Account::Local,
@@ -166,7 +178,12 @@ pub fn every_answer() -> Vec<Answer> {
         Answer::Refused(Refused::MatchIsFull),
         Answer::Refused(Refused::NotTheHost),
         Answer::Refused(Refused::NotInThisMatch),
-        Answer::Refused(Refused::HostHasLeft),
+        Answer::Refused(Refused::MatchIsOver),
+        // Zero and not zero. The relay never sends zero — a refusal means at least one
+        // second remains — but zero is the number a rendering is most likely to omit or
+        // read back as absent, so the format is held to it anyway.
+        Answer::Refused(Refused::StillActive { seconds: 0 }),
+        Answer::Refused(Refused::StillActive { seconds: 47 }),
         Answer::Refused(Refused::NotYourSeat),
         Answer::Refused(Refused::MatchIdTaken),
         // Empty and not empty, because an empty list is the case the two renderings

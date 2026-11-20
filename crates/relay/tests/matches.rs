@@ -5,14 +5,30 @@
 //! proved before any infrastructure exists.
 
 use integrity::Secret;
-use protocol::{Account, Event, PROTOCOL_VERSION, Seat};
+use protocol::{Account, Event, Moment, PROTOCOL_VERSION, Seat};
 use relay::memory::{MemoryConnections, MemoryLog};
 use relay::{
-    Connected, ConnectionId, Connections, Log, MatchId, Message, Refused, Relay, Role, Taken,
+    ABANDON_AFTER_SECONDS, CANCEL_AFTER_SECONDS, Connected, ConnectionId, Connections, Ending, Log,
+    MatchId, Message, Recording, Refused, Relay, Role, Taken,
 };
 
 fn secret() -> Secret {
     Secret::from_bytes([3u8; 32])
+}
+
+/// The moment every message in these tests arrives at, unless a test says otherwise.
+///
+/// Arbitrary, round, and in the past. With every message at the same moment no match is
+/// ever inactive, so nothing expires and no inactivity gate opens by accident: a test that
+/// wants time to have passed says so with [`later`].
+fn moment() -> Moment {
+    Moment::from_unix_nanos(1_700_000_000_000_000_000)
+}
+
+/// [`moment`], some seconds on. The clock is an argument, so this is the whole of how
+/// these tests make time pass — nothing sleeps and nothing is flaky.
+fn later(seconds: u64) -> Moment {
+    Moment::from_unix_nanos(1_700_000_000_000_000_000 + seconds * 1_000_000_000)
 }
 
 fn relay() -> Relay<MemoryLog, MemoryConnections> {
@@ -37,6 +53,7 @@ fn host<L: Log, C: Connections>(relay: &mut Relay<L, C>, who: &ConnectionId) -> 
             version: PROTOCOL_VERSION,
             nonce: "alice-hosts".to_string(),
         },
+        moment(),
     );
     assert_eq!(outcome.refused, None);
     outcome.created.expect("a match was created")
@@ -60,6 +77,7 @@ fn join<L: Log, C: Connections>(
                 colour: colour.to_string(),
                 version: PROTOCOL_VERSION,
             },
+            moment(),
         )
         .refused
 }
@@ -76,6 +94,7 @@ fn two_player_match() -> (Relay<MemoryLog, MemoryConnections>, MatchId) {
         Message::Start {
             match_id: match_id.clone(),
         },
+        moment(),
     );
     assert_eq!(started.refused, None);
     (relay, match_id)
@@ -87,7 +106,7 @@ fn a_match_that_has_not_started_is_listed_and_one_that_has_is_not() {
     let alice = connection("alice");
     let match_id = host(&mut relay, &alice);
 
-    let listed = relay.open_matches(None);
+    let listed = relay.open_matches(None, moment());
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].host, "Alice");
     assert_eq!(listed[0].players, 1);
@@ -97,9 +116,10 @@ fn a_match_that_has_not_started_is_listed_and_one_that_has_is_not() {
         Message::Start {
             match_id: match_id.clone(),
         },
+        moment(),
     );
     assert!(
-        relay.open_matches(None).is_empty(),
+        relay.open_matches(None, moment()).is_empty(),
         "a started match cannot be joined, so it is not listed"
     );
 }
@@ -120,6 +140,7 @@ fn asking_what_is_open_lists_the_matches_that_are() {
         Message::List {
             account: discord("9"),
         },
+        moment(),
     );
     assert_eq!(
         empty.listed,
@@ -134,6 +155,7 @@ fn asking_what_is_open_lists_the_matches_that_are() {
             Message::List {
                 account: discord("9"),
             },
+            moment(),
         )
         .listed
         .expect("a listing");
@@ -143,15 +165,16 @@ fn asking_what_is_open_lists_the_matches_that_are() {
     assert_eq!(listed[0].players, 1, "and how many have joined");
 
     // Asking changes nothing: the log is as long as hosting left it.
-    assert_eq!(relay.log().read(&match_id).len(), 3);
+    assert_eq!(relay.log().read(&match_id).events.len(), 3);
 
-    relay.receive(&alice, Message::Start { match_id });
+    relay.receive(&alice, Message::Start { match_id }, moment());
     let after = relay
         .receive(
             &looking,
             Message::List {
                 account: discord("9"),
             },
+            moment(),
         )
         .listed
         .expect("a listing");
@@ -176,6 +199,7 @@ fn a_listing_is_answered_for_whoever_asked() {
             match_id: match_id.clone(),
             seat: Seat(1),
         },
+        moment(),
     );
 
     let to_bob = relay
@@ -184,6 +208,7 @@ fn a_listing_is_answered_for_whoever_asked() {
             Message::List {
                 account: discord("2"),
             },
+            moment(),
         )
         .listed
         .expect("a listing");
@@ -195,6 +220,7 @@ fn a_listing_is_answered_for_whoever_asked() {
             Message::List {
                 account: discord("3"),
             },
+            moment(),
         )
         .listed
         .expect("a listing");
@@ -215,9 +241,10 @@ fn a_barred_player_is_not_shown_the_match_and_cannot_join() {
             match_id: match_id.clone(),
             seat: Seat(1),
         },
+        moment(),
     );
-    assert!(relay.open_matches(Some(&discord("2"))).is_empty());
-    assert_eq!(relay.open_matches(Some(&discord("3"))).len(), 1);
+    assert!(relay.open_matches(Some(&discord("2")), moment()).is_empty());
+    assert_eq!(relay.open_matches(Some(&discord("3")), moment()).len(), 1);
 
     relay.receive(
         &alice,
@@ -225,9 +252,10 @@ fn a_barred_player_is_not_shown_the_match_and_cannot_join() {
             match_id: match_id.clone(),
             seat: Seat(1),
         },
+        moment(),
     );
     assert_eq!(
-        relay.open_matches(Some(&discord("2"))).len(),
+        relay.open_matches(Some(&discord("2")), moment()).len(),
         1,
         "lifting a bar shows the match again"
     );
@@ -248,7 +276,8 @@ fn only_the_host_may_bar_or_start() {
                 Message::Bar {
                     match_id: match_id.clone(),
                     seat: Seat(0)
-                }
+                },
+                moment()
             )
             .refused,
         Some(Refused::NotTheHost)
@@ -259,7 +288,8 @@ fn only_the_host_may_bar_or_start() {
                 &bob,
                 Message::Start {
                     match_id: match_id.clone()
-                }
+                },
+                moment()
             )
             .refused,
         Some(Refused::NotTheHost)
@@ -281,6 +311,7 @@ fn a_join_is_refused_for_a_mismatched_version_a_taken_colour_or_a_started_match(
             colour: "green".to_string(),
             version: PROTOCOL_VERSION - 1,
         },
+        moment(),
     );
     assert_eq!(
         mismatched.refused,
@@ -300,6 +331,7 @@ fn a_join_is_refused_for_a_mismatched_version_a_taken_colour_or_a_started_match(
         Message::Start {
             match_id: match_id.clone(),
         },
+        moment(),
     );
     assert_eq!(
         join(
@@ -329,6 +361,7 @@ fn a_seat_is_sent_its_own_dice_and_no_others_until_the_reveal() {
         Message::Start {
             match_id: match_id.clone(),
         },
+        moment(),
     );
 
     let dealt_to = |who: &ConnectionId| -> Vec<Seat> {
@@ -350,6 +383,7 @@ fn a_seat_is_sent_its_own_dice_and_no_others_until_the_reveal() {
     let deals = relay
         .log()
         .read(&match_id)
+        .events
         .into_iter()
         .filter(|event| matches!(event, Event::Deal { .. }))
         .count();
@@ -369,6 +403,7 @@ fn a_round_is_revealed_only_when_every_seat_has_said_it_is_over() {
         Message::RoundOver {
             match_id: match_id.clone(),
         },
+        moment(),
     );
     assert_eq!(first.refused, None);
     assert!(
@@ -384,6 +419,7 @@ fn a_round_is_revealed_only_when_every_seat_has_said_it_is_over() {
         Message::RoundOver {
             match_id: match_id.clone(),
         },
+        moment(),
     );
     assert!(
         second
@@ -414,6 +450,7 @@ fn an_absent_seat_does_not_hold_up_the_reveal() {
         Message::RoundOver {
             match_id: match_id.clone(),
         },
+        moment(),
     );
     assert!(
         only.sends
@@ -476,6 +513,7 @@ fn a_seat_holding_two_sockets_does_not_hold_the_round_still() {
         Message::Start {
             match_id: match_id.clone(),
         },
+        moment(),
     );
 
     relay.receive(
@@ -483,12 +521,14 @@ fn a_seat_holding_two_sockets_does_not_hold_the_round_still() {
         Message::RoundOver {
             match_id: match_id.clone(),
         },
+        moment(),
     );
     let last = relay.receive(
         &bob,
         Message::RoundOver {
             match_id: match_id.clone(),
         },
+        moment(),
     );
 
     assert!(
@@ -509,6 +549,7 @@ fn a_departed_seat_does_not_hold_up_the_reveal() {
         Message::Leave {
             match_id: match_id.clone(),
         },
+        moment(),
     );
 
     let only = relay.receive(
@@ -516,6 +557,7 @@ fn a_departed_seat_does_not_hold_up_the_reveal() {
         Message::RoundOver {
             match_id: match_id.clone(),
         },
+        moment(),
     );
     assert!(
         only.sends
@@ -552,10 +594,11 @@ fn a_claim_is_recorded_while_another_seat_is_absent() {
             match_id: match_id.clone(),
             event: claim.clone(),
         },
+        moment(),
     );
     assert_eq!(outcome.refused, None, "absence is not the relay's business");
     assert!(
-        relay.log().read(&match_id).contains(&claim),
+        relay.log().read(&match_id).events.contains(&claim),
         "the claim must be recorded, since the relay records every message it receives"
     );
     // And nothing was sent to the seat that is not there.
@@ -585,6 +628,7 @@ fn joining_twice_returns_the_seat_already_held() {
         relay
             .log()
             .read(match_id)
+            .events
             .into_iter()
             .filter(|event| matches!(event, Event::Join { .. }))
             .count()
@@ -638,6 +682,7 @@ fn coming_back_is_not_refused_by_your_own_seat() {
             colour: "red".to_string(),
             version: PROTOCOL_VERSION,
         },
+        moment(),
     );
     assert_eq!(outcome.refused, None, "your own colour is not taken");
 
@@ -647,6 +692,7 @@ fn coming_back_is_not_refused_by_your_own_seat() {
         Message::Start {
             match_id: match_id.clone(),
         },
+        moment(),
     );
     let after = relay.receive(
         &connection("alice-third"),
@@ -657,6 +703,7 @@ fn coming_back_is_not_refused_by_your_own_seat() {
             colour: "red".to_string(),
             version: PROTOCOL_VERSION,
         },
+        moment(),
     );
     assert_eq!(
         after.refused, None,
@@ -664,18 +711,20 @@ fn coming_back_is_not_refused_by_your_own_seat() {
     );
 }
 
-/// `A match whose host has left cannot be joined`, and is not listed either.
+/// `A host who leaves a match that has not started cancels it`.
 ///
 /// Host powers are the seat in the log and nothing transfers them, so a match whose host
 /// has gone is finished without having started. It used to sit in the lobby forever,
-/// offering a start that could never come.
+/// offering a start that could never come; then it had a refusal of its own,
+/// `HostHasLeft`, which was a second name for *this match is finished*. Now it is a
+/// cancellation, recorded as the same event the Cancel button records.
 #[test]
 fn a_match_whose_host_has_left_is_neither_listed_nor_joinable() {
     let mut relay = relay();
     let alice = connection("alice");
     let match_id = host(&mut relay, &alice);
     assert_eq!(
-        relay.open_matches(None).len(),
+        relay.open_matches(None, moment()).len(),
         1,
         "listed while the host is there"
     );
@@ -685,10 +734,11 @@ fn a_match_whose_host_has_left_is_neither_listed_nor_joinable() {
         Message::Leave {
             match_id: match_id.clone(),
         },
+        moment(),
     );
 
     assert!(
-        relay.open_matches(None).is_empty(),
+        relay.open_matches(None, moment()).is_empty(),
         "a match that cannot begin is not on offer"
     );
     assert_eq!(
@@ -700,8 +750,13 @@ fn a_match_whose_host_has_left_is_neither_listed_nor_joinable() {
             "Bob",
             "blue"
         ),
-        Some(Refused::HostHasLeft),
+        Some(Refused::MatchIsOver),
         "and saying why beats letting somebody wait in it"
+    );
+    assert_eq!(
+        relay.view(&match_id).ending,
+        Some(Ending::Cancelled { by: Seat(0) }),
+        "the log says the host cancelled it, not merely that they left"
     );
 }
 
@@ -716,12 +771,14 @@ fn a_seat_that_leaves_is_recorded_as_having_left() {
         Message::Leave {
             match_id: match_id.clone(),
         },
+        moment(),
     );
     assert_eq!(outcome.refused, None);
     assert!(
         relay
             .log()
             .read(&match_id)
+            .events
             .contains(&Event::Left { seat: Seat(1) }),
         "leaving is membership, so it belongs in the log beside the join"
     );
@@ -742,11 +799,13 @@ fn a_seat_that_leaves_is_recorded_as_having_left() {
         Message::Leave {
             match_id: match_id.clone(),
         },
+        moment(),
     );
     assert_eq!(again.refused, Some(Refused::NotInThisMatch));
     let departures = relay
         .log()
         .read(&match_id)
+        .events
         .into_iter()
         .filter(|event| matches!(event, Event::Left { .. }))
         .count();
@@ -759,7 +818,11 @@ fn a_stranger_cannot_leave_a_match() {
     let (mut relay, match_id) = two_player_match();
     assert_eq!(
         relay
-            .receive(&connection("stranger"), Message::Leave { match_id })
+            .receive(
+                &connection("stranger"),
+                Message::Leave { match_id },
+                moment()
+            )
             .refused,
         Some(Refused::NotInThisMatch)
     );
@@ -780,6 +843,7 @@ fn a_returning_player_resumes_their_seat_and_learns_nothing_extra() {
             match_id: match_id.clone(),
             account: discord("2"),
         },
+        moment(),
     );
     assert_eq!(resumed.refused, None);
     assert_eq!(
@@ -818,7 +882,8 @@ fn a_stranger_cannot_resume_a_seat() {
                 Message::Resume {
                     match_id,
                     account: discord("404"),
-                }
+                },
+                moment()
             )
             .refused,
         Some(Refused::NotInThisMatch)
@@ -838,7 +903,8 @@ fn a_seat_cannot_claim_as_another_seat() {
                         seat: Seat(1),
                         odds: 10.0
                     },
-                }
+                },
+                moment()
             )
             .refused,
         Some(Refused::NotYourSeat)
@@ -864,17 +930,21 @@ fn hosting_the_same_request_twice_creates_one_match() {
         nonce: HOST_NONCE.to_string(),
     };
 
-    let first = relay.receive(&ConnectionId("socket-a".to_string()), request.clone());
+    let first = relay.receive(
+        &ConnectionId("socket-a".to_string()),
+        request.clone(),
+        moment(),
+    );
     // A different socket, because the usual reason to resend is that the answer never
     // arrived — which often means the connection it would have arrived on is gone.
-    let again = relay.receive(&ConnectionId("socket-b".to_string()), request);
+    let again = relay.receive(&ConnectionId("socket-b".to_string()), request, moment());
 
     assert_eq!(again.refused, None, "a resend is not an error");
     assert_eq!(first.created, again.created, "two names for one match");
     let match_id = first.created.expect("a match");
     assert_eq!(relay.log().matches(), vec![match_id.clone()], "one match");
     assert_eq!(
-        relay.log().read(&match_id).len(),
+        relay.log().read(&match_id).events.len(),
         3,
         "the resend must not append a second version, join and host"
     );
@@ -905,8 +975,16 @@ fn hosting_twice_on_purpose_creates_two_matches() {
         version: PROTOCOL_VERSION,
         nonce: nonce.to_string(),
     };
-    let one = relay.receive(&ConnectionId("socket-a".to_string()), request("one"));
-    let two = relay.receive(&ConnectionId("socket-a".to_string()), request("two"));
+    let one = relay.receive(
+        &ConnectionId("socket-a".to_string()),
+        request("one"),
+        moment(),
+    );
+    let two = relay.receive(
+        &ConnectionId("socket-a".to_string()),
+        request("two"),
+        moment(),
+    );
     assert_ne!(one.created, two.created);
     assert_eq!(relay.log().matches().len(), 2);
 }
@@ -959,19 +1037,25 @@ impl Meddling {
 }
 
 impl Log for Meddling {
-    fn append(&mut self, match_id: &MatchId, from: u64, events: &[Event]) -> Result<(), Taken> {
+    fn append(
+        &mut self,
+        match_id: &MatchId,
+        from: u64,
+        events: &[Event],
+        now: Moment,
+    ) -> Result<(), Taken> {
         if self.after > 0 {
             self.after -= 1;
         } else if let Some((elsewhere, interfering)) = self.interference.take() {
-            let at = self.inner.read(&elsewhere).len() as u64;
+            let at = self.inner.read(&elsewhere).events.len() as u64;
             self.inner
-                .append(&elsewhere, at, &interfering)
+                .append(&elsewhere, at, &interfering, now)
                 .expect("the interloper lands at the end");
         }
-        self.inner.append(match_id, from, events)
+        self.inner.append(match_id, from, events, now)
     }
 
-    fn read(&self, match_id: &MatchId) -> Vec<Event> {
+    fn read(&self, match_id: &MatchId) -> Recording {
         self.inner.read(match_id)
     }
 
@@ -1026,6 +1110,7 @@ fn a_join_survives_interference_at_every_append() {
                 version: PROTOCOL_VERSION,
                 nonce: HOST_NONCE.to_string(),
             },
+            moment(),
         );
         if after == 0 {
             assert_eq!(
@@ -1049,6 +1134,7 @@ fn a_join_survives_interference_at_every_append() {
                 colour: "green".to_string(),
                 version: PROTOCOL_VERSION,
             },
+            moment(),
         );
         assert_eq!(
             outcome.refused, None,
@@ -1060,6 +1146,7 @@ fn a_join_survives_interference_at_every_append() {
         let seats: Vec<u8> = relay
             .log()
             .read(&created)
+            .events
             .into_iter()
             .filter_map(|event| match event {
                 Event::Join { seat, .. } => Some(seat.0),
@@ -1112,6 +1199,7 @@ fn a_join_decided_against_a_stale_log_is_decided_again() {
             colour: "green".to_string(),
             version: PROTOCOL_VERSION,
         },
+        moment(),
     );
     assert_eq!(outcome.refused, None);
     assert!(
@@ -1122,6 +1210,7 @@ fn a_join_decided_against_a_stale_log_is_decided_again() {
     let seats: Vec<u8> = relay
         .log()
         .read(&match_id)
+        .events
         .into_iter()
         .filter_map(|event| match event {
             Event::Join { seat, .. } => Some(seat.0),
@@ -1166,6 +1255,7 @@ fn a_colour_taken_while_a_join_was_decided_is_refused_on_the_retry() {
             colour: "green".to_string(),
             version: PROTOCOL_VERSION,
         },
+        moment(),
     );
     assert_eq!(outcome.refused, Some(Refused::ColourTaken));
     assert!(
@@ -1177,6 +1267,7 @@ fn a_colour_taken_while_a_join_was_decided_is_refused_on_the_retry() {
     let names: Vec<String> = relay
         .log()
         .read(&match_id)
+        .events
         .into_iter()
         .filter_map(|event| match event {
             Event::Join { name, .. } => Some(name),
@@ -1203,6 +1294,7 @@ fn seat_a_host<L: Log, C: Connections>(relay: &mut Relay<L, C>, expected: &Match
                 version: PROTOCOL_VERSION,
                 nonce: HOST_NONCE.to_string(),
             },
+            moment(),
         )
         .created
         .expect("a match");
@@ -1224,19 +1316,19 @@ fn an_append_at_a_taken_position_is_refused() {
     let match_id = MatchId("m".to_string());
     let event = Event::Start;
     assert!(
-        log.append(&match_id, 0, std::slice::from_ref(&event))
+        log.append(&match_id, 0, std::slice::from_ref(&event), moment())
             .is_ok()
     );
     assert!(
-        log.append(&match_id, 0, std::slice::from_ref(&event))
+        log.append(&match_id, 0, std::slice::from_ref(&event), moment())
             .is_err(),
         "position zero is taken"
     );
     // The loser's recourse is to read again and decide again, not to move along. Here
     // that means appending at the length it now sees.
-    let from = log.read(&match_id).len() as u64;
-    assert!(log.append(&match_id, from, &[event]).is_ok());
-    assert_eq!(log.read(&match_id).len(), 2);
+    let from = log.read(&match_id).events.len() as u64;
+    assert!(log.append(&match_id, from, &[event], moment()).is_ok());
+    assert_eq!(log.read(&match_id).events.len(), 2);
 }
 
 /// `A message either happens entirely or not at all`.
@@ -1250,16 +1342,16 @@ fn a_message_that_cannot_land_whole_lands_not_at_all() {
         Event::Start,
     ];
     // Somebody else got there first, so the whole message is refused.
-    assert!(log.append(&match_id, 0, &[Event::Start]).is_ok());
-    assert!(log.append(&match_id, 0, &three).is_err());
+    assert!(log.append(&match_id, 0, &[Event::Start], moment()).is_ok());
+    assert!(log.append(&match_id, 0, &three, moment()).is_err());
     assert_eq!(
-        log.read(&match_id),
+        log.read(&match_id).events,
         vec![Event::Start],
         "a refused message must leave nothing of itself behind"
     );
     // And from the position the log is actually at, all three land together.
-    assert!(log.append(&match_id, 1, &three).is_ok());
-    assert_eq!(log.read(&match_id).len(), 4);
+    assert!(log.append(&match_id, 1, &three, moment()).is_ok());
+    assert_eq!(log.read(&match_id).events.len(), 4);
 }
 
 /// A relay may be stopped and replaced between any two messages without affecting a match
@@ -1281,12 +1373,14 @@ fn a_replacement_relay_continues_a_round_in_progress() {
             Message::Start {
                 match_id: match_id.clone(),
             },
+            moment(),
         );
         first.receive(
             &alice,
             Message::RoundOver {
                 match_id: match_id.clone(),
             },
+            moment(),
         );
         match_id
     };
@@ -1298,6 +1392,7 @@ fn a_replacement_relay_continues_a_round_in_progress() {
         Message::RoundOver {
             match_id: match_id.clone(),
         },
+        moment(),
     );
     assert!(
         finished
@@ -1307,4 +1402,506 @@ fn a_replacement_relay_continues_a_round_in_progress() {
         "the replacement finished the round the first one started"
     );
     assert_eq!(second.view(&match_id).round, 1);
+}
+
+// ---------------------------------------------------------------------------------------
+// Ending a match: /implementation/ending.md
+// ---------------------------------------------------------------------------------------
+
+/// Ask to cancel, at a given number of seconds after the match's last event.
+fn cancel<L: Log, C: Connections>(
+    relay: &mut Relay<L, C>,
+    who: &ConnectionId,
+    match_id: &MatchId,
+    seconds: u64,
+) -> Option<Refused> {
+    relay
+        .receive(
+            who,
+            Message::Cancel {
+                match_id: match_id.clone(),
+            },
+            later(seconds),
+        )
+        .refused
+}
+
+/// `The host can cancel a match that has not started`, with no minute to wait.
+///
+/// There is no turn to wait on before the start, and a minute of the host watching a
+/// timer for no reason is a minute of them wondering what is broken.
+#[test]
+fn the_host_cancels_a_match_that_has_not_started_at_once() {
+    let mut relay = relay();
+    let alice = connection("alice");
+    let match_id = host(&mut relay, &alice);
+
+    assert_eq!(cancel(&mut relay, &alice, &match_id, 0), None);
+    assert_eq!(
+        relay.view(&match_id).ending,
+        Some(Ending::Cancelled { by: Seat(0) })
+    );
+    assert!(relay.view(&match_id).over());
+}
+
+/// `The host cannot cancel a started match in which an event has been recorded within the
+/// minute`, and `A cancel the host cannot yet make is refused with the time remaining`.
+#[test]
+fn cancelling_a_live_match_is_refused_with_the_time_remaining() {
+    let (mut relay, match_id) = two_player_match();
+    let alice = connection("alice");
+
+    assert_eq!(
+        cancel(&mut relay, &alice, &match_id, 0),
+        Some(Refused::StillActive { seconds: 60 }),
+        "the whole minute remains the instant the match starts"
+    );
+    assert_eq!(
+        cancel(&mut relay, &alice, &match_id, 59),
+        Some(Refused::StillActive { seconds: 1 }),
+        "one second left, not none"
+    );
+    assert_eq!(
+        cancel(&mut relay, &alice, &match_id, 60),
+        None,
+        "and on the minute it goes through"
+    );
+}
+
+/// The remaining seconds round up, so the number a host reads is never a lie.
+///
+/// Told *one*, a host who asks again on the next second must not be told *zero* and left
+/// looking at a button that does nothing.
+#[test]
+fn the_time_remaining_rounds_up() {
+    let (mut relay, match_id) = two_player_match();
+    let alice = connection("alice");
+    // Fifty-nine and a half seconds after the start: half a second remains, which reads
+    // as one.
+    let refused = relay
+        .receive(
+            &alice,
+            Message::Cancel {
+                match_id: match_id.clone(),
+            },
+            Moment::from_unix_nanos(moment().to_unix_nanos() + 59_500_000_000),
+        )
+        .refused;
+    assert_eq!(refused, Some(Refused::StillActive { seconds: 1 }));
+}
+
+/// A refused cancel is not an event, so it does not reset the minute it is waiting for.
+///
+/// Otherwise a host who presses the button twice never gets there, which looks exactly
+/// like the feature not working.
+#[test]
+fn a_refused_cancel_does_not_reset_the_clock() {
+    let (mut relay, match_id) = two_player_match();
+    let alice = connection("alice");
+    let before = relay.log().read(&match_id).events.len();
+
+    assert!(cancel(&mut relay, &alice, &match_id, 30).is_some());
+    assert!(cancel(&mut relay, &alice, &match_id, 59).is_some());
+    assert_eq!(
+        relay.log().read(&match_id).events.len(),
+        before,
+        "two refusals wrote nothing"
+    );
+    assert_eq!(
+        cancel(&mut relay, &alice, &match_id, 60),
+        None,
+        "so the minute is still measured from the start"
+    );
+}
+
+/// `Only the host can cancel a match`.
+#[test]
+fn a_player_who_is_not_the_host_cannot_cancel() {
+    let (mut relay, match_id) = two_player_match();
+    let bob = connection("bob");
+    assert_eq!(
+        cancel(&mut relay, &bob, &match_id, CANCEL_AFTER_SECONDS),
+        Some(Refused::NotTheHost)
+    );
+    let stranger = connection("stranger");
+    assert_eq!(
+        cancel(&mut relay, &stranger, &match_id, CANCEL_AFTER_SECONDS),
+        Some(Refused::NotInThisMatch)
+    );
+    assert!(!relay.view(&match_id).over());
+}
+
+/// `A match in which no event has been recorded for an hour is cancelled`, noticed by
+/// whatever next reads it.
+///
+/// There is no monitor. The lobby pass reads every match already, so the hour is noticed
+/// there and nowhere else.
+#[test]
+fn a_match_untouched_for_an_hour_is_abandoned_by_the_next_listing() {
+    let mut relay = relay();
+    let alice = connection("alice");
+    let match_id = host(&mut relay, &alice);
+
+    assert_eq!(
+        relay
+            .open_matches(None, later(ABANDON_AFTER_SECONDS - 1))
+            .len(),
+        1,
+        "a minute short of the hour it is still on offer"
+    );
+    assert!(!relay.view(&match_id).over());
+
+    assert!(
+        relay
+            .open_matches(None, later(ABANDON_AFTER_SECONDS))
+            .is_empty(),
+        "and on the hour it is gone"
+    );
+    assert_eq!(relay.view(&match_id).ending, Some(Ending::Abandoned));
+}
+
+/// The sweep is idempotent, for the same reason the listing is honest.
+///
+/// `A match that is over is not listed` is tested before the hour is, so an abandoned
+/// match — which is over — is skipped on the next pass. One test, both jobs, and no
+/// separate guard against writing a second `Abandon`.
+#[test]
+fn listing_twice_abandons_a_match_once() {
+    let mut relay = relay();
+    let alice = connection("alice");
+    let match_id = host(&mut relay, &alice);
+    for _ in 0..3 {
+        relay.open_matches(None, later(ABANDON_AFTER_SECONDS));
+    }
+    let abandons = relay
+        .log()
+        .read(&match_id)
+        .events
+        .into_iter()
+        .filter(|event| matches!(event, Event::Abandon))
+        .count();
+    assert_eq!(abandons, 1);
+}
+
+/// A match whose rows carry no recorded time is abandoned on the first listing.
+///
+/// Those are the matches written before this build. `None` means inactive since forever,
+/// not *unknown, so not expired* — which would have left them in the lobby permanently,
+/// and that is the problem the hour rule exists to solve.
+#[test]
+fn a_match_with_no_recorded_time_is_abandoned_at_once() {
+    let mut log = MemoryLog::new();
+    let match_id = MatchId("from-before".to_string());
+    // Written straight to the log, as the old build would have left it.
+    log.append(
+        &match_id,
+        0,
+        &[
+            Event::Version {
+                protocol: PROTOCOL_VERSION,
+            },
+            Event::Join {
+                seat: Seat(0),
+                name: "Mary Jane".to_string(),
+                colour: "red".to_string(),
+                account: discord("1"),
+            },
+            Event::Host { seat: Seat(0) },
+        ],
+        moment(),
+    )
+    .expect("an empty log");
+    // And then its recorded time is taken away, which is what an old row looks like.
+    let mut relay = Relay::new(Untimed { inner: log }, MemoryConnections::new(), secret());
+
+    assert!(relay.open_matches(None, moment()).is_empty());
+    assert_eq!(relay.view(&match_id).ending, Some(Ending::Abandoned));
+}
+
+/// A log that reports no recorded time, however recently it was written.
+struct Untimed {
+    inner: MemoryLog,
+}
+
+impl Log for Untimed {
+    fn append(
+        &mut self,
+        match_id: &MatchId,
+        from: u64,
+        events: &[Event],
+        now: Moment,
+    ) -> Result<(), Taken> {
+        self.inner.append(match_id, from, events, now)
+    }
+
+    fn read(&self, match_id: &MatchId) -> Recording {
+        Recording {
+            events: self.inner.read(match_id).events,
+            last: None,
+        }
+    }
+
+    fn matches(&self) -> Vec<MatchId> {
+        self.inner.matches()
+    }
+}
+
+/// `No event is recorded in a match that is over`, which is one guard and not five.
+///
+/// Every message that would append is refused, and the two that would not are let
+/// through: a listing is about every match, and a resume has to work on a finished one
+/// because somebody reconnecting wants to see how it ended.
+#[test]
+fn nothing_is_recorded_in_a_match_that_is_over() {
+    let (mut relay, match_id) = two_player_match();
+    let alice = connection("alice");
+    let bob = connection("bob");
+    assert_eq!(
+        cancel(&mut relay, &alice, &match_id, CANCEL_AFTER_SECONDS),
+        None
+    );
+    let after = relay.log().read(&match_id).events.len();
+
+    let refused = |relay: &mut Relay<MemoryLog, MemoryConnections>, message: Message| {
+        relay
+            .receive(&alice, message, later(CANCEL_AFTER_SECONDS))
+            .refused
+    };
+    for message in [
+        Message::Start {
+            match_id: match_id.clone(),
+        },
+        Message::Leave {
+            match_id: match_id.clone(),
+        },
+        Message::RoundOver {
+            match_id: match_id.clone(),
+        },
+        Message::Over {
+            match_id: match_id.clone(),
+        },
+        Message::Cancel {
+            match_id: match_id.clone(),
+        },
+        Message::Bar {
+            match_id: match_id.clone(),
+            seat: Seat(1),
+        },
+        Message::Claim {
+            match_id: match_id.clone(),
+            event: Event::Liar {
+                seat: Seat(0),
+                odds: 50.0,
+            },
+        },
+    ] {
+        assert_eq!(
+            refused(&mut relay, message.clone()),
+            Some(Refused::MatchIsOver),
+            "{message:?} was not refused"
+        );
+    }
+    assert_eq!(
+        join(
+            &mut relay,
+            &connection("carol"),
+            &match_id,
+            "3",
+            "Carol",
+            "green"
+        ),
+        Some(Refused::MatchIsOver),
+        "`A cancelled match cannot be joined`"
+    );
+    assert_eq!(
+        relay.log().read(&match_id).events.len(),
+        after,
+        "and none of them left anything behind"
+    );
+
+    // The two that still work.
+    let resumed = relay.receive(
+        &bob,
+        Message::Resume {
+            match_id: match_id.clone(),
+            account: discord("2"),
+        },
+        later(CANCEL_AFTER_SECONDS),
+    );
+    assert_eq!(
+        resumed.refused, None,
+        "a seat may return to see how it ended"
+    );
+    assert!(
+        resumed
+            .sends
+            .iter()
+            .any(|(_, event)| matches!(event, Event::Cancel { .. })),
+        "and is told the ending"
+    );
+}
+
+/// `A match is complete when every seat present in it says so`.
+///
+/// Counted, not judged: the relay writes no resolution event and may not derive one. One
+/// seat's word is recorded and is not enough; the last present seat's word completes it.
+#[test]
+fn a_match_is_complete_once_every_present_seat_says_so() {
+    let (mut relay, match_id) = two_player_match();
+    let alice = connection("alice");
+    let bob = connection("bob");
+
+    let said = relay.receive(
+        &alice,
+        Message::Over {
+            match_id: match_id.clone(),
+        },
+        moment(),
+    );
+    assert_eq!(said.refused, None);
+    assert!(
+        relay.view(&match_id).has_finished(Seat(0)),
+        "her word is recorded"
+    );
+    assert_eq!(
+        relay.view(&match_id).ending,
+        None,
+        "and one seat of two is not every seat"
+    );
+
+    let last = relay.receive(
+        &bob,
+        Message::Over {
+            match_id: match_id.clone(),
+        },
+        moment(),
+    );
+    assert_eq!(last.refused, None);
+    assert_eq!(relay.view(&match_id).ending, Some(Ending::Complete));
+    assert!(
+        last.sends
+            .iter()
+            .any(|(_, event)| matches!(event, Event::Complete)),
+        "and everybody is told"
+    );
+}
+
+/// A seat that is not there does not hold up the completion of a match it has left.
+///
+/// Presence, counted the same way the reveal counts it. A seat that has left is not
+/// waited for; a seat that is merely absent is, and the hour rule collects those.
+#[test]
+fn a_seat_that_has_left_is_not_waited_for_at_the_end() {
+    let (mut relay, match_id) = two_player_match();
+    let alice = connection("alice");
+    let bob = connection("bob");
+
+    relay.receive(
+        &bob,
+        Message::Leave {
+            match_id: match_id.clone(),
+        },
+        moment(),
+    );
+    relay.receive(
+        &alice,
+        Message::Over {
+            match_id: match_id.clone(),
+        },
+        moment(),
+    );
+    assert_eq!(
+        relay.view(&match_id).ending,
+        Some(Ending::Complete),
+        "the only seat still at the table said so, so that is every seat present"
+    );
+}
+
+/// A match that is already over is not abandoned, and the hour does not overwrite a real
+/// ending.
+///
+/// This is why the rule is `No event is recorded in a match that is over` and not one
+/// about cancelled matches: a finished match goes quiet, so a rule that only knew about
+/// cancellation would have the hour rule cancel every match anybody ever won.
+#[test]
+fn an_hour_of_silence_does_not_overwrite_a_finished_match() {
+    let (mut relay, match_id) = two_player_match();
+    let alice = connection("alice");
+    let bob = connection("bob");
+    for who in [&alice, &bob] {
+        relay.receive(
+            who,
+            Message::Over {
+                match_id: match_id.clone(),
+            },
+            moment(),
+        );
+    }
+    assert_eq!(relay.view(&match_id).ending, Some(Ending::Complete));
+
+    relay.open_matches(None, later(ABANDON_AFTER_SECONDS * 10));
+    assert_eq!(
+        relay.view(&match_id).ending,
+        Some(Ending::Complete),
+        "still complete, and not abandoned on top of it"
+    );
+}
+
+/// `A match that is over is not listed`, however it ended.
+#[test]
+fn a_match_that_is_over_is_not_listed() {
+    for ending in ["cancelled", "abandoned"] {
+        let mut relay = relay();
+        let alice = connection("alice");
+        let match_id = host(&mut relay, &alice);
+        assert_eq!(relay.open_matches(None, moment()).len(), 1);
+        match ending {
+            "cancelled" => {
+                assert_eq!(cancel(&mut relay, &alice, &match_id, 0), None);
+            }
+            _ => {
+                relay.open_matches(None, later(ABANDON_AFTER_SECONDS));
+            }
+        }
+        assert!(
+            relay
+                .open_matches(None, later(ABANDON_AFTER_SECONDS))
+                .is_empty(),
+            "a {ending} match is not on offer"
+        );
+    }
+}
+
+/// Inactivity is measured from the last event, so playing keeps a match alive.
+#[test]
+fn an_event_resets_the_hour() {
+    let (mut relay, match_id) = two_player_match();
+    let bob = connection("bob");
+    // Half an hour in, somebody acknowledges the round. That is an event, so the hour
+    // starts again from there.
+    relay.receive(
+        &bob,
+        Message::RoundOver {
+            match_id: match_id.clone(),
+        },
+        later(ABANDON_AFTER_SECONDS / 2),
+    );
+    assert_eq!(
+        relay.open_matches(None, later(ABANDON_AFTER_SECONDS)).len(),
+        0,
+        "a started match is not listed either way"
+    );
+    assert!(
+        !relay.view(&match_id).over(),
+        "but it is not abandoned, because it was touched half an hour ago"
+    );
+    relay.open_matches(
+        None,
+        later(ABANDON_AFTER_SECONDS + ABANDON_AFTER_SECONDS / 2),
+    );
+    assert_eq!(
+        relay.view(&match_id).ending,
+        Some(Ending::Abandoned),
+        "and an hour after that it is"
+    );
 }

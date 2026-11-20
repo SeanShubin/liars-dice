@@ -34,6 +34,7 @@ pub fn shape_of(event: &Event) -> Shape {
         Event::Left { seat: at } => Shape::of("left", vec![("seat", seat(*at))]),
         Event::Start => Shape::of("start", vec![]),
         Event::RoundOver { seat: at } => Shape::of("round-over", vec![("seat", seat(*at))]),
+        Event::MatchOver { seat: at } => Shape::of("match-over", vec![("seat", seat(*at))]),
         Event::Join {
             seat: at,
             name,
@@ -108,6 +109,9 @@ pub fn shape_of(event: &Event) -> Shape {
         Event::Eliminate { seat: at } => Shape::of("eliminate", vec![("seat", seat(*at))]),
         Event::NextTurn { seat: at } => Shape::of("next-turn", vec![("seat", seat(*at))]),
         Event::Winner { seat: at } => Shape::of("winner", vec![("seat", seat(*at))]),
+        Event::Complete => Shape::of("complete", vec![]),
+        Event::Cancel { seat: at } => Shape::of("cancel", vec![("seat", seat(*at))]),
+        Event::Abandon => Shape::of("abandon", vec![]),
     }
 }
 
@@ -126,6 +130,7 @@ pub fn from_shape(shape: &Shape) -> Result<Event, Malformed> {
         "left" => Ok(Event::Left { seat: at()? }),
         "start" => Ok(Event::Start),
         "round-over" => Ok(Event::RoundOver { seat: at()? }),
+        "match-over" => Ok(Event::MatchOver { seat: at()? }),
         "join" => Ok(Event::Join {
             seat: at()?,
             name: shape.text("name")?.to_string(),
@@ -178,6 +183,9 @@ pub fn from_shape(shape: &Shape) -> Result<Event, Malformed> {
         "eliminate" => Ok(Event::Eliminate { seat: at()? }),
         "next-turn" => Ok(Event::NextTurn { seat: at()? }),
         "winner" => Ok(Event::Winner { seat: at()? }),
+        "complete" => Ok(Event::Complete),
+        "cancel" => Ok(Event::Cancel { seat: at()? }),
+        "abandon" => Ok(Event::Abandon),
         other => Err(Malformed::UnknownKind(other.to_string())),
     }
 }

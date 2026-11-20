@@ -147,7 +147,7 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
 ///
 /// A client cannot join a match or load a save whose version differs from its own, so no
 /// match spans two versions and no log holds two. The `version` line says which.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// A seat at a match.
 ///
@@ -223,6 +223,16 @@ pub enum Event {
     /// count of messages, not a judgement about the round, which is how the relay times
     /// the reveal without knowing any game rule.
     RoundOver {
+        seat: Seat,
+    },
+    /// A seat has derived that the match is over and says so.
+    ///
+    /// The same trick as [`Event::RoundOver`], one level up. The relay writes no
+    /// resolution event — every `Winner` and `Eliminate` in a log comes from a desktop
+    /// game — so it cannot tell a finished match from one in progress, and deriving it
+    /// would mean knowing what elimination means. So the clients say, the relay counts,
+    /// and nothing here is a judgement about any rule.
+    MatchOver {
         seat: Seat,
     },
     /// A player left the match.
@@ -327,6 +337,24 @@ pub enum Event {
     Winner {
         seat: Seat,
     },
+    /// Every seat present said the match is over, and the relay recorded that they agreed.
+    ///
+    /// One of the three endings. Carries no winner, because a winner is derivable from the
+    /// log by anybody who knows the rules and the relay is not one of them.
+    Complete,
+    /// The host ended the match. `seat` is the host's.
+    ///
+    /// Either by the Cancel button, once the match had been inactive long enough, or by
+    /// leaving a match that had not started — which is the same fact, so it is the same
+    /// event.
+    Cancel {
+        seat: Seat,
+    },
+    /// Nothing was recorded in the match for an hour.
+    ///
+    /// Written by whichever message next read the match, because there is no monitor. Its
+    /// own fact rather than a `Cancel` with a missing seat: nobody cancelled it.
+    Abandon,
 }
 
 /// An account as text, losslessly: `discord:<snowflake>`, `ai`, or `local`.
@@ -423,6 +451,7 @@ impl fmt::Display for Event {
             Event::Left { seat } => write!(out, "left {seat}"),
             Event::Start => write!(out, "start"),
             Event::RoundOver { seat } => write!(out, "round-over {seat}"),
+            Event::MatchOver { seat } => write!(out, "match-over {seat}"),
             Event::PlayerOrder(order) => write!(out, "player-order {}", seats(order)),
             Event::Variant { name, on } => {
                 write!(
@@ -454,6 +483,9 @@ impl fmt::Display for Event {
             Event::Eliminate { seat } => write!(out, "eliminate {seat}"),
             Event::NextTurn { seat } => write!(out, "next-turn {seat}"),
             Event::Winner { seat } => write!(out, "winner {seat}"),
+            Event::Complete => write!(out, "complete"),
+            Event::Cancel { seat } => write!(out, "cancel {seat}"),
+            Event::Abandon => write!(out, "abandon"),
         }
     }
 }
@@ -476,6 +508,8 @@ mod tests {
             Event::Lift { seat },
             Event::Left { seat },
             Event::RoundOver { seat },
+            Event::MatchOver { seat },
+            Event::Cancel { seat },
             Event::Join {
                 seat,
                 name: named("Alice"),

@@ -10,8 +10,8 @@ use aws_sdk_dynamodb::operation::transact_write_items::TransactWriteItemsError;
 use aws_sdk_dynamodb::types::{
     AttributeValue, Put, ReturnConsumedCapacity, Select, TransactWriteItem,
 };
-use protocol::Event;
-use relay::{Log, MatchId, Taken};
+use protocol::{Event, Moment};
+use relay::{Log, MatchId, Recording, Taken};
 use tokio::runtime::Handle;
 
 use crate::codec::{self, MATCH, POSITION};
@@ -47,12 +47,18 @@ impl DynamoLog {
 }
 
 impl DynamoLog {
-    fn put_one(&self, match_id: &MatchId, at: u64, event: &Event) -> Result<(), Taken> {
+    fn put_one(
+        &self,
+        match_id: &MatchId,
+        at: u64,
+        event: &Event,
+        now: Moment,
+    ) -> Result<(), Taken> {
         let put = self
             .client
             .put_item()
             .table_name(&self.table)
-            .set_item(Some(codec::item(&match_id.0, at, event)))
+            .set_item(Some(codec::item(&match_id.0, at, event, now)))
             .condition_expression("attribute_not_exists(#position)")
             .expression_attribute_names("#position", POSITION);
         match self.handle.block_on(put.send()) {
@@ -74,7 +80,13 @@ impl DynamoLog {
         }
     }
 
-    fn put_all(&self, match_id: &MatchId, from: u64, events: &[Event]) -> Result<(), Taken> {
+    fn put_all(
+        &self,
+        match_id: &MatchId,
+        from: u64,
+        events: &[Event],
+        now: Moment,
+    ) -> Result<(), Taken> {
         // A hundred is DynamoDB's limit on one transaction. No message comes near it —
         // the largest starts a ten player match — so this is an assertion rather than a
         // case to handle, and it fails loudly if a future message is written that does.
@@ -87,7 +99,12 @@ impl DynamoLog {
         for (offset, event) in events.iter().enumerate() {
             let put = Put::builder()
                 .table_name(&self.table)
-                .set_item(Some(codec::item(&match_id.0, from + offset as u64, event)))
+                .set_item(Some(codec::item(
+                    &match_id.0,
+                    from + offset as u64,
+                    event,
+                    now,
+                )))
                 .condition_expression("attribute_not_exists(#position)")
                 .expression_attribute_names("#position", POSITION)
                 .build()
@@ -134,11 +151,17 @@ impl Log for DynamoLog {
     /// event. The transaction is what makes a message all or nothing, which matters for
     /// the ones that are not: hosting writes three events and starting writes a dozen,
     /// and half a message in the log is a match nobody can replay.
-    fn append(&mut self, match_id: &MatchId, from: u64, events: &[Event]) -> Result<(), Taken> {
+    fn append(
+        &mut self,
+        match_id: &MatchId,
+        from: u64,
+        events: &[Event],
+        now: Moment,
+    ) -> Result<(), Taken> {
         match events {
             [] => Ok(()),
-            [event] => self.put_one(match_id, from, event),
-            many => self.put_all(match_id, from, many),
+            [event] => self.put_one(match_id, from, event, now),
+            many => self.put_all(match_id, from, many, now),
         }
     }
 
@@ -146,8 +169,9 @@ impl Log for DynamoLog {
     ///
     /// Events are appended once and never changed, so this does not ask for a strongly
     /// consistent read: there is no version of an item to be behind.
-    fn read(&self, match_id: &MatchId) -> Vec<Event> {
+    fn read(&self, match_id: &MatchId) -> Recording {
         let mut events = Vec::new();
+        let mut last = None;
         let mut pages = self
             .client
             .query()
@@ -174,10 +198,16 @@ impl Log for DynamoLog {
                     panic!("{} holds an item this build cannot read: {why}", match_id.0)
                 });
                 events.push(event);
+                // The pages arrive in position order, so the last one assigned is the
+                // last row's. A row with no `recorded` attribute predates this build and
+                // leaves `last` as it was; a match written entirely before it therefore
+                // reads as `None`, which `relay::idle_seconds` treats as inactive since
+                // forever.
+                last = codec::recorded_at(item).or(last);
             }
         }
         self.meter.read(events.len());
-        events
+        Recording { events, last }
     }
 
     /// Every match the log holds, for the lobby list.

@@ -95,7 +95,14 @@ fn refusal(why: &Refused) -> Shape {
         Refused::MatchIsFull => named("match-is-full"),
         Refused::NotTheHost => named("not-the-host"),
         Refused::NotInThisMatch => named("not-in-this-match"),
-        Refused::HostHasLeft => named("host-has-left"),
+        Refused::MatchIsOver => named("match-is-over"),
+        Refused::StillActive { seconds } => Shape::of(
+            REFUSED,
+            vec![
+                ("why", text("still-active")),
+                ("seconds", Value::Count(u64::from(*seconds))),
+            ],
+        ),
         Refused::NotYourSeat => named("not-your-seat"),
         Refused::MatchIdTaken => named("match-id-taken"),
     }
@@ -140,7 +147,10 @@ fn why(shape: &Shape) -> Result<Refused, Malformed> {
         "match-is-full" => Ok(Refused::MatchIsFull),
         "not-the-host" => Ok(Refused::NotTheHost),
         "not-in-this-match" => Ok(Refused::NotInThisMatch),
-        "host-has-left" => Ok(Refused::HostHasLeft),
+        "match-is-over" => Ok(Refused::MatchIsOver),
+        "still-active" => Ok(Refused::StillActive {
+            seconds: shape.count("seconds")?,
+        }),
         "not-your-seat" => Ok(Refused::NotYourSeat),
         "match-id-taken" => Ok(Refused::MatchIdTaken),
         other => Err(Malformed::UnknownKind(format!("{REFUSED}:{other}"))),

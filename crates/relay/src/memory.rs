@@ -6,13 +6,23 @@
 
 use std::collections::BTreeMap;
 
-use protocol::{Event, Seat};
+use protocol::{Event, Moment, Seat};
 
-use crate::{Connected, ConnectionId, Connections, Log, MatchId, Role, Taken};
+use crate::{Connected, ConnectionId, Connections, Log, MatchId, Recording, Role, Taken};
+
+/// One match's events, and when the last of them was recorded.
+///
+/// One entry rather than two maps, because a map of events and a map of times are two
+/// things that have to agree about which matches exist.
+#[derive(Default)]
+struct Entry {
+    events: Vec<Event>,
+    last: Option<Moment>,
+}
 
 #[derive(Default)]
 pub struct MemoryLog {
-    entries: BTreeMap<MatchId, Vec<Event>>,
+    entries: BTreeMap<MatchId, Entry>,
 }
 
 impl MemoryLog {
@@ -22,9 +32,15 @@ impl MemoryLog {
 }
 
 impl Log for MemoryLog {
-    fn append(&mut self, match_id: &MatchId, from: u64, events: &[Event]) -> Result<(), Taken> {
-        let entries = self.entries.entry(match_id.clone()).or_default();
-        if from != entries.len() as u64 {
+    fn append(
+        &mut self,
+        match_id: &MatchId,
+        from: u64,
+        events: &[Event],
+        now: Moment,
+    ) -> Result<(), Taken> {
+        let entry = self.entries.entry(match_id.clone()).or_default();
+        if from != entry.events.len() as u64 {
             // Something is already at that position, or there is a hole before it. Either
             // way the caller's idea of the end of the log is stale, and so is whatever it
             // decided from reading it.
@@ -32,12 +48,27 @@ impl Log for MemoryLog {
         }
         // Checked before anything is pushed, so this is all or nothing without needing to
         // undo a partial write.
-        entries.extend(events.iter().cloned());
+        entry.events.extend(events.iter().cloned());
+        // The stamp belongs to the rows this call wrote, so an append of nothing leaves
+        // the match as inactive as it was. Otherwise a message that decided to write
+        // nothing would keep a dead match alive.
+        if !events.is_empty() {
+            entry.last = Some(now);
+        }
         Ok(())
     }
 
-    fn read(&self, match_id: &MatchId) -> Vec<Event> {
-        self.entries.get(match_id).cloned().unwrap_or_default()
+    fn read(&self, match_id: &MatchId) -> Recording {
+        match self.entries.get(match_id) {
+            Some(entry) => Recording {
+                events: entry.events.clone(),
+                last: entry.last,
+            },
+            None => Recording {
+                events: Vec::new(),
+                last: None,
+            },
+        }
     }
 
     fn matches(&self) -> Vec<MatchId> {

@@ -25,7 +25,7 @@ use aws_sdk_dynamodb::types::{
     ProjectionType, ScalarAttributeType,
 };
 use integrity::Secret;
-use protocol::{Account, Event, Seat};
+use protocol::{Account, Event, Moment, Seat};
 use relay::{ConnectionId, Connections, Log, MatchId, Message, Outcome, Relay, Role, Taken};
 use relay_service::connections::{BY_CONNECTION, CONNECTION, PLACE, place_of};
 use relay_service::{DynamoLog, GatewayConnections, Meter, codec};
@@ -134,6 +134,15 @@ fn place_table(runtime: &Runtime, client: &Client) -> String {
     table
 }
 
+/// The moment every append in these tests is recorded at.
+///
+/// One fixed reading, so no match here is ever inactive: these tests are about the
+/// conditional write and the item format, and a match expiring underneath one of them
+/// would be a failure about something else entirely.
+fn recorded() -> Moment {
+    Moment::from_unix_nanos(1_700_000_000_000_000_000)
+}
+
 fn claim(seat: u8, quantity: u32) -> Event {
     Event::Claim {
         seat: Seat(seat),
@@ -172,13 +181,18 @@ fn a_log_reads_back_in_position_order() {
         claim(1, 3),
     ];
     for (position, event) in written.iter().enumerate() {
-        log.append(&match_id, position as u64, std::slice::from_ref(event))
-            .expect("an empty position");
+        log.append(
+            &match_id,
+            position as u64,
+            std::slice::from_ref(event),
+            recorded(),
+        )
+        .expect("an empty position");
     }
 
     // Written in order, and read back in it. The sort key is the position, so this holds
     // whatever order the writes happened to land in.
-    assert_eq!(log.read(&match_id), written);
+    assert_eq!(log.read(&match_id).events, written);
 }
 
 #[test]
@@ -189,15 +203,15 @@ fn an_append_at_a_taken_position_is_refused_and_changes_nothing() {
     let mut log = DynamoLog::new(client, &table, runtime.handle().clone(), Meter::new());
     let match_id = MatchId("match-0".into());
 
-    log.append(&match_id, 0, &[claim(0, 2)])
+    log.append(&match_id, 0, &[claim(0, 2)], recorded())
         .expect("position 0");
     assert_eq!(
-        log.append(&match_id, 0, &[claim(1, 9)]),
+        log.append(&match_id, 0, &[claim(1, 9)], recorded()),
         Err(Taken),
         "the condition expression is the whole concurrency design"
     );
     assert_eq!(
-        log.read(&match_id),
+        log.read(&match_id).events,
         vec![claim(0, 2)],
         "a refused append must not overwrite: the loser re-reads, and would re-read a lie"
     );
@@ -226,22 +240,23 @@ fn a_message_of_several_events_lands_whole_or_not_at_all() {
         },
         Event::Host { seat: Seat(0) },
     ];
-    log.append(&match_id, 0, &message).expect("an empty log");
-    assert_eq!(log.read(&match_id), message);
+    log.append(&match_id, 0, &message, recorded())
+        .expect("an empty log");
+    assert_eq!(log.read(&match_id).events, message);
 
     // Somebody else is already at position 0, so the whole message is refused — and in
     // particular its second and third events do not land at 3 and 4.
-    assert_eq!(log.append(&match_id, 0, &message), Err(Taken));
+    assert_eq!(log.append(&match_id, 0, &message, recorded()), Err(Taken));
     assert_eq!(
-        log.read(&match_id),
+        log.read(&match_id).events,
         message,
         "a refused message must leave nothing of itself behind"
     );
 
     // The same message does land at the position the log is actually at.
-    log.append(&match_id, 3, &message)
+    log.append(&match_id, 3, &message, recorded())
         .expect("the end of the log");
-    assert_eq!(log.read(&match_id).len(), 6);
+    assert_eq!(log.read(&match_id).events.len(), 6);
 }
 
 /// A message whose first position is free but whose later ones are not is still refused.
@@ -257,13 +272,18 @@ fn a_message_overlapping_an_existing_event_is_refused() {
     let match_id = MatchId("match-0".into());
 
     // Position 1 is taken and position 0 is not, which a one-item condition would miss.
-    log.append(&match_id, 1, &[claim(0, 9)])
+    log.append(&match_id, 1, &[claim(0, 9)], recorded())
         .expect("position 1");
     assert_eq!(
-        log.append(&match_id, 0, &[claim(1, 1), claim(1, 2), claim(1, 3)]),
+        log.append(
+            &match_id,
+            0,
+            &[claim(1, 1), claim(1, 2), claim(1, 3)],
+            recorded()
+        ),
         Err(Taken)
     );
-    assert_eq!(log.read(&match_id), vec![claim(0, 9)]);
+    assert_eq!(log.read(&match_id).events, vec![claim(0, 9)]);
 }
 
 /// What the conditional write is for. Many threads race for one position; exactly one
@@ -285,7 +305,7 @@ fn concurrent_appends_at_one_position_produce_one_winner() {
                 let match_id = match_id.clone();
                 scope.spawn(move || {
                     let mut log = DynamoLog::new(client, table, handle, Meter::new());
-                    log.append(&match_id, 0, &[claim(seat, 2)])
+                    log.append(&match_id, 0, &[claim(seat, 2)], recorded())
                     // Every racer claims a different quantity of the same face, so the
                     // winner is identifiable from the log alone.
                 })
@@ -303,7 +323,7 @@ fn concurrent_appends_at_one_position_produce_one_winner() {
         "exactly one append may land at a position: {outcomes:?}"
     );
     let log = DynamoLog::new(client, &table, runtime.handle().clone(), Meter::new());
-    assert_eq!(log.read(&match_id).len(), 1);
+    assert_eq!(log.read(&match_id).events.len(), 1);
 }
 
 #[test]
@@ -316,8 +336,13 @@ fn matches_lists_every_match_once_however_many_events_it_holds() {
     for (index, name) in ["match-0", "match-1", "match-2"].iter().enumerate() {
         let match_id = MatchId((*name).to_string());
         for position in 0..=index as u64 {
-            log.append(&match_id, position, &[claim(0, position as u32 + 1)])
-                .expect("an empty position");
+            log.append(
+                &match_id,
+                position,
+                &[claim(0, position as u32 + 1)],
+                recorded(),
+            )
+            .expect("an empty position");
         }
     }
 
@@ -347,8 +372,13 @@ fn the_meter_counts_what_a_lobby_view_cost() {
     for (index, name) in ["match-0", "match-1", "match-2"].iter().enumerate() {
         let match_id = MatchId((*name).to_string());
         for position in 0..=index as u64 {
-            log.append(&match_id, position, &[claim(0, position as u32 + 1)])
-                .expect("an empty position");
+            log.append(
+                &match_id,
+                position,
+                &[claim(0, position as u32 + 1)],
+                recorded(),
+            )
+            .expect("an empty position");
         }
     }
 
@@ -366,6 +396,7 @@ fn the_meter_counts_what_a_lobby_view_cost() {
         "LiarsDice/Relay",
         "$default",
         std::time::Duration::from_millis(7),
+        recorded(),
     );
     assert!(line.contains("\"events_read\":6"), "{line}");
     assert!(line.contains("\"log_reads\":3"), "{line}");
@@ -416,7 +447,11 @@ fn two_hosts_at_once_create_two_matches() {
                 scope.spawn(move || {
                     let mut relay = relay_over(&client, &log_table, &place_table, handle);
                     relay
-                        .receive(&ConnectionId(format!("socket-{at}")), host_message(at))
+                        .receive(
+                            &ConnectionId(format!("socket-{at}")),
+                            host_message(at),
+                            recorded(),
+                        )
                         .created
                 })
             })
@@ -440,7 +475,7 @@ fn two_hosts_at_once_create_two_matches() {
     let matches = log.matches();
     assert_eq!(matches.len(), 2, "two hosts, two matches: {matches:?}");
     for found in &matches {
-        let events = log.read(found);
+        let events = log.read(found).events;
         assert_eq!(
             events.len(),
             3,
@@ -473,7 +508,11 @@ fn the_same_request_sent_twice_at_once_creates_one_match() {
                 scope.spawn(move || {
                     let mut relay = relay_over(&client, &log_table, &place_table, handle);
                     // The same account and the same nonce: one request, sent twice.
-                    relay.receive(&ConnectionId(format!("socket-{at}")), host_message(0))
+                    relay.receive(
+                        &ConnectionId(format!("socket-{at}")),
+                        host_message(0),
+                        recorded(),
+                    )
                 })
             })
             .collect();
@@ -500,7 +539,7 @@ fn the_same_request_sent_twice_at_once_creates_one_match() {
     let match_id = answers[0].created.clone().expect("a match");
     assert_eq!(log.matches(), vec![match_id.clone()]);
     assert_eq!(
-        log.read(&match_id).len(),
+        log.read(&match_id).events.len(),
         3,
         "the resend must not append a second version, join and host"
     );
@@ -664,7 +703,11 @@ fn two_joins_at_once_take_two_seats() {
 
     let mut host = relay_over(&client, &log_table, &place_table, runtime.handle().clone());
     let match_id = host
-        .receive(&ConnectionId("socket-0".into()), host_message(0))
+        .receive(
+            &ConnectionId("socket-0".into()),
+            host_message(0),
+            recorded(),
+        )
         .created
         .expect("a match");
 
@@ -696,6 +739,7 @@ fn two_joins_at_once_take_two_seats() {
                         colour,
                         version,
                     },
+                    recorded(),
                 );
                 assert_eq!(outcome.refused, None, "a joiner was refused");
             });
@@ -710,7 +754,7 @@ fn two_joins_at_once_take_two_seats() {
     );
     let mut seats: Vec<u8> = Vec::new();
     let mut colours: Vec<String> = Vec::new();
-    for event in log.read(&match_id) {
+    for event in log.read(&match_id).events {
         if let Event::Join { seat, colour, .. } = event {
             seats.push(seat.0);
             colours.push(colour);
@@ -790,4 +834,73 @@ fn attaching_a_connection_twice_leaves_it_in_one_match() {
             role: Role::Player
         }]
     );
+}
+
+/// Two listings at the same instant abandon an expired match exactly once.
+///
+/// The sweep is the one write that is not a message: nobody sent it, and two invocations
+/// reading the lobby at the same moment both decide to abandon the same match. The
+/// conditional write on the position is what makes that safe, and this is the test that
+/// says so — in one process the window is zero wide, because `open_matches` reads and
+/// appends inside one uninterrupted call. Two Lambdas have a real one.
+#[test]
+#[ignore = "needs DynamoDB Local; the gate runs it with --include-ignored"]
+fn two_listings_at_once_abandon_an_expired_match_once() {
+    let (runtime, client) = arrange();
+    let log_table = log_table(&runtime, &client);
+    let place_table = place_table(&runtime, &client);
+
+    // Four matches, all of them hosted and then left alone.
+    for at in 0..4 {
+        let mut relay = relay_over(&client, &log_table, &place_table, runtime.handle().clone());
+        let outcome = relay.receive(
+            &ConnectionId(format!("socket-{at}")),
+            host_message(at),
+            recorded(),
+        );
+        assert!(outcome.created.is_some(), "a match was hosted");
+    }
+
+    // An hour later, two clients ask what is open at the same moment.
+    let an_hour_on = Moment::from_unix_nanos(
+        recorded().to_unix_nanos() + relay::ABANDON_AFTER_SECONDS * 1_000_000_000,
+    );
+    let listings: Vec<usize> = std::thread::scope(|scope| {
+        let threads: Vec<_> = (0..2)
+            .map(|_| {
+                let client = client.clone();
+                let log_table = log_table.clone();
+                let place_table = place_table.clone();
+                let handle = runtime.handle().clone();
+                scope.spawn(move || {
+                    let mut relay = relay_over(&client, &log_table, &place_table, handle);
+                    relay.open_matches(None, an_hour_on).len()
+                })
+            })
+            .collect();
+        threads
+            .into_iter()
+            .map(|thread| thread.join().expect("a listing"))
+            .collect()
+    });
+
+    assert_eq!(
+        listings,
+        vec![0, 0],
+        "neither listing offers a match that cannot be joined"
+    );
+
+    let log = DynamoLog::new(client, &log_table, runtime.handle().clone(), Meter::new());
+    for found in log.matches() {
+        let events = log.read(&found).events;
+        let abandons = events
+            .iter()
+            .filter(|event| matches!(event, Event::Abandon))
+            .count();
+        assert_eq!(
+            abandons, 1,
+            "{} was abandoned {abandons} times: {events:?}",
+            found.0
+        );
+    }
 }

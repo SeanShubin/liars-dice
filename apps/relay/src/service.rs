@@ -9,6 +9,7 @@ use std::time::Instant;
 
 use aws_sdk_apigatewaymanagement::primitives::Blob;
 use integrity::Secret;
+use protocol::Moment;
 use relay::{ConnectionId, Connections, MatchId, Outcome, Relay};
 use wire::answer::Answer;
 use wire::{json, message};
@@ -65,6 +66,24 @@ impl std::fmt::Display for NotConfigured {
 
 impl std::error::Error for NotConfigured {}
 
+/// The system clock, read as a [`Moment`].
+///
+/// The only observation of time anywhere in the deployed relay, and it lives in the
+/// composition root on purpose: `crates/relay` holds no clock, so `The relay holds no game
+/// state between messages except what the log holds` stays literally true, and a test
+/// decides what time it is by passing a number.
+///
+/// Before the epoch is not a time this program can be at, so a clock that claims it reads
+/// as the epoch. Nothing is derived from it that reaches a log — see `The time the relay
+/// received an event decides nothing but whether a match is inactive`.
+fn now() -> Moment {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_nanos() as u64)
+        .unwrap_or_default();
+    Moment::from_unix_nanos(nanos)
+}
+
 /// Where the log is, where the places are, and where the secret is.
 pub const LOG_TABLE: &str = "LOG_TABLE";
 pub const PLACE_TABLE: &str = "PLACE_TABLE";
@@ -104,8 +123,16 @@ impl Service {
     }
 
     /// Serve one invocation. Returns the status code the gateway wants.
+    ///
+    /// The clock is read once, here, and nothing downstream reads another. That reading
+    /// serves the message — where it decides whether a match is inactive, and stamps
+    /// every row the message writes — and the metric line's own timestamp. One
+    /// observation of the outside world per invocation, made by the composition root,
+    /// is what lets every layer below this be handed a value instead of reaching for
+    /// one.
     pub async fn serve(&self, incoming: Incoming) -> Result<u16, lambda_runtime::Error> {
         let began = Instant::now();
+        let now = now();
         let meter = Meter::new();
         let route = match incoming.route {
             // Nothing but accept. A connection belongs to no match until a message says
@@ -118,11 +145,11 @@ impl Service {
                 "$disconnect"
             }
             Route::Default => {
-                self.message(&incoming, meter.clone()).await?;
+                self.message(&incoming, meter.clone(), now).await?;
                 "$default"
             }
         };
-        println!("{}", meter.emf(NAMESPACE, route, began.elapsed()));
+        println!("{}", meter.emf(NAMESPACE, route, began.elapsed(), now));
         Ok(200)
     }
 
@@ -130,6 +157,7 @@ impl Service {
         &self,
         incoming: &Incoming,
         meter: Meter,
+        now: Moment,
     ) -> Result<(), lambda_runtime::Error> {
         let Some(body) = &incoming.body else {
             // `$default` with no body is not a message. Nothing to record and nothing to
@@ -156,7 +184,7 @@ impl Service {
         // that is not a runtime worker. See the async seam in the document.
         let outcome = tokio::task::spawn_blocking(move || {
             let mut relay = Relay::new(log, connections, secret);
-            relay.receive(&from, message)
+            relay.receive(&from, message, now)
         })
         .await?;
 

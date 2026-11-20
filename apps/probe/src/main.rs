@@ -104,11 +104,17 @@ struct Played {
     complaints: Vec<coordinator::Wrong>,
     stopped: Option<Stopped>,
     over: bool,
+    /// How the relay said the match ended, which is not the same as this seat working it
+    /// out. The relay writes no resolution event and may not derive one, so this frame
+    /// coming back is the proof that it learned the match was finished — and so that it
+    /// will stop offering the match in the lobby.
+    ending: Option<seat::Ending>,
 }
 
 impl Played {
     fn ok(&self) -> bool {
         self.over
+            && self.ending == Some(seat::Ending::Complete)
             && self.complaints.is_empty()
             && !matches!(self.stopped, Some(Stopped::Refused(_)))
     }
@@ -116,10 +122,11 @@ impl Played {
 
 fn report(who: &str, played: &Played) {
     println!(
-        "[{who}] {} events, {} complaints, over: {}",
+        "[{who}] {} events, {} complaints, over: {}, ending: {:?}",
         played.events,
         played.complaints.len(),
-        played.over
+        played.over,
+        played.ending
     );
     for complaint in &played.complaints {
         println!("[{who}] COMPLAINT {complaint:?}");
@@ -144,7 +151,12 @@ fn play(who: &str, url: &str, mut seated: Seated, tell: Option<mpsc::Sender<Matc
     let mut started = false;
     let mut stopped = None;
 
-    while !seated.over() && began.elapsed() < PATIENCE {
+    // Until the relay says the match ended, not until this seat works it out. A seat
+    // derives the ending and says so in the same breath, and stopping at its own verdict
+    // would close the socket before the `complete` frame came back — which is the one
+    // thing that proves the relay heard. The frames this seat sends go out inside the loop
+    // body, so there is nothing buffered to lose either way.
+    while seated.ending().is_none() && began.elapsed() < PATIENCE {
         let frame = match socket.read() {
             Ok(Frame::Text(text)) => text.to_string(),
             // A close or a ping is the transport's business, not a seat's.
@@ -198,5 +210,6 @@ fn play(who: &str, url: &str, mut seated: Seated, tell: Option<mpsc::Sender<Matc
         complaints: seated.complaints().to_vec(),
         stopped,
         over: seated.over(),
+        ending: seated.ending(),
     }
 }

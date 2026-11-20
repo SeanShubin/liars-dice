@@ -23,7 +23,7 @@ use wire::{Malformed, json, message};
 /// with the service that routes it — the relay reaches it as frames and nothing else — but
 /// it has to be able to name the match it is joining and to say why it was turned away,
 /// and both of those are the protocol rather than the service.
-pub use relay::{Listed, MatchId, Refused};
+pub use relay::{Ending, Listed, MatchId, Refused};
 
 /// Why a seat stopped.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -129,6 +129,19 @@ pub struct Seated {
     /// The last round's outcome, for drawing. See [`Showing`].
     showing: Option<Showing>,
     over: bool,
+    /// How the match ended, once the relay has said so.
+    ///
+    /// Separate from `over`, which this seat sets for itself the moment the rules say the
+    /// match is finished. This is the relay's word, and it is the only thing that can say
+    /// the match was *cancelled* rather than won — a screen that read `over` alone would
+    /// present a winner that was never recorded.
+    ending: Option<Ending>,
+    /// Seconds left before the host may cancel, from the last refusal that said so.
+    ///
+    /// Not a `Stopped`. A refusal of the Cancel button is an answer to the button, not a
+    /// failure of the seat, and treating it as one would drop the host out of the match
+    /// they were trying to end.
+    still_active: Option<u32>,
 }
 
 impl Seated {
@@ -184,6 +197,8 @@ impl Seated {
             awaiting: false,
             showing: None,
             over: false,
+            ending: None,
+            still_active: None,
         }
     }
 
@@ -219,6 +234,32 @@ impl Seated {
 
     pub fn over(&self) -> bool {
         self.over
+    }
+
+    /// How the match ended, if the relay has said.
+    pub fn ending(&self) -> Option<Ending> {
+        self.ending
+    }
+
+    /// How many seconds remain before the host may cancel, if a refusal said so.
+    ///
+    /// Taken rather than read, because it answers one press of one button. A caller that
+    /// wants to keep counting down holds the number itself and runs its own clock over it,
+    /// which is display and decides nothing.
+    pub fn take_still_active(&mut self) -> Option<u32> {
+        self.still_active.take()
+    }
+
+    /// Ask the relay to end the match.
+    ///
+    /// `Only the host can cancel a match`, and the relay says so if this is not the host.
+    /// A started match that has been active within the minute is refused with the time
+    /// remaining, which arrives at [`Seated::take_still_active`].
+    pub fn cancel(&self) -> Option<String> {
+        let match_id = self.match_id.clone()?;
+        Some(json::write(&message::shape_of(&Message::Cancel {
+            match_id,
+        })))
     }
 
     /// What arrived that should not have.
@@ -360,6 +401,12 @@ impl Seated {
         let shape = json::read(frame).map_err(unreadable)?;
         let answer = wire::answer::from_shape(&shape).map_err(unreadable)?;
         match answer {
+            // The one refusal that is not a stop: it answers the Cancel button, and the
+            // seat carries on exactly as it was.
+            Answer::Refused(Refused::StillActive { seconds }) => {
+                self.still_active = Some(seconds);
+                Ok(Vec::new())
+            }
             Answer::Refused(why) => Err(Stopped::Refused(why)),
             Answer::Created(match_id) => {
                 self.match_id = Some(match_id);
@@ -375,6 +422,15 @@ impl Seated {
     }
 
     fn apply(&mut self, event: Event) -> Result<Vec<String>, Stopped> {
+        // The three endings, ahead of everything else and ahead of the `over` guard in
+        // `feed`. They are the relay's word that the match has stopped, and they have to
+        // land even on a seat that already worked the result out for itself — otherwise
+        // the screen cannot tell *the host ended this* from *somebody won*.
+        if let Some(ending) = ending_of(&event) {
+            self.over = true;
+            self.ending = Some(ending);
+            return Ok(Vec::new());
+        }
         // A join naming this account is how a seat finds out which seat it is.
         if self.mine.is_none()
             && let Event::Join { seat, account, .. } = &event
@@ -451,6 +507,13 @@ impl Seated {
             });
             if resolution.over {
                 self.over = true;
+                // And the relay is told. It writes no resolution event and may not derive
+                // one, so `A match is complete when every seat present in it says so` is
+                // the only way it can learn that this match is finished — and until it
+                // does, the match sits in the lobby in everybody's way.
+                if let Some(match_id) = self.match_id.clone() {
+                    frames.push(json::write(&message::shape_of(&Message::Over { match_id })));
+                }
                 return Ok(frames);
             }
             client.begin_next_round(resolution.opens);
@@ -516,6 +579,19 @@ impl Seated {
             Intent::RoundOver => Message::RoundOver { match_id },
         };
         Ok(json::write(&message::shape_of(&message)))
+    }
+}
+
+/// Which ending an event is, if it is one.
+///
+/// The three terminal events and nothing else. A `match` rather than a chain of `if`s so
+/// that `Ending` gaining a case is a compile error here.
+fn ending_of(event: &Event) -> Option<Ending> {
+    match event {
+        Event::Complete => Some(Ending::Complete),
+        Event::Cancel { seat } => Some(Ending::Cancelled { by: *seat }),
+        Event::Abandon => Some(Ending::Abandoned),
+        _ => None,
     }
 }
 

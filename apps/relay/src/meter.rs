@@ -92,7 +92,13 @@ impl Meter {
     ///
     /// `total` is the whole call, measured by the caller; `fold_millis` is what is left
     /// of it after the scan, which is the part a projection would remove.
-    pub fn emf(&self, namespace: &str, route: &str, total: std::time::Duration) -> String {
+    pub fn emf(
+        &self,
+        namespace: &str,
+        route: &str,
+        total: std::time::Duration,
+        now: protocol::Moment,
+    ) -> String {
         let total_millis = total.as_millis() as u64;
         let scan_millis = self.scan_millis();
         let fold_millis = total_millis.saturating_sub(scan_millis);
@@ -114,7 +120,7 @@ impl Meter {
                 "\"fold_millis\":{fold},\"log_reads\":{reads},\"events_read\":{events},",
                 "\"read_capacity\":{capacity}}}"
             ),
-            timestamp = unix_millis(),
+            timestamp = now.to_unix_nanos() / 1_000_000,
             namespace = namespace,
             metrics = metrics,
             route = route,
@@ -126,15 +132,4 @@ impl Meter {
             capacity = self.capacity_units(),
         )
     }
-}
-
-/// Wall clock, for the log line's own timestamp only.
-///
-/// The one clock in this crate, and it reaches nothing but a metric. Nothing in the log
-/// is derived from it, which is what keeps a replay agreeing with the match it replays.
-fn unix_millis() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.as_millis() as u64)
-        .unwrap_or_default()
 }
