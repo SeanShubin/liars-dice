@@ -6,7 +6,9 @@
 ## Hosting
 - A player can host a match
 - The host can start the match
-- A hosted match has no AI players
+- The host can add an AI player to a hosted match
+- An AI player does not authenticate
+- An AI player's turn is taken by the client that added it
 - Two matches never share an identity
 - A repeated request to host creates no second match
 
@@ -22,6 +24,13 @@
 - A player chooses the colour of their dice when they join
 - A colour another player has chosen cannot be chosen
 - Two players never share a seat
+- A player holds one seat in a match
+- A match whose host has left cannot be joined
+
+## Ranked
+- A match is ranked when every seat in it is held by an authenticated player
+- Whether a match is ranked is settled when it starts
+- Whether a match is ranked is derived from the accounts in its log
 
 ## Claims
 - A client does not send an illegal claim

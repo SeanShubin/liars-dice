@@ -166,7 +166,7 @@ pub fn every_answer() -> Vec<Answer> {
         Answer::Refused(Refused::MatchIsFull),
         Answer::Refused(Refused::NotTheHost),
         Answer::Refused(Refused::NotInThisMatch),
-        Answer::Refused(Refused::SeatIsAbsent),
+        Answer::Refused(Refused::HostHasLeft),
         Answer::Refused(Refused::NotYourSeat),
         Answer::Refused(Refused::MatchIdTaken),
         // Empty and not empty, because an empty list is the case the two renderings

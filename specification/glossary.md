@@ -47,4 +47,6 @@
 | Affected | Having lost a die, gained a die, gained a shield token, or spent a shield token as a result of a resolution. |
 | Complete | Said of a match in which only one player remains. |
 | Administrator | A configured Discord account with access to the data browser. |
+| Guest | A player who has not authenticated, identified by an id their own client generated. |
+| Ranked | Said of a match in which every seat is held by an authenticated player. |
 | Save | A named record of a match, carrying the time it was made, that the host can load to continue the match. |

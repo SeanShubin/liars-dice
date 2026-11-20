@@ -267,7 +267,12 @@ pub enum Refused {
     MatchIsFull,
     NotTheHost,
     NotInThisMatch,
-    SeatIsAbsent,
+    /// The host left before starting, so the match can never begin.
+    ///
+    /// Host powers are the seat in the log and nothing transfers them, so a match whose
+    /// host has gone is finished without having started. Refusing to join is kinder than
+    /// letting somebody sit in one waiting for a start that cannot come.
+    HostHasLeft,
     NotYourSeat,
     /// The derived match id names a match this account did not host.
     ///
@@ -343,6 +348,11 @@ impl<L: Log, C: Connections> Relay<L, C> {
         for match_id in self.log.matches() {
             let view = MatchView::fold(&self.log.read(&match_id));
             if view.started || view.host().is_none() {
+                continue;
+            }
+            // `A match whose host has left cannot be joined`, so listing it would be
+            // offering something that is not on offer.
+            if view.host().is_some_and(|seat| view.has_left(seat)) {
                 continue;
             }
             if let Some(account) = asking
@@ -536,6 +546,20 @@ impl<L: Log, C: Connections> Relay<L, C> {
                 match_version: view.version,
                 yours: version,
             }));
+        }
+        // Already here, so this is a return and not a join. `A player holds one seat in
+        // a match`: answering with the seat they have is the same answer `host` gives to a
+        // repeated host, and it is what `Resume` does, so a client that reloaded is caught
+        // up rather than seated twice.
+        //
+        // Before the guards below on purpose. Every one of them is about taking a seat:
+        // a match that has started is one they are already in, the match being full counts
+        // them, and the colour that is taken is their own.
+        if view.seat_of_account(&account).is_some() {
+            return self.resume(from, match_id, account);
+        }
+        if view.host().is_some_and(|seat| view.has_left(seat)) {
+            return Ok(Outcome::refused(Refused::HostHasLeft));
         }
         if view.started {
             return Ok(Outcome::refused(Refused::AlreadyStarted));

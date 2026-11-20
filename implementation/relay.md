@@ -258,6 +258,27 @@ goodbye.
 The version check happens at join: the match's `version` line against the joining client's
 own, refusing on mismatch rather than letting two builds disagree later about the rules.
 
+**A repeated join is a return, and returning is resuming.** `A player holds one seat in a
+match`, so a join from an account that already holds one answers with the seat it has —
+the same answer `host` gives to a repeated host, and literally the same code path as
+`Resume`, so a client that reloaded is caught up rather than seated twice. The check comes
+before the guards on starting, fullness and colour, because every one of those is about
+*taking* a seat: a match that has started is one they are already in, a full match is full
+counting them, and the colour that is taken is their own. Before this, a return was
+refused `ColourTaken` by its own colour, or — with a different colour — given a second
+seat, which is worse than untidy: `attach` moves the socket to the newest seat, so the
+first is left holding none and halts the match at its turn for good, in the log where no
+reconnection can clear it.
+
+**A match whose host has left is finished without having started.** Host powers are the
+seat in the log and nothing transfers them, so there is no start to wait for. It is
+refused with `HostHasLeft` rather than left to be discovered, and it is not listed either,
+because listing it would be offering something that is not on offer.
+
+`Refused::SeatIsAbsent` is gone in the same breath. Nothing had produced it since absence
+stopped being enforced, and a refusal a client must understand and can never receive is a
+case that will be wrong whenever somebody finally reads it.
+
 ### Absence and reconnection
 
 A connection drops; the row leaves the connection table; the seat is absent. The relay then

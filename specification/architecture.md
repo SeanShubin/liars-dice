@@ -57,11 +57,16 @@
 - Every page is reachable from seanshubin.com
 
 ## Authentication
-- A human player authenticates with Discord
+- A human player can authenticate with Discord
 - Any Discord account can authenticate
-- A human player is identified by their Discord account id
+- A player can play without authenticating
+- An authenticated player is identified by their Discord account id
+- An unauthenticated player is identified by an id their client generates
+- An unauthenticated player's id is not derived from anything they typed
+- A log says whether an account is authenticated
 - An event refers to a player by their seat
-- A join event records the Discord account id of the human player in a seat
-- A human player's name is their Discord display name
+- A join event records the account of the player in a seat
+- An authenticated player's name is their Discord display name
+- An unauthenticated player chooses their own name
 - A player's name is recorded once, when they join a match
 - No value derives from a player's name

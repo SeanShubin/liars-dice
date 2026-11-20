@@ -566,6 +566,145 @@ fn a_claim_is_recorded_while_another_seat_is_absent() {
     );
 }
 
+/// `A player holds one seat in a match`.
+///
+/// The defect this was written for came out of the first match two people played in a
+/// browser: one account appears on seat 1 and on seat 2, because somebody reloaded and
+/// joined again. The second seat is worse than untidy — `attach` moves a socket to the
+/// newest seat, so the first is left with no connection and halts the match at its turn
+/// for good, and it is in the log where no reconnection can clear it.
+#[test]
+fn joining_twice_returns_the_seat_already_held() {
+    let mut relay = relay();
+    let alice = connection("alice");
+    let bob = connection("bob");
+    let match_id = host(&mut relay, &alice);
+
+    assert_eq!(join(&mut relay, &bob, &match_id, "2", "Bob", "blue"), None);
+    fn seats<L: Log, C: Connections>(relay: &Relay<L, C>, match_id: &MatchId) -> usize {
+        relay
+            .log()
+            .read(match_id)
+            .into_iter()
+            .filter(|event| matches!(event, Event::Join { .. }))
+            .count()
+    }
+    assert_eq!(seats(&relay, &match_id), 2);
+
+    // The same account again, from a new socket and under a different name and colour.
+    let again = connection("bob-again");
+    assert_eq!(
+        join(&mut relay, &again, &match_id, "2", "Robert", "green"),
+        None,
+        "coming back is not an error"
+    );
+    assert_eq!(seats(&relay, &match_id), 2, "and it is not a second seat");
+
+    let view = relay.view(&match_id);
+    assert_eq!(view.seat_of_account(&discord("2")), Some(Seat(1)));
+    assert_eq!(
+        view.name_of(Seat(1)),
+        "Bob",
+        "the name of the first join is the one that stands"
+    );
+
+    // The returning socket holds the seat, and the one it replaced does not.
+    let held = relay.connections().of(&match_id);
+    let on_seat_one: Vec<_> = held.iter().filter(|row| row.seat == Seat(1)).collect();
+    assert_eq!(on_seat_one.len(), 1, "one socket on the seat: {held:?}");
+    assert_eq!(on_seat_one[0].connection, again);
+}
+
+/// A colour is not taken from yourself, and a full match is not full of you.
+///
+/// The guards that refuse a join are all about taking a seat, so none of them may fire
+/// for somebody who already has one. Before the fix a return was refused `ColourTaken`
+/// by its own colour, which is the kind of answer that sends somebody looking for a bug
+/// in the colour picker.
+#[test]
+fn coming_back_is_not_refused_by_your_own_seat() {
+    let mut relay = relay();
+    let alice = connection("alice");
+    let match_id = host(&mut relay, &alice);
+
+    // Alice hosted, so she is on seat zero in red. Joining her own match again with the
+    // same colour is a return.
+    let outcome = relay.receive(
+        &connection("alice-again"),
+        Message::Join {
+            match_id: match_id.clone(),
+            account: discord("1"),
+            name: "Alice".to_string(),
+            colour: "red".to_string(),
+            version: PROTOCOL_VERSION,
+        },
+    );
+    assert_eq!(outcome.refused, None, "your own colour is not taken");
+
+    // And after the start, when joining is closed but returning is not.
+    relay.receive(
+        &alice,
+        Message::Start {
+            match_id: match_id.clone(),
+        },
+    );
+    let after = relay.receive(
+        &connection("alice-third"),
+        Message::Join {
+            match_id: match_id.clone(),
+            account: discord("1"),
+            name: "Alice".to_string(),
+            colour: "red".to_string(),
+            version: PROTOCOL_VERSION,
+        },
+    );
+    assert_eq!(
+        after.refused, None,
+        "a match that has started is one she is already in"
+    );
+}
+
+/// `A match whose host has left cannot be joined`, and is not listed either.
+///
+/// Host powers are the seat in the log and nothing transfers them, so a match whose host
+/// has gone is finished without having started. It used to sit in the lobby forever,
+/// offering a start that could never come.
+#[test]
+fn a_match_whose_host_has_left_is_neither_listed_nor_joinable() {
+    let mut relay = relay();
+    let alice = connection("alice");
+    let match_id = host(&mut relay, &alice);
+    assert_eq!(
+        relay.open_matches(None).len(),
+        1,
+        "listed while the host is there"
+    );
+
+    relay.receive(
+        &alice,
+        Message::Leave {
+            match_id: match_id.clone(),
+        },
+    );
+
+    assert!(
+        relay.open_matches(None).is_empty(),
+        "a match that cannot begin is not on offer"
+    );
+    assert_eq!(
+        join(
+            &mut relay,
+            &connection("bob"),
+            &match_id,
+            "2",
+            "Bob",
+            "blue"
+        ),
+        Some(Refused::HostHasLeft),
+        "and saying why beats letting somebody wait in it"
+    );
+}
+
 /// `A player can leave a match`, and the record says so.
 #[test]
 fn a_seat_that_leaves_is_recorded_as_having_left() {
