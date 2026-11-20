@@ -25,7 +25,7 @@ pub struct Service {
     pub dynamodb: aws_sdk_dynamodb::Client,
     pub config: aws_config::SdkConfig,
     pub log_table: String,
-    pub connection_table: String,
+    pub place_table: String,
     secret: Secret,
 }
 
@@ -65,9 +65,9 @@ impl std::fmt::Display for NotConfigured {
 
 impl std::error::Error for NotConfigured {}
 
-/// Where the log is, where the connections are, and where the secret is.
+/// Where the log is, where the places are, and where the secret is.
 pub const LOG_TABLE: &str = "LOG_TABLE";
-pub const CONNECTION_TABLE: &str = "CONNECTION_TABLE";
+pub const PLACE_TABLE: &str = "PLACE_TABLE";
 pub const SECRET_PARAMETER: &str = "SECRET_PARAMETER";
 
 impl Service {
@@ -80,7 +80,7 @@ impl Service {
         Ok(Self {
             dynamodb: aws_sdk_dynamodb::Client::new(&config),
             log_table: variable(LOG_TABLE)?,
-            connection_table: variable(CONNECTION_TABLE)?,
+            place_table: variable(PLACE_TABLE)?,
             config,
             secret,
         })
@@ -98,7 +98,7 @@ impl Service {
     fn connections(&self) -> GatewayConnections {
         GatewayConnections::new(
             self.dynamodb.clone(),
-            &self.connection_table,
+            &self.place_table,
             tokio::runtime::Handle::current(),
         )
     }

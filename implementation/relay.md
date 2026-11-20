@@ -156,6 +156,31 @@ on one account takes the seat and the first goes quiet, which is the right trade
 identity exists there is nothing to distinguish a second tab from somebody else claiming
 the account.
 
+**And evicting both ways is not enough, because an eviction is a procedure.** The
+idempotency test found the missing eviction; the *concurrent* idempotency test, run against
+real storage, found that having it does not help. Two invocations of `attach` for one seat
+both read the match's rows, both found nobody to evict, and both wrote. This is the
+check-then-act defect the log was already fixed for, in the one store the fix never reached
+— the log carries a version in its key and this table carried nothing.
+
+What it costs is not what the comment on `attach` claimed. Both sockets carry the same
+account, because the only calls that name one seat are a host resend, a join resend and a
+`Resume`; with an account worth trusting, nobody reads another player's dice. The harm is a
+deadlock. `waiting_on` counted rows while `round_over_count` counts distinct seats, so one
+extra row lifts the threshold above a number it can never reach: the round never reveals
+and the match is held still for good by a tab that is gone.
+
+The remedy is the one the seat race already taught — put the thing being claimed in the
+key. `relay-service.md` has the table. Nothing in this crate changes, because `Connections`
+already says `attach`, `of` and `detach`, and which of those was safe under concurrency was
+never visible here.
+
+**The reveal waits on seats, not on sockets.** Counting rows and counting seats were the
+same number only while a seat held one row, and `round_over_count` was always the second
+kind. Counting the seats that are present and have not left is what the paragraph above
+always meant, and it is what stays right once a place can be a watcher, because a watcher
+is sent the round and never acknowledges it.
+
 ### Dealing, and the one line the relay walks
 
 The relay deals: `Every round deals the dice limit to every seat`, which needs no rules
@@ -376,7 +401,12 @@ In `apps/local`, against in-memory implementations of both traits:
 - Hosting with a different nonce creates a second match, so idempotency is not an
   accidental ban on hosting twice.
 - Taking a seat evicts whoever was on it, asserted on both implementations of
-  `Connections`, because this is the invariant that decides who is sent whose dice.
+  `Connections`, because this is the invariant that decides who is sent whose dice. The
+  concurrent half of it needs real storage and lives in `apps/relay`.
+- A reveal that waits on one seat holding two sockets, which is the deadlock, asserted here
+  by putting two connections on one seat directly. That is unreachable through `attach`
+  once the key holds the seat, and asserting it keeps the reveal's own arithmetic honest
+  rather than resting on the key to hide an error in it.
 - Interference at *every* append a message makes, not one chosen point. Behind the `Log`
   seam the places a schedule can diverge are finite and countable, so the test enumerates
   them instead of sampling one. Each interference test also asserts that the interference

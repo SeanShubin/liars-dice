@@ -142,6 +142,13 @@ pub trait Connections {
     /// the right trade: the alternative is a seat whose deal is sent to two sockets, and
     /// before identity exists there is nothing to distinguish a second tab from somebody
     /// else claiming the account.
+    ///
+    /// **An implementation may not do this by reading and then writing.** Two calls for
+    /// one seat would both read, both find nobody to evict, and both write — which is what
+    /// the deployed one did, and no caller could have noticed. The eviction has to fall out
+    /// of how a place is stored rather than out of steps taken in order, so the seat
+    /// belongs in the key. `relay-service.md` has the table; `memory` gets it for free by
+    /// being one thread.
     fn attach(&mut self, match_id: &MatchId, connection: ConnectionId, seat: Seat, role: Role);
 
     fn detach(&mut self, connection: &ConnectionId);
@@ -673,12 +680,21 @@ impl<L: Log, C: Connections> Relay<L, C> {
         // and `A match halts at the turn of an absent player` says the halt comes at
         // their turn and not before it.
         let view = work.view();
-        let waiting_on = self
-            .connections
-            .of(&match_id)
-            .into_iter()
-            .filter(|row| !view.has_left(row.seat))
-            .count();
+        // Seats, not rows. `round_over_count` counts distinct seats and can never exceed
+        // the number of them, so counting rows against it compares two different kinds of
+        // thing: one duplicated row would lift this above a number it cannot reach and the
+        // round would never reveal. One row per seat makes the two counts equal today —
+        // see `relay-service.md`, the place table — and naming the right one keeps this
+        // correct when a place can be a watcher, since a watcher is sent the round and
+        // never acknowledges it.
+        let mut present: Vec<Seat> = Vec::new();
+        for row in self.connections.of(&match_id) {
+            let Role::Player = row.role;
+            if !view.has_left(row.seat) && !present.contains(&row.seat) {
+                present.push(row.seat);
+            }
+        }
+        let waiting_on = present.len();
         if view.round_over_count() < waiting_on {
             self.commit(&work)?;
             return Ok(Outcome {

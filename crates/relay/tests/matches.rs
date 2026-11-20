@@ -7,7 +7,9 @@
 use integrity::Secret;
 use protocol::{Account, Event, PROTOCOL_VERSION, Seat};
 use relay::memory::{MemoryConnections, MemoryLog};
-use relay::{ConnectionId, Connections, Log, MatchId, Message, Refused, Relay, Taken};
+use relay::{
+    Connected, ConnectionId, Connections, Log, MatchId, Message, Refused, Relay, Role, Taken,
+};
 
 fn secret() -> Secret {
     Secret::from_bytes([3u8; 32])
@@ -321,6 +323,82 @@ fn an_absent_seat_does_not_hold_up_the_reveal() {
             .iter()
             .any(|(_, event)| matches!(event, Event::Reveal { .. })),
         "the one seat present must be enough to reveal the round"
+    );
+    assert_eq!(relay.view(&match_id).round, 1);
+}
+
+/// A connection table that reports one seat twice.
+///
+/// `attach` cannot produce this once the seat is in the key — see `relay-service.md`, the
+/// place table — and it could, through a race, for as long as the eviction was a procedure
+/// rather than a key. The reveal's own arithmetic should not depend on which of those is
+/// true, so it is asserted against the state rather than against the storage that used to
+/// allow it.
+struct SeatHeldTwice(MemoryConnections);
+
+impl Connections for SeatHeldTwice {
+    fn of(&self, match_id: &MatchId) -> Vec<Connected> {
+        let mut rows = self.0.of(match_id);
+        if let Some(first) = rows.first().cloned() {
+            rows.push(Connected {
+                connection: ConnectionId(format!("{}-ghost", first.connection.0)),
+                ..first
+            });
+        }
+        rows
+    }
+
+    fn attach(&mut self, match_id: &MatchId, connection: ConnectionId, seat: Seat, role: Role) {
+        self.0.attach(match_id, connection, seat, role);
+    }
+
+    fn detach(&mut self, connection: &ConnectionId) {
+        self.0.detach(connection);
+    }
+}
+
+/// A seat holding two sockets does not hold the round still.
+///
+/// The deadlock, and the reason it was one: `round_over_count` counts distinct seats and
+/// can never exceed the number of them, so counting *rows* against it put the threshold
+/// one above a number it could not reach. The round never revealed, and no timeout or
+/// reconnection could free it — a tab that was gone held the whole match still for good.
+#[test]
+fn a_seat_holding_two_sockets_does_not_hold_the_round_still() {
+    let mut relay = Relay::new(
+        MemoryLog::new(),
+        SeatHeldTwice(MemoryConnections::new()),
+        secret(),
+    );
+    let alice = connection("alice");
+    let bob = connection("bob");
+    let match_id = host(&mut relay, &alice);
+    assert_eq!(join(&mut relay, &bob, &match_id, "2", "Bob", "blue"), None);
+    relay.receive(
+        &alice,
+        Message::Start {
+            match_id: match_id.clone(),
+        },
+    );
+
+    relay.receive(
+        &alice,
+        Message::RoundOver {
+            match_id: match_id.clone(),
+        },
+    );
+    let last = relay.receive(
+        &bob,
+        Message::RoundOver {
+            match_id: match_id.clone(),
+        },
+    );
+
+    assert!(
+        last.sends
+            .iter()
+            .any(|(_, event)| matches!(event, Event::Reveal { .. })),
+        "both seats acknowledged, so the round must reveal however many sockets they hold"
     );
     assert_eq!(relay.view(&match_id).round, 1);
 }

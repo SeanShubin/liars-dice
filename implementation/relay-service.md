@@ -112,16 +112,34 @@ Keys are written in alphabetical order, which is `serde_json`'s default and wort
 a frame's bytes are then a function of what the shape holds, not of the order somebody
 declared the fields in.
 
-### The connection table
+### The place table
 
-Keyed by match id with the connection id as the sort key, each row carrying the seat and
-the role. `of` is a Query on the match. `attach` is a PutItem. `detach` arrives from
-`$disconnect` knowing only the connection id, so it needs the reverse direction: a global
-secondary index on connection id, which is one extra write per attach and one Query per
-disconnect.
+**A row is a place at a match, and a place is held by one connection.** Keyed by match id
+with the place as the sort key: `seat#0`, `seat#1`, and later `watcher#<connection>` when
+spectators exist. Each row carries the connection id and nothing else. `of` is a Query on
+the match. `attach` is a PutItem, which replaces whoever held the place without reading
+anything first. `detach` arrives from `$disconnect` knowing only the connection id, so it
+needs the reverse direction: a global secondary index on connection id, which is one extra
+write per attach and one Query per disconnect.
 
-Role lives in the row rather than being derived, which is what `deployment.md` means by
-admitting spectators later changing no table.
+The key is the whole of the invariant, and that is the point of the shape. `A seat is held
+by one connection` used to be a *procedure* — read the match's rows, delete anybody else on
+this seat, write mine — and a procedure has to stay correct while another invocation runs
+the same three steps in between. It did not: two sockets claiming one seat both read, both
+found nobody to evict, and both wrote. With the seat in the key there is nowhere for the
+second row to go. The bad state is unrepresentable rather than rejected, so nothing has to
+be retried and `attach` has no failure to report.
+
+**Every delete is conditional on the row still naming this connection.** Under the old key
+a row belonged to one socket for its whole life, so deleting by key was safe. Under this
+one a row is a place that changes hands, and two deletes would otherwise do damage: a
+socket moving between places would delete the row somebody else had just taken, and a late
+`$disconnect` would evict the reconnection that had already replaced it. A condition of
+`connection = :mine` turns both into the no-ops they should be.
+
+The role is no longer stored. It is the prefix of the place — `seat#` is a player and
+`watcher#` is not — so one thing says which, rather than a column that can disagree with
+the key beside it.
 
 ### Posting what the relay returned
 
@@ -189,7 +207,7 @@ and it can be torn down and rebuilt without touching the site.
 | Resource | Note |
 |----------|------|
 | The log table | Point-in-time recovery on, and deletion protection. The one thing that cannot be rebuilt from something else. |
-| The connection table | Neither, deliberately: every row in it can be rebuilt by clients reconnecting. |
+| The place table | Neither, deliberately: every row in it can be rebuilt by clients reconnecting. |
 | The WebSocket API | Three routes, all to one integration. `RouteSelectionExpression` is set and unused, because the relay decides what a frame is and a route that read the body would be a second place deciding. |
 | The function | `provided.al2023`, a Rust binary named `bootstrap`, ten second timeout. |
 | Its log group | Declared rather than left to the first invocation, so retention applies from the first line instead of after thirty days of unbounded logs. |
@@ -280,6 +298,21 @@ table with a discriminated key. They have different lifetimes — a log is perma
 connection row is transport plumbing — and different access patterns, and the only thing
 a single table saves is a line of infrastructure.
 
+**The place table is replaced rather than migrated, and renamed to say so.** A key schema
+cannot be altered in place, so CloudFormation replaces the table — and it cannot build a
+replacement while the old one still holds an explicit name. The name changes with the
+contents: it held connections and now holds places, so `liars-dice-connections` becomes
+`liars-dice-places`, the replacement has a free name, and the old table is deleted in the
+same update. Nothing is lost by that. The table holds only live sockets, every row is
+rebuilt by a client reconnecting, and the Backups table below already records that it is
+protected by neither point-in-time recovery nor on-demand backup for exactly that reason.
+The log, which is the durable half, is not touched.
+
+The alternative was to drop `TableName` and let CloudFormation generate one, which would
+make this and every future key change deploy without thought. It is rejected for now
+because a generated name cannot be typed into a console or a CLI from memory, and these
+tables are looked at by hand often enough for that to cost more than it saves.
+
 **Secret from SSM, read per cold start and cached.** It is the HMAC key the per-round seed
 derives from, so it must be the same for every invocation serving a match and must never
 reach a client. SSM with the Lambda's role granted read on exactly that parameter. A
@@ -321,6 +354,12 @@ one would silently make every commitment unverifiable.
   winner and one `Taken`; a read returns the events in position order.
 - `GatewayConnections` against the same: attach, query by match, detach by connection id
   through the index.
+- Two sockets claiming one seat at once leave one row, which is the test that found the
+  defect this table was reshaped for. It asserts the row count rather than the answers,
+  because both answers were already correct while both rows existed.
+- A delete naming a place somebody else now holds changes nothing, driven directly rather
+  than through a race: a socket moving between places, and a `$disconnect` arriving after
+  the reconnection that replaced it.
 - The tests that need DynamoDB Local are `#[ignore]`, and the gate runs
   `cargo test --workspace -- --include-ignored` with the container up. So `cargo test` on
   a machine with no Docker is still green and still honest: the runner prints what it

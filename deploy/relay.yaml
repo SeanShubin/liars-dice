@@ -71,20 +71,33 @@ Resources:
 
   # Transport plumbing, not state: every row here can be rebuilt by clients
   # reconnecting, which is why it has neither recovery nor deletion protection.
-  ConnectionTable:
+  # A row is a place at a match, held by one connection. The seat is in the key,
+  # so a seat held by two sockets cannot be written down - which is the whole of
+  # the invariant that decides who is sent whose dice. It used to be a procedure
+  # in `attach`, and two invocations claiming one seat ran it in between each
+  # other: both read, both found nobody to evict, and both wrote.
+  #
+  # Replaced rather than altered, because a key schema cannot change in place,
+  # and renamed because the name could not be reused while the old table held it.
+  # Nothing is lost: every row is rebuilt by a client reconnecting.
+  PlaceTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: liars-dice-connections
+      TableName: liars-dice-places
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - AttributeName: match
+          AttributeType: S
+        - AttributeName: place
           AttributeType: S
         - AttributeName: connection
           AttributeType: S
       KeySchema:
         - AttributeName: match
           KeyType: HASH
-        - AttributeName: connection
+        # seat#0 today, watcher#<connection> when spectators arrive, so the key
+        # says what a row is and no column beside it can disagree.
+        - AttributeName: place
           KeyType: RANGE
       GlobalSecondaryIndexes:
         # $disconnect knows the connection id and nothing else, so it needs the
@@ -129,7 +142,7 @@ Resources:
       Environment:
         Variables:
           LOG_TABLE: !Ref LogTable
-          CONNECTION_TABLE: !Ref ConnectionTable
+          PLACE_TABLE: !Ref PlaceTable
           SECRET_PARAMETER: !Ref SecretParameter
 
   # Declared rather than left to the first invocation, so the retention above is
@@ -171,8 +184,8 @@ Resources:
                   - dynamodb:DeleteItem
                   - dynamodb:Query
                 Resource:
-                  - !GetAtt ConnectionTable.Arn
-                  - !Sub "${ConnectionTable.Arn}/index/by-connection"
+                  - !GetAtt PlaceTable.Arn
+                  - !Sub "${PlaceTable.Arn}/index/by-connection"
         - PolicyName: TheSecret
           PolicyDocument:
             Version: '2012-10-17'
@@ -256,7 +269,7 @@ Outputs:
     Value: !Sub "wss://${Api}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
   LogTableName:
     Value: !Ref LogTable
-  ConnectionTableName:
-    Value: !Ref ConnectionTable
+  PlaceTableName:
+    Value: !Ref PlaceTable
   FunctionName:
     Value: !Ref Function

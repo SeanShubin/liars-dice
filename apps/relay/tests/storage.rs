@@ -27,7 +27,7 @@ use aws_sdk_dynamodb::types::{
 use integrity::Secret;
 use protocol::{Account, Event, Seat};
 use relay::{ConnectionId, Connections, Log, MatchId, Message, Outcome, Relay, Role, Taken};
-use relay_service::connections::{BY_CONNECTION, CONNECTION};
+use relay_service::connections::{BY_CONNECTION, CONNECTION, PLACE, place_of};
 use relay_service::{DynamoLog, GatewayConnections, Meter, codec};
 use tokio::runtime::Runtime;
 
@@ -99,12 +99,13 @@ fn log_table(runtime: &Runtime, client: &Client) -> String {
     table
 }
 
-/// The connection table, and the reverse index `$disconnect` needs.
+/// The place table, and the reverse index `$disconnect` needs.
 ///
-/// `KEYS_ONLY` because the index is asked one question — which match is this socket in —
-/// and the base table's keys are the answer.
-fn connection_table(runtime: &Runtime, client: &Client) -> String {
-    let table = unique("connections");
+/// Keyed by match and by the place at it, which is what makes a seat held by two sockets
+/// unwritable rather than merely wrong. `KEYS_ONLY` because the index is asked one
+/// question — where is this socket — and the base table's keys are the answer.
+fn place_table(runtime: &Runtime, client: &Client) -> String {
+    let table = unique("places");
     let index = GlobalSecondaryIndex::builder()
         .index_name(BY_CONNECTION)
         .key_schema(key(CONNECTION, KeyType::Hash))
@@ -122,8 +123,9 @@ fn connection_table(runtime: &Runtime, client: &Client) -> String {
                 .table_name(&table)
                 .billing_mode(BillingMode::PayPerRequest)
                 .key_schema(key(codec::MATCH, KeyType::Hash))
-                .key_schema(key(CONNECTION, KeyType::Range))
+                .key_schema(key(PLACE, KeyType::Range))
                 .attribute_definitions(attribute(codec::MATCH, ScalarAttributeType::S))
+                .attribute_definitions(attribute(PLACE, ScalarAttributeType::S))
                 .attribute_definitions(attribute(CONNECTION, ScalarAttributeType::S))
                 .global_secondary_indexes(index)
                 .send(),
@@ -374,11 +376,11 @@ fn the_meter_counts_what_a_lobby_view_cost() {
 fn relay_over(
     client: &Client,
     log_table: &str,
-    connection_table: &str,
+    place_table: &str,
     handle: tokio::runtime::Handle,
 ) -> Relay<DynamoLog, GatewayConnections> {
     let log = DynamoLog::new(client.clone(), log_table, handle.clone(), Meter::new());
-    let connections = GatewayConnections::new(client.clone(), connection_table, handle);
+    let connections = GatewayConnections::new(client.clone(), place_table, handle);
     Relay::new(log, connections, Secret::from_bytes([5; 32]))
 }
 
@@ -402,17 +404,17 @@ fn host_message(at: usize) -> Message {
 fn two_hosts_at_once_create_two_matches() {
     let (runtime, client) = arrange();
     let log_table = log_table(&runtime, &client);
-    let connection_table = connection_table(&runtime, &client);
+    let place_table = place_table(&runtime, &client);
 
     let created: Vec<Option<MatchId>> = std::thread::scope(|scope| {
         let threads: Vec<_> = (0..2)
             .map(|at| {
                 let client = client.clone();
                 let log_table = log_table.clone();
-                let connection_table = connection_table.clone();
+                let place_table = place_table.clone();
                 let handle = runtime.handle().clone();
                 scope.spawn(move || {
-                    let mut relay = relay_over(&client, &log_table, &connection_table, handle);
+                    let mut relay = relay_over(&client, &log_table, &place_table, handle);
                     relay
                         .receive(&ConnectionId(format!("socket-{at}")), host_message(at))
                         .created
@@ -459,17 +461,17 @@ fn two_hosts_at_once_create_two_matches() {
 fn the_same_request_sent_twice_at_once_creates_one_match() {
     let (runtime, client) = arrange();
     let log_table = log_table(&runtime, &client);
-    let connection_table = connection_table(&runtime, &client);
+    let place_table = place_table(&runtime, &client);
 
     let answers: Vec<Outcome> = std::thread::scope(|scope| {
         let threads: Vec<_> = (0..2)
             .map(|at| {
                 let client = client.clone();
                 let log_table = log_table.clone();
-                let connection_table = connection_table.clone();
+                let place_table = place_table.clone();
                 let handle = runtime.handle().clone();
                 scope.spawn(move || {
-                    let mut relay = relay_over(&client, &log_table, &connection_table, handle);
+                    let mut relay = relay_over(&client, &log_table, &place_table, handle);
                     // The same account and the same nonce: one request, sent twice.
                     relay.receive(&ConnectionId(format!("socket-{at}")), host_message(0))
                 })
@@ -505,7 +507,7 @@ fn the_same_request_sent_twice_at_once_creates_one_match() {
 
     // And one socket holds the seat, not both. This is the assertion that matters: the
     // relay sends a seat's deal to every connection on that seat.
-    let connections = GatewayConnections::new(client, &connection_table, runtime.handle().clone());
+    let connections = GatewayConnections::new(client, &place_table, runtime.handle().clone());
     let held = connections.of(&match_id);
     assert_eq!(
         held.len(),
@@ -514,12 +516,113 @@ fn the_same_request_sent_twice_at_once_creates_one_match() {
     );
 }
 
+/// Two sockets claiming one seat at once leave one row.
+///
+/// The test that found the defect this table was reshaped for. It asserts the row count
+/// and not the answers, because both answers were already right while both rows existed —
+/// which is why nothing above this layer could have noticed, and why the gate passed it by
+/// luck for as long as it did.
+///
+/// Under the old key, `(match, connection)`, the two rows had different keys and both
+/// survived; `attach` tried to prevent that by reading the match's rows and deleting the
+/// other one first, which two invocations ran in between each other. Under this key the
+/// second put lands on the first's row whatever the interleaving.
+#[test]
+#[ignore = "needs DynamoDB Local; the gate runs it with --include-ignored"]
+fn two_sockets_claiming_one_seat_leave_one_row() {
+    let (runtime, client) = arrange();
+    let table = place_table(&runtime, &client);
+    let match_id = MatchId("match-0".into());
+
+    std::thread::scope(|scope| {
+        for at in 0..2 {
+            let client = client.clone();
+            let table = table.clone();
+            let handle = runtime.handle().clone();
+            let match_id = match_id.clone();
+            scope.spawn(move || {
+                let mut places = GatewayConnections::new(client, &table, handle);
+                places.attach(
+                    &match_id,
+                    ConnectionId(format!("socket-{at}")),
+                    Seat(0),
+                    Role::Player,
+                );
+            });
+        }
+    });
+
+    let places = GatewayConnections::new(client, &table, runtime.handle().clone());
+    let held = places.of(&match_id);
+    assert_eq!(
+        held.len(),
+        1,
+        "two sockets on one seat is a seat whose deal is sent twice: {held:?}"
+    );
+    assert_eq!(held[0].seat, Seat(0));
+}
+
+/// A delete that names a place somebody else now holds changes nothing.
+///
+/// Driven directly rather than through a race, because the two ways it happens are
+/// ordinary rather than rare: a socket moving between places, and a `$disconnect` arriving
+/// after the reconnection that replaced it. Under the old key a row belonged to one socket
+/// for its whole life and deleting by key was safe; a place changes hands, so the delete
+/// has to say whose row it thought it was deleting.
+#[test]
+#[ignore = "needs DynamoDB Local; the gate runs it with --include-ignored"]
+fn a_late_disconnect_does_not_evict_the_socket_that_replaced_it() {
+    let (runtime, client) = arrange();
+    let table = place_table(&runtime, &client);
+    let mut places = GatewayConnections::new(client.clone(), &table, runtime.handle().clone());
+    let match_id = MatchId("match-0".into());
+
+    let first = ConnectionId("socket-first".into());
+    let second = ConnectionId("socket-second".into());
+    places.attach(&match_id, first.clone(), Seat(0), Role::Player);
+    places.attach(&match_id, second.clone(), Seat(0), Role::Player);
+
+    // The seat changed hands. Now the first socket's `$disconnect` finally arrives.
+    places.detach(&first);
+
+    let held = places.of(&match_id);
+    assert_eq!(
+        held.len(),
+        1,
+        "the reconnection must still hold the seat: {held:?}"
+    );
+    assert_eq!(
+        held[0].connection, second,
+        "a late disconnect evicted the socket that had replaced it"
+    );
+}
+
+/// The reverse index answers for a place as well as for a match, which is what lets
+/// `$disconnect` delete by the key it never saw.
+#[test]
+#[ignore = "needs DynamoDB Local; the gate runs it with --include-ignored"]
+fn a_socket_moving_between_seats_leaves_one_row_behind_it() {
+    let (runtime, client) = arrange();
+    let table = place_table(&runtime, &client);
+    let mut places = GatewayConnections::new(client.clone(), &table, runtime.handle().clone());
+    let match_id = MatchId("match-0".into());
+    let socket = ConnectionId("socket-0".into());
+
+    places.attach(&match_id, socket.clone(), Seat(0), Role::Player);
+    places.attach(&match_id, socket.clone(), Seat(1), Role::Player);
+
+    let held = places.of(&match_id);
+    assert_eq!(held.len(), 1, "a socket is in one place: {held:?}");
+    assert_eq!(held[0].seat, Seat(1));
+    assert_eq!(place_of(held[0].seat), "seat#1");
+}
+
 /// A seat is held by one connection, and taking it evicts whoever had it.
 #[test]
 #[ignore = "needs DynamoDB Local; the gate runs it with --include-ignored"]
 fn taking_a_seat_evicts_whoever_was_on_it() {
     let (runtime, client) = arrange();
-    let table = connection_table(&runtime, &client);
+    let table = place_table(&runtime, &client);
     let mut connections = GatewayConnections::new(client, &table, runtime.handle().clone());
     let match_id = MatchId("match-0".into());
 
@@ -557,14 +660,9 @@ fn taking_a_seat_evicts_whoever_was_on_it() {
 fn two_joins_at_once_take_two_seats() {
     let (runtime, client) = arrange();
     let log_table = log_table(&runtime, &client);
-    let connection_table = connection_table(&runtime, &client);
+    let place_table = place_table(&runtime, &client);
 
-    let mut host = relay_over(
-        &client,
-        &log_table,
-        &connection_table,
-        runtime.handle().clone(),
-    );
+    let mut host = relay_over(&client, &log_table, &place_table, runtime.handle().clone());
     let match_id = host
         .receive(&ConnectionId("socket-0".into()), host_message(0))
         .created
@@ -574,11 +672,11 @@ fn two_joins_at_once_take_two_seats() {
         for at in 1..3 {
             let client = client.clone();
             let log_table = log_table.clone();
-            let connection_table = connection_table.clone();
+            let place_table = place_table.clone();
             let handle = runtime.handle().clone();
             let match_id = match_id.clone();
             scope.spawn(move || {
-                let mut relay = relay_over(&client, &log_table, &connection_table, handle);
+                let mut relay = relay_over(&client, &log_table, &place_table, handle);
                 let Message::Host {
                     account,
                     name,
@@ -626,7 +724,7 @@ fn two_joins_at_once_take_two_seats() {
     assert_eq!(distinct, colours, "two players took the same colour");
 
     // And the connection table agrees, which is what decides who is sent whose dice.
-    let connections = GatewayConnections::new(client, &connection_table, runtime.handle().clone());
+    let connections = GatewayConnections::new(client, &place_table, runtime.handle().clone());
     let mut attached: Vec<u8> = connections
         .of(&match_id)
         .into_iter()
@@ -644,7 +742,7 @@ fn two_joins_at_once_take_two_seats() {
 #[ignore = "needs DynamoDB Local; the gate runs it with --include-ignored"]
 fn a_connection_is_found_by_match_and_detached_by_itself() {
     let (runtime, client) = arrange();
-    let table = connection_table(&runtime, &client);
+    let table = place_table(&runtime, &client);
     let mut connections = GatewayConnections::new(client, &table, runtime.handle().clone());
     let match_id = MatchId("match-0".into());
     let socket = ConnectionId("abc=".into());
@@ -674,7 +772,7 @@ fn a_connection_is_found_by_match_and_detached_by_itself() {
 #[ignore = "needs DynamoDB Local; the gate runs it with --include-ignored"]
 fn attaching_a_connection_twice_leaves_it_in_one_match() {
     let (runtime, client) = arrange();
-    let table = connection_table(&runtime, &client);
+    let table = place_table(&runtime, &client);
     let mut connections = GatewayConnections::new(client, &table, runtime.handle().clone());
     let first = MatchId("match-0".into());
     let second = MatchId("match-1".into());

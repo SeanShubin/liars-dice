@@ -130,10 +130,11 @@ case.
 
 ### Transport
 
-API Gateway WebSocket with Lambda handlers, and a DynamoDB connection table keyed by
-match. Turn-based play sends very few messages, so per-connection charges stay small and
-the connection time limit is survivable. Each row carries a role, so admitting
-spectators later changes no table.
+API Gateway WebSocket with Lambda handlers, and a DynamoDB table of places keyed by match
+and by the place at it. Turn-based play sends very few messages, so per-connection charges
+stay small and the connection time limit is survivable. A place is `seat#0` today and
+`watcher#<connection>` once spectators exist, so admitting them changes no table and the
+key alone says which a row is.
 
 The table is why the specification now says the relay holds no *game* state: a
 connection id is transport plumbing the log cannot hold, and keeping it in DynamoDB
