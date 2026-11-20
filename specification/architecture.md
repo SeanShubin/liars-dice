@@ -48,6 +48,16 @@
 - Fully auditable event log
 - Clients must not be able to choose their roll beforehand or alter it after the fact
 
+## Composition
+- Every program has exactly one composition root
+- A composition root's wiring contains no logic
+- Only a composition root observes anything outside its program
+- An observation reaches the program as a value, unless the program decides when to observe it
+- One clock reading serves one message
+- One clock reading serves one frame
+- A composition root that needs a computed value wires a stage to compute it, then wires the rest over the result
+- Every program can be composed over a simulated outside world
+
 ## Deployment
 - The deploy pipeline runs in GitHub
 - seanshubin.com links to the liars dice game

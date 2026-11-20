@@ -53,6 +53,7 @@ Not started | In progress | Built
 - [Relay and Lobby](/implementation/relay.md) — hosting, joining, dealing, fan-out, reconnection
 - [Relay Service](/implementation/relay-service.md) — the deployed relay: DynamoDB, the WebSocket, the Lambda
 - [Dice Integrity](/implementation/integrity.md) — commitment, seed derivation, reveal
+- [Composition](/implementation/composition.md) — where every program observes the world, and the pipeline for when wiring needs a fetched value
 - [Protocol](/implementation/protocol.md) — seats, the version line, shield events
 - [Deployment](/implementation/deployment.md) — the GitHub pipeline, AWS wiring, Discord OAuth
 - [Hotseat](/implementation/hotseat.md) — one screen passed between seats, and the one presentation both deliveries draw

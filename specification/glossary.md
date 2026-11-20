@@ -30,6 +30,11 @@
 | Default rules | The rules with every variant off. |
 | Variant | A single configurable boolean deviation from the default rules, fixed for a whole match. |
 | Ones wild | Variant. When on, ones count toward every face value at resolution, and a claim may not name the one face. |
+| Composition root | The one part of a program that builds its other parts and connects them. The only part that observes anything outside the program. |
+| Wiring | Constructing a program's parts and connecting them to each other. Contains no decision of its own. |
+| Composition stage | One round of wiring followed by one call into what was wired, where a later round needs a value that call produces. |
+| Observation | A value a program reads from outside itself: a clock, a random source, a configuration, a stored record, a keystroke. |
+| Simulated outside world | A set of observations and storage a test supplies in place of the real ones, under which a whole program runs and repeats exactly. |
 | Relay | The service that orders messages and knows no game rules. |
 | Event log | The ordered record of every message in a match. The only state. |
 | View | Data derived from the event log, which can change as events are appended. |
