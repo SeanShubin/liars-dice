@@ -415,6 +415,19 @@ separately so the evidence arrives already separated from the fold's.
 
 ## Status
 
+**A whole match has played over a real socket.** Two command line seats, API Gateway,
+Lambda and DynamoDB: ninety events each, no complaints from either, and the log the relay
+wrote holds ninety-five events with seven round endings against seven reveals — each round
+ended exactly once. Eight commitments and sixteen deals, because an eighth round was
+opened after the last reveal: the relay cannot know a match has ended, so it opens the
+next one and goes quiet when nobody answers. The seats went quiet, which is what being
+that silence means.
+
+No complaints is the integrity scheme verified from the event stream alone: every reveal
+against its commitment, every deal against the seed it came from, no secret and no storage
+needed.
+
+
 **The relay is deployed and has served a message.** `wss://071ye3vz8h.execute-api.us-east-1.amazonaws.com/live`.
 A synthetic `$connect` returns 200 with no function error, which is the cold start reading
 the secret out of SSM. A synthetic `$default` carrying a `host` frame wrote three events to

@@ -63,6 +63,18 @@ pub struct Seated {
     /// ordered — that being the whole point of the conditional write.
     waiting: Vec<Event>,
     driver: Box<dyn Decides>,
+    /// A claim this seat sent that has not come back yet.
+    ///
+    /// `Client::act` deliberately does not apply the call locally — every client applies
+    /// the same ordered stream, so a claim takes effect when the relay sends it back.
+    /// Which means that between sending one and seeing it, the game still says it is this
+    /// seat's turn. `crates/table` never notices, because it delivers a claim
+    /// synchronously in the same loop that made it; over a socket there is a real gap,
+    /// and a seat that keeps answering during it proposes the same call again and again.
+    ///
+    /// If a claim is genuinely lost the seat waits rather than guessing, which is what
+    /// `Resume` is for.
+    awaiting: bool,
     over: bool,
 }
 
@@ -116,6 +128,7 @@ impl Seated {
             client: None,
             waiting: Vec::new(),
             driver,
+            awaiting: false,
             over: false,
         }
     }
@@ -230,7 +243,20 @@ impl Seated {
 
     /// Hand one event to the client, then let it act if it is its turn.
     fn feed(&mut self, event: Event) -> Result<Vec<String>, Stopped> {
+        // The relay does not know a match has ended — deciding that needs the rules,
+        // which it does not have — so it opens the next round regardless and goes quiet
+        // only when nobody answers. Being that silence is this seat's job. Without this
+        // the seat plays a round that no longer exists, because the commitment and the
+        // deals for it arrive in the same message as the reveal that ended the match.
+        if self.over {
+            return Ok(Vec::new());
+        }
         let mut frames = Vec::new();
+        // This seat's own claim, come back from the relay. Whatever it was waiting for
+        // has arrived, so it may think again.
+        if claimed_by(&event) == self.mine {
+            self.awaiting = false;
+        }
         let intents = match &mut self.client {
             Some(client) => client.receive(&event),
             None => Vec::new(),
@@ -239,9 +265,20 @@ impl Seated {
             frames.push(self.frame_for(intent)?);
         }
 
-        // A settled round is left behind here rather than by whatever is showing it,
-        // because nothing is showing it: this is a seat with no screen.
-        if let Some(client) = &mut self.client
+        // A round is settled by its reveal, and only by its reveal.
+        //
+        // Asking after every event looks harmless and is not. The reveal's own deals
+        // arrive just before the `Reveal` that carries the seed, so on the last of them
+        // the round's dice are all present and the round resolves one event early — and
+        // from then on the client's `revealed` flag belongs to the round after the one
+        // the seed is for, so every later deal is queued for a round that has already
+        // begun instead of being installed in it. The match then resolves rounds against
+        // dice from the round before, which is how one ended twice.
+        //
+        // `crates/table` avoids this by delivering a whole batch before settling
+        // anything; a seat on a socket has no batch to end, so it waits for the reveal.
+        if matches!(event, Event::Reveal { .. })
+            && let Some(client) = &mut self.client
             && let Some(resolution) = client.settle()
         {
             if resolution.over {
@@ -262,7 +299,19 @@ impl Seated {
         let Some(client) = &mut self.client else {
             return Ok(None);
         };
+        // A round that has ended is not a round to act in, even though the game may still
+        // say it is this seat's turn: the dice that settle it have not arrived, so nothing
+        // has moved on yet. `ended_by` is set when the round ends and cleared by
+        // `begin_next_round`, which makes it exactly the window to sit out.
+        if client.ended_by().is_some() {
+            return Ok(None);
+        }
         if !client.is_my_turn() {
+            return Ok(None);
+        }
+        // And a claim already sent is a turn already taken, whatever the game says until
+        // it comes back.
+        if self.awaiting {
             return Ok(None);
         }
         // The view borrows the client and the driver is a sibling field, so the choice is
@@ -286,6 +335,9 @@ impl Seated {
         let Ok(intent) = client.act(call, odds) else {
             return Ok(None);
         };
+        if matches!(intent, Intent::Claim(_)) {
+            self.awaiting = true;
+        }
         self.frame_for(intent).map(Some)
     }
 
@@ -296,6 +348,19 @@ impl Seated {
             Intent::RoundOver => Message::RoundOver { match_id },
         };
         Ok(json::write(&message::shape_of(&message)))
+    }
+}
+
+/// Which seat made a call, for any of the three kinds of call.
+///
+/// The relay has the same function, because it too has to know whose claim a message is
+/// without knowing what the claim says.
+fn claimed_by(event: &Event) -> Option<Seat> {
+    match event {
+        Event::Claim { seat, .. } | Event::Liar { seat, .. } | Event::SpotOn { seat, .. } => {
+            Some(*seat)
+        }
+        _ => None,
     }
 }
 

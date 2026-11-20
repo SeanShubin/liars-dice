@@ -10,7 +10,7 @@
 //! This is where the logic is proven.
 
 use integrity::Secret;
-use protocol::Account;
+use protocol::{Account, Event};
 use relay::memory::{MemoryConnections, MemoryLog};
 use relay::{ConnectionId, Relay};
 use seat::{Ai, Seated};
@@ -151,4 +151,38 @@ fn two_seats_play_a_whole_match_through_the_wire() {
         "only {} events: that is not a whole match",
         host.stream().len()
     );
+
+    // Each round ends exactly once.
+    //
+    // This is the assertion that was missing, and its absence let a real defect through:
+    // a seat kept re-proposing the call that ended the round every time the relay echoed
+    // it back, and a log with two hundred spurious liars in it satisfies "more than forty
+    // events" perfectly well. Counting the endings against the reveals pins the shape of
+    // the match rather than its size.
+    println!("host over: {} guest over: {}", host.over(), guest.over());
+    let total = host.stream().len();
+    for (at, event) in host
+        .stream()
+        .iter()
+        .enumerate()
+        .skip(total.saturating_sub(14))
+    {
+        println!("{at}: {event}");
+    }
+    println!("guest stream: {}", guest.stream().len());
+    let endings = host
+        .stream()
+        .iter()
+        .filter(|event| matches!(event, Event::Liar { .. } | Event::SpotOn { .. }))
+        .count();
+    let reveals = host
+        .stream()
+        .iter()
+        .filter(|event| matches!(event, Event::Reveal { .. }))
+        .count();
+    assert_eq!(
+        endings, reveals,
+        "{endings} round endings against {reveals} reveals: a round ended more than once"
+    );
+    assert!(reveals > 0, "no round was ever revealed");
 }
