@@ -8,7 +8,7 @@
 //! than assumes.
 
 use protocol::Event;
-use relay::{MatchId, Refused};
+use relay::{Listed, MatchId, Refused};
 
 use crate::{Malformed, Shape, Value, event};
 
@@ -21,12 +21,21 @@ pub enum Answer {
     Refused(Refused),
     /// A message made a match. Only the host is told, and it is how they learn the id.
     Created(MatchId),
+    /// What is open to join, as it was when it was asked for.
+    ///
+    /// A listing goes stale the moment it is sent — a match in it can fill or start
+    /// before anybody acts on one — which is not a flaw to design out. The refusals on
+    /// `join` are what make acting on a stale listing safe, and the alternative is a
+    /// subscription that has to be cancelled by every path a client can leave by.
+    Listing(Vec<Listed>),
 }
 
 /// The kind of a refusal frame.
 pub const REFUSED: &str = "refused";
 /// The kind of a created-match frame.
 pub const CREATED: &str = "created";
+/// The kind of a lobby-listing frame.
+pub const LISTING: &str = "listing";
 
 fn text(value: &str) -> Value {
     Value::Text(value.to_string())
@@ -37,7 +46,30 @@ pub fn shape_of(answer: &Answer) -> Shape {
         Answer::Event(event) => event::shape_of(event),
         Answer::Refused(why) => refusal(why),
         Answer::Created(match_id) => Shape::of(CREATED, vec![("match", text(&match_id.0))]),
+        Answer::Listing(open) => Shape::of(
+            LISTING,
+            vec![(
+                "matches",
+                Value::Many(open.iter().map(listed_shape).collect()),
+            )],
+        ),
     }
+}
+
+/// One match in a listing: what to join, who is waiting, and how many are there.
+///
+/// `A listed match shows its host` and `A listed match shows how many players have
+/// joined`, which is the whole of what a listing may say. Not the seats, not the
+/// accounts, not the colours: a lobby is read by people who are not in the match.
+fn listed_shape(open: &Listed) -> Shape {
+    Shape::of(
+        "open",
+        vec![
+            ("match", text(&open.match_id.0)),
+            ("host", text(&open.host)),
+            ("players", Value::Count(open.players as u64)),
+        ],
+    )
 }
 
 /// A refusal names why in one field, so a client can switch on it, and carries numbers
@@ -73,11 +105,26 @@ pub fn from_shape(shape: &Shape) -> Result<Answer, Malformed> {
     match shape.kind.as_str() {
         REFUSED => Ok(Answer::Refused(why(shape)?)),
         CREATED => Ok(Answer::Created(MatchId(shape.text("match")?.to_string()))),
+        LISTING => Ok(Answer::Listing(
+            shape
+                .many("matches")?
+                .iter()
+                .map(listed_of)
+                .collect::<Result<Vec<Listed>, Malformed>>()?,
+        )),
         // Anything else is an event, including an unknown kind: `event::from_shape` is
         // the one place that decides whether a kind is known, so there is one answer to
         // that question rather than two that can disagree.
         _ => event::from_shape(shape).map(Answer::Event),
     }
+}
+
+fn listed_of(shape: &Shape) -> Result<Listed, Malformed> {
+    Ok(Listed {
+        match_id: MatchId(shape.text("match")?.to_string()),
+        host: shape.text("host")?.to_string(),
+        players: shape.count("players")?,
+    })
 }
 
 fn why(shape: &Shape) -> Result<Refused, Malformed> {

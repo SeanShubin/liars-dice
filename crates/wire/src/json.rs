@@ -52,6 +52,7 @@ fn rendered(value: &Value) -> Json {
                 .collect(),
         ),
         Value::Nested(shape) => object(shape),
+        Value::Many(shapes) => Json::Array(shapes.iter().map(object).collect()),
     }
 }
 
@@ -99,6 +100,14 @@ fn parsed(json: &Json, kind: &str, field: &str) -> Result<Value, Malformed> {
             Some(count) => Ok(Value::Count(count)),
             None => number.as_f64().map(Value::Chance).ok_or_else(wrong),
         },
+        // An array of objects is a list of shapes and an array of numbers is a list of
+        // counts. An empty one is both, and is read as counts because that is what every
+        // array in an event is; `Shape::many` accepts it for the one field that is not.
+        Json::Array(values) if values.first().is_some_and(Json::is_object) => values
+            .iter()
+            .map(shape)
+            .collect::<Result<Vec<Shape>, Malformed>>()
+            .map(Value::Many),
         Json::Array(values) => values
             .iter()
             .map(|value| value.as_u64().ok_or_else(wrong))

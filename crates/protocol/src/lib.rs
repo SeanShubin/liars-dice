@@ -147,7 +147,7 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
 ///
 /// A client cannot join a match or load a save whose version differs from its own, so no
 /// match spans two versions and no log holds two. The `version` line says which.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// A seat at a match.
 ///

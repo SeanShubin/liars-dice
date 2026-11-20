@@ -104,6 +104,103 @@ fn a_match_that_has_not_started_is_listed_and_one_that_has_is_not() {
     );
 }
 
+/// `Every match that can be joined is listed`, asked for over the wire rather than read
+/// off the relay.
+///
+/// `open_matches` was right for a long time and reachable by nothing, which is a feature
+/// that does not exist. This is the message that makes it one.
+#[test]
+fn asking_what_is_open_lists_the_matches_that_are() {
+    let mut relay = relay();
+    let alice = connection("alice");
+    let looking = connection("looking");
+
+    let empty = relay.receive(
+        &looking,
+        Message::List {
+            account: discord("9"),
+        },
+    );
+    assert_eq!(
+        empty.listed,
+        Some(Vec::new()),
+        "nothing open is an answer, and not the absence of one"
+    );
+
+    let match_id = host(&mut relay, &alice);
+    let listed = relay
+        .receive(
+            &looking,
+            Message::List {
+                account: discord("9"),
+            },
+        )
+        .listed
+        .expect("a listing");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].match_id, match_id);
+    assert_eq!(listed[0].host, "Alice", "a listed match shows its host");
+    assert_eq!(listed[0].players, 1, "and how many have joined");
+
+    // Asking changes nothing: the log is as long as hosting left it.
+    assert_eq!(relay.log().read(&match_id).len(), 3);
+
+    relay.receive(&alice, Message::Start { match_id });
+    let after = relay
+        .receive(
+            &looking,
+            Message::List {
+                account: discord("9"),
+            },
+        )
+        .listed
+        .expect("a listing");
+    assert!(
+        after.is_empty(),
+        "a started match cannot be joined, so it is not listed: {after:?}"
+    );
+}
+
+/// `A match is not listed to a player barred from it`, which is why the ask carries an
+/// account at all.
+#[test]
+fn a_listing_is_answered_for_whoever_asked() {
+    let mut relay = relay();
+    let alice = connection("alice");
+    let bob = connection("bob");
+    let match_id = host(&mut relay, &alice);
+    assert_eq!(join(&mut relay, &bob, &match_id, "2", "Bob", "blue"), None);
+    relay.receive(
+        &alice,
+        Message::Bar {
+            match_id: match_id.clone(),
+            seat: Seat(1),
+        },
+    );
+
+    let to_bob = relay
+        .receive(
+            &bob,
+            Message::List {
+                account: discord("2"),
+            },
+        )
+        .listed
+        .expect("a listing");
+    assert!(to_bob.is_empty(), "a barred player is not shown the match");
+
+    let to_anybody = relay
+        .receive(
+            &connection("carol"),
+            Message::List {
+                account: discord("3"),
+            },
+        )
+        .listed
+        .expect("a listing");
+    assert_eq!(to_anybody.len(), 1, "and everybody else still sees it");
+}
+
 #[test]
 fn a_barred_player_is_not_shown_the_match_and_cannot_join() {
     let mut relay = relay();

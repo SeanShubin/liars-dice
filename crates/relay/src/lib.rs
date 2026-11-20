@@ -237,6 +237,15 @@ pub enum Message {
     RoundOver {
         match_id: MatchId,
     },
+    /// What is open to join.
+    ///
+    /// The one message that names no match, because asking which there are is the thing a
+    /// client does before it has one. The account is carried so a barred player is not
+    /// shown the match they are barred from, which is the only reason the relay needs to
+    /// know who is asking.
+    List {
+        account: Account,
+    },
     /// Reattach to a seat already in the match.
     Resume {
         match_id: MatchId,
@@ -276,6 +285,8 @@ pub struct Outcome {
     pub sends: Vec<(ConnectionId, Event)>,
     /// Set when a message created a match.
     pub created: Option<MatchId>,
+    /// Set when a message asked what is open. Empty is an answer; absent is not an answer.
+    pub listed: Option<Vec<Listed>>,
 }
 
 impl Outcome {
@@ -284,6 +295,7 @@ impl Outcome {
             refused: Some(why),
             sends: Vec::new(),
             created: None,
+            listed: None,
         }
     }
 }
@@ -396,6 +408,7 @@ impl<L: Log, C: Connections> Relay<L, C> {
             Message::Leave { match_id } => self.leave(from, match_id),
             Message::Claim { match_id, event } => self.claim(from, match_id, event),
             Message::RoundOver { match_id } => self.round_over(from, match_id),
+            Message::List { account } => self.list(&account),
             Message::Resume { match_id, account } => self.resume(from, match_id, account),
         }
     }
@@ -499,6 +512,7 @@ impl<L: Log, C: Connections> Relay<L, C> {
             refused: None,
             sends,
             created: Some(match_id),
+            listed: None,
         })
     }
 
@@ -553,6 +567,7 @@ impl<L: Log, C: Connections> Relay<L, C> {
             refused: None,
             sends: self.to_everyone(&match_id, event),
             created: None,
+            listed: None,
         })
     }
 
@@ -581,6 +596,7 @@ impl<L: Log, C: Connections> Relay<L, C> {
             refused: None,
             sends: self.to_everyone(&match_id, event),
             created: None,
+            listed: None,
         })
     }
 
@@ -631,6 +647,7 @@ impl<L: Log, C: Connections> Relay<L, C> {
             refused: None,
             sends,
             created: None,
+            listed: None,
         })
     }
 
@@ -656,6 +673,7 @@ impl<L: Log, C: Connections> Relay<L, C> {
             refused: None,
             sends: self.to_everyone(&match_id, event),
             created: None,
+            listed: None,
         })
     }
 
@@ -701,6 +719,7 @@ impl<L: Log, C: Connections> Relay<L, C> {
                 refused: None,
                 sends,
                 created: None,
+                listed: None,
             });
         }
 
@@ -715,6 +734,7 @@ impl<L: Log, C: Connections> Relay<L, C> {
             refused: None,
             sends,
             created: None,
+            listed: None,
         })
     }
 
@@ -735,6 +755,7 @@ impl<L: Log, C: Connections> Relay<L, C> {
                 refused: None,
                 sends: Vec::new(),
                 created: None,
+                listed: None,
             });
         }
         let event = Event::Left { seat };
@@ -748,6 +769,23 @@ impl<L: Log, C: Connections> Relay<L, C> {
             refused: None,
             sends,
             created: None,
+            listed: None,
+        })
+    }
+
+    /// What is open to join.
+    ///
+    /// Writes nothing and reads everything, which is the opposite of every other handler
+    /// and the reason the lobby has a cost worth measuring — see `Measuring what the lobby
+    /// costs` in `relay-service.md`. There is no decision to invalidate, so it cannot be
+    /// stale: a listing is true of the moment it was read and a match may fill before
+    /// anybody acts on it, which is what the refusals on `join` are for.
+    fn list(&self, asking: &Account) -> Result<Outcome, Stale> {
+        Ok(Outcome {
+            refused: None,
+            sends: Vec::new(),
+            created: None,
+            listed: Some(self.open_matches(Some(asking))),
         })
     }
 
@@ -779,6 +817,7 @@ impl<L: Log, C: Connections> Relay<L, C> {
             refused: None,
             sends,
             created: None,
+            listed: None,
         })
     }
 

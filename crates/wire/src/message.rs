@@ -74,6 +74,9 @@ pub fn shape_of(message: &Message) -> Shape {
             ],
         ),
         Message::RoundOver { match_id } => Shape::of("round-over", vec![of(match_id)]),
+        Message::List { account } => {
+            Shape::of("list", vec![("account", text(&account_text(account)))])
+        }
         Message::Resume { match_id, account } => Shape::of(
             "resume",
             vec![of(match_id), ("account", text(&account_text(account)))],
@@ -120,6 +123,9 @@ pub fn from_shape(shape: &Shape) -> Result<Message, Malformed> {
         }),
         "round-over" => Ok(Message::RoundOver {
             match_id: match_id()?,
+        }),
+        "list" => Ok(Message::List {
+            account: account_of(shape.text("account")?)?,
         }),
         "resume" => Ok(Message::Resume {
             match_id: match_id()?,

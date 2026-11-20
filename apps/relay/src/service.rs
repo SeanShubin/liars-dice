@@ -185,6 +185,12 @@ impl Service {
             self.post(&gateway, &incoming.connection, &answer, &mut gone)
                 .await;
         }
+        // Only the asker is told what is open, because only the asker asked.
+        if let Some(listed) = outcome.listed {
+            let answer = Answer::Listing(listed);
+            self.post(&gateway, &incoming.connection, &answer, &mut gone)
+                .await;
+        }
         if let Some(refused) = outcome.refused {
             let answer = Answer::Refused(refused);
             self.post(&gateway, &incoming.connection, &answer, &mut gone)

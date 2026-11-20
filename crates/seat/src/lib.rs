@@ -23,7 +23,7 @@ use wire::{Malformed, json, message};
 /// with the service that routes it — the relay reaches it as frames and nothing else — but
 /// it has to be able to name the match it is joining and to say why it was turned away,
 /// and both of those are the protocol rather than the service.
-pub use relay::{MatchId, Refused};
+pub use relay::{Listed, MatchId, Refused};
 
 /// Why a seat stopped.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -365,6 +365,11 @@ impl Seated {
                 self.match_id = Some(match_id);
                 Ok(Vec::new())
             }
+            // A listing is the lobby's answer and says nothing about this seat. One can
+            // still arrive here, because the socket that asked what was open is the socket
+            // that went on to sit down, and a frame in flight does not know that happened.
+            // `lobby::listing` is where a caller reads it.
+            Answer::Listing(_) => Ok(Vec::new()),
             Answer::Event(event) => self.apply(event),
         }
     }
@@ -540,6 +545,39 @@ fn odds_of(view: &rules::View<'_>, call: rules::Call) -> f64 {
     view.chance_of_call(call)
         .map(|chance| readout::percent(&chance))
         .unwrap_or_default()
+}
+
+/// The lobby: what is open, before there is a seat to be at.
+///
+/// Free functions rather than a type, because there is no state here. A lobby is one
+/// question and one answer, and the socket it travels on belongs to whoever opened it —
+/// which is the same socket a [`Seated`] later speaks on, since a client connects before
+/// it knows whether it will host, join, or look first.
+pub mod lobby {
+    use protocol::Account;
+    use relay::{Listed, Message};
+    use wire::answer::Answer;
+    use wire::{json, message};
+
+    /// The frame that asks what is open.
+    pub fn ask(account: &Account) -> String {
+        json::write(&message::shape_of(&Message::List {
+            account: account.clone(),
+        }))
+    }
+
+    /// What a frame says about the lobby, or `None` if it is not about the lobby.
+    ///
+    /// Returns rather than applies, because a listing is true of the moment it was read
+    /// and the caller decides what to do about that. An empty listing is `Some(vec![])`
+    /// and means nothing is open; `None` means the frame was about something else.
+    pub fn listing(frame: &str) -> Option<Vec<Listed>> {
+        let shape = json::read(frame).ok()?;
+        match wire::answer::from_shape(&shape).ok()? {
+            Answer::Listing(open) => Some(open),
+            _ => None,
+        }
+    }
 }
 
 /// A seat played by the computer.

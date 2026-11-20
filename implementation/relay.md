@@ -236,6 +236,25 @@ asking player.
 authentication; hosting and joining require it. The list carries the host's name and the
 number of players, which is what the statements ask for and no more.
 
+**`Message::List` is the one message that names no match**, because asking which there are
+is what a client does before it has one. It carries the account, and only so that
+`A match is not listed to a player barred from it` can be honoured — the relay has no
+other use for knowing who asked. It is also the one message that writes nothing and reads
+everything, so it cannot be stale and has no retry: there is no decision for a concurrent
+append to invalidate.
+
+A listing is answered on `Outcome::listed`, beside `created`, rather than as events on
+`sends`. A listing is not something that happened to a match; it is an answer to the
+socket that asked, and the two travel differently for that reason. It goes to the asker
+and to nobody else.
+
+**A listing is stale the moment it is sent, and that is not a defect to design out.** A
+match in it can fill or start before anybody acts on one, so joining from a listing can
+still be refused — `AlreadyStarted`, `MatchIsFull`, `ColourTaken` — and those refusals are
+what make acting on a stale listing safe. The alternative is a subscription the relay has
+to cancel on every path a client can leave by, including the ones where it never says
+goodbye.
+
 The version check happens at join: the match's `version` line against the joining client's
 own, refusing on mismatch rather than letting two builds disagree later about the rules.
 

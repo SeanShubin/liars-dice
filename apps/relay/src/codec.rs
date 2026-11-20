@@ -72,6 +72,15 @@ fn rendered(value: &Value) -> AttributeValue {
                 .collect(),
         ),
         Value::Nested(shape) => AttributeValue::M(written(shape)),
+        // No event holds one, so nothing with this in it is ever stored — but the
+        // rendering is total on purpose: a `Value` the codec cannot answer for would be a
+        // kind of frame that silently could not be archived.
+        Value::Many(shapes) => AttributeValue::L(
+            shapes
+                .iter()
+                .map(|shape| AttributeValue::M(written(shape)))
+                .collect(),
+        ),
     }
 }
 
@@ -121,6 +130,20 @@ fn parsed(value: &AttributeValue, kind: &str, field: &str) -> Result<Value, Malf
                 .map(Value::Chance)
                 .map_err(|_| wrong()),
         },
+        // Shapes before numbers: a list of maps is a list of shapes, and the guard is
+        // what makes the arm below unreachable for them rather than wrong about them.
+        AttributeValue::L(items)
+            if !items.is_empty() && items.iter().all(|item| item.as_m().is_ok()) =>
+        {
+            items
+                .iter()
+                .map(|item| {
+                    let map = item.as_m().map_err(|_| wrong())?;
+                    shape_from_item(map, &[])
+                })
+                .collect::<Result<Vec<Shape>, Malformed>>()
+                .map(Value::Many)
+        }
         AttributeValue::L(values) => values
             .iter()
             .map(|value| {

@@ -45,6 +45,16 @@ pub enum Value {
     Counts(Vec<u64>),
     /// A whole shape as a field. Only `Message::Claim` needs it, which carries an event.
     Nested(Box<Shape>),
+    /// Several shapes as one field. Only the lobby's listing needs it.
+    ///
+    /// An empty one renders as an empty array, which reads back as an empty [`Counts`]
+    /// because a JSON array carries no element type and there is nothing in it to tell
+    /// them apart. [`Shape::many`] accepts that, which is where the asymmetry is paid;
+    /// [`Shape::counts`] is left exact, because an empty list of dice is not a thing the
+    /// game produces and a reader should say so if it ever sees one.
+    ///
+    /// [`Counts`]: Value::Counts
+    Many(Vec<Shape>),
 }
 
 /// What something is, and what it holds.
@@ -110,6 +120,17 @@ impl Shape {
         Malformed::Field {
             kind: self.kind.clone(),
             field: field.to_string(),
+        }
+    }
+
+    /// The shapes a field holds, or an empty slice when the field is an empty list.
+    ///
+    /// See [`Value::Many`] for why an empty one arrives as the other kind of list.
+    pub fn many(&self, field: &str) -> Result<&[Shape], Malformed> {
+        match self.get(field) {
+            Some(Value::Many(shapes)) => Ok(shapes),
+            Some(Value::Counts(counts)) if counts.is_empty() => Ok(&[]),
+            _ => Err(self.wrong(field)),
         }
     }
 

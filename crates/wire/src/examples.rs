@@ -10,7 +10,7 @@
 //! rendering at once.
 
 use protocol::{Account, Event, Moment, Seat};
-use relay::{MatchId, Message, Refused};
+use relay::{Listed, MatchId, Message, Refused};
 
 use crate::answer::Answer;
 
@@ -106,6 +106,9 @@ pub fn every_message() -> Vec<Message> {
             colour: "blue".to_string(),
             version: protocol::PROTOCOL_VERSION,
         },
+        Message::List {
+            account: Account::Discord("450853396908343307".to_string()),
+        },
         Message::Bar {
             match_id: match_id.clone(),
             seat: Seat(2),
@@ -166,6 +169,21 @@ pub fn every_answer() -> Vec<Answer> {
         Answer::Refused(Refused::SeatIsAbsent),
         Answer::Refused(Refused::NotYourSeat),
         Answer::Refused(Refused::MatchIdTaken),
+        // Empty and not empty, because an empty list is the case the two renderings
+        // cannot tell apart on the way back — see `Value::Many`.
+        Answer::Listing(Vec::new()),
+        Answer::Listing(vec![
+            Listed {
+                match_id: MatchId("match-7".to_string()),
+                host: awkward_name(),
+                players: 1,
+            },
+            Listed {
+                match_id: MatchId("match-8".to_string()),
+                host: "Ada".to_string(),
+                players: 9,
+            },
+        ]),
     ];
     answers.extend(every_event().into_iter().map(Answer::Event));
     answers

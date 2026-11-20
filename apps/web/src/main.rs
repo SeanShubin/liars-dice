@@ -33,7 +33,7 @@ use render_minimal::{
     table, tap, verdict,
 };
 use rules::{Call, Claim, View};
-use seat::{MatchId, Seated, Stopped};
+use seat::{Listed, MatchId, Seated, Stopped, lobby};
 
 /// How long another seat may go quiet before the screen says so.
 ///
@@ -51,6 +51,10 @@ const TICK: Duration = Duration::from_millis(500);
 
 /// The swatch a colour nobody recognises is drawn in. Unreachable through the picker.
 const UNKNOWN_COLOUR: usize = 19;
+
+/// As many as a match holds. The relay refuses the eleventh, and the lobby says so before
+/// anybody tries.
+const MAX_SEATS: usize = 10;
 
 /// The frames that have arrived, oldest first.
 ///
@@ -135,8 +139,10 @@ struct Stance {
 /// Which screen is showing.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Screen {
-    /// A name, a colour, and either host or join.
+    /// A name, a colour, and a relay. Nothing has been connected to yet.
     Entry,
+    /// Connected and not at a match: what is open, and the two ways to be at one.
+    Lobby,
     /// In a match that has not started.
     Waiting,
     /// This seat's own view, with the dialler.
@@ -153,9 +159,16 @@ enum Screen {
 ///
 /// Never stored, because a stored screen is a second place that knows whether this seat
 /// holds dice, and the two would disagree.
-fn screen_for(stance: Option<Stance>, quiet: bool) -> Screen {
+fn screen_for(connected: bool, stance: Option<Stance>, quiet: bool) -> Screen {
     let Some(stance) = stance else {
-        return Screen::Entry;
+        // A socket and no seat is the lobby. The two are separate because the lobby is
+        // what a client does *before* it knows whether it will host, join, or just look,
+        // and that question is asked over the socket it will go on to play through.
+        return if connected {
+            Screen::Lobby
+        } else {
+            Screen::Entry
+        };
     };
     if stance.over {
         return Screen::Over;
@@ -209,6 +222,12 @@ struct Page {
     trouble: Option<String>,
 
     seated: Option<Seated>,
+    /// What is open to join, as the relay last said. Stale by the time it is drawn, which
+    /// is why joining one can still be refused.
+    open: Vec<Listed>,
+    /// Whether the relay has answered the lobby yet, so an empty list can be told from a
+    /// question that has not come back.
+    answered: bool,
     wire: Option<Box<dyn Wire>>,
     arrivals: Arrivals,
     mishap: Mishap,
@@ -230,6 +249,8 @@ impl Page {
             paste: String::new(),
             trouble: None,
             seated: None,
+            open: Vec::new(),
+            answered: false,
             wire: None,
             arrivals: Arrivals::default(),
             mishap: Mishap::default(),
@@ -253,18 +274,21 @@ impl Page {
         Account::Discord(format!("web-{}", self.name.trim()))
     }
 
-    /// Open a socket and send the opening frame.
-    fn begin(&mut self, seated: Seated, now: f64) {
+    /// Open a socket and ask what is open.
+    ///
+    /// The lobby's question is the opening frame, so a client is connected before it has
+    /// decided anything. Hosting and joining both happen later on this same socket.
+    fn connect(&mut self, now: f64) {
         self.trouble = None;
         self.arrivals = Arrivals::default();
         self.mishap = Mishap::default();
         self.hand = Hand::default();
+        self.open = Vec::new();
+        self.answered = false;
         self.heard = now;
-        match socket::open(&self.relay, &seated.opening(), &self.arrivals, &self.mishap) {
-            Ok(wire) => {
-                self.wire = Some(wire);
-                self.seated = Some(seated);
-            }
+        let asking = lobby::ask(&self.account());
+        match socket::open(&self.relay, &asking, &self.arrivals, &self.mishap) {
+            Ok(wire) => self.wire = Some(wire),
             Err(why) => {
                 self.wire = None;
                 self.seated = None;
@@ -273,10 +297,35 @@ impl Page {
         }
     }
 
-    /// Put the page back at the entry screen, keeping what was typed.
-    fn finish(&mut self, trouble: Option<String>) {
+    /// Take a seat on the socket that is already open.
+    fn sit(&mut self, seated: Seated) {
+        self.trouble = None;
+        self.hand = Hand::default();
+        let opening = seated.opening();
+        self.seated = Some(seated);
+        self.say(vec![opening]);
+    }
+
+    /// Ask again what is open. A listing is only true of the moment it was read.
+    fn look_again(&mut self) {
+        self.answered = false;
+        let asking = lobby::ask(&self.account());
+        self.say(vec![asking]);
+    }
+
+    /// Leave the match but not the relay, which is where somebody goes to play another.
+    fn leave_seat(&mut self, trouble: Option<String>) {
+        self.seated = None;
+        self.trouble = trouble;
+        self.look_again();
+    }
+
+    /// Drop the socket. Only for a transport that has gone, never for a refusal.
+    fn disconnect(&mut self, trouble: Option<String>) {
         self.wire = None;
         self.seated = None;
+        self.open = Vec::new();
+        self.answered = false;
         self.trouble = trouble;
     }
 
@@ -286,7 +335,7 @@ impl Page {
                 return;
             };
             if let Err(why) = wire.send(&frame) {
-                self.finish(Some(why));
+                self.disconnect(Some(why));
                 return;
             }
         }
@@ -299,19 +348,28 @@ impl Page {
     /// than against a prefix of it.
     fn pump(&mut self, now: f64) {
         if let Some(trouble) = self.mishap.take() {
-            self.finish(Some(trouble));
+            self.disconnect(Some(trouble));
             return;
         }
         while let Some(frame) = self.arrivals.take() {
             self.heard = now;
+            // The lobby's answer is not about any seat, and can arrive after one has been
+            // taken, because the socket that asked is the socket that sat down.
+            if let Some(open) = lobby::listing(&frame) {
+                self.open = open;
+                self.answered = true;
+                continue;
+            }
             let Some(seated) = &mut self.seated else {
-                return;
+                continue;
             };
             match seated.receive(&frame) {
                 Ok(answers) => self.say(answers),
                 Err(Stopped::Over) => return,
                 Err(why) => {
-                    self.finish(Some(why.to_string()));
+                    // A refusal is the relay declining a message, not the socket dying.
+                    // Going back to the lobby keeps the connection and says what happened.
+                    self.leave_seat(Some(why.to_string()));
                     return;
                 }
             }
@@ -321,7 +379,10 @@ impl Page {
         };
         match seated.offer() {
             Ok(answers) => self.say(answers),
-            Err(why) => self.finish(Some(why.to_string())),
+            Err(why) => {
+                self.leave_seat(Some(why.to_string()));
+                return;
+            }
         }
         // A seat that has left is no longer in the match, and the relay has already let go
         // of its socket, so nothing more is coming.
@@ -332,7 +393,7 @@ impl Page {
                 .get(mine.0 as usize)
                 .is_some_and(|player| player.left)
         {
-            self.finish(Some("You left the match.".to_string()));
+            self.leave_seat(Some("You left the match.".to_string()));
         }
     }
 
@@ -394,8 +455,9 @@ impl Page {
     fn draw(&mut self, ui: &mut egui::Ui, now: f64) {
         let quiet = now - self.heard > QUIET;
         let stance = self.stance();
-        match screen_for(stance, quiet) {
+        match screen_for(self.wire.is_some(), stance, quiet) {
             Screen::Entry => self.entry(ui, now),
+            Screen::Lobby => self.lobby(ui),
             Screen::Waiting => self.waiting(ui),
             // The three table screens differ in what they draw and not in what they are,
             // so they are one function given the same facts the choice was made from.
@@ -469,22 +531,76 @@ impl Page {
 
         ui.add_space(8.0);
         ui.separator();
+        if tap(ui, "Look for matches", reachable) {
+            self.connect(now);
+        }
+        if !reachable {
+            // A button that does nothing and says nothing is the worst of both. Say which
+            // of the two things is missing, since one of them arrives with the page and a
+            // person has no reason to expect either.
+            ui.label(
+                egui::RichText::new(if named {
+                    "A relay address is needed, and this page did not come with one."
+                } else {
+                    "A name is needed first."
+                })
+                .size(12.0),
+            );
+        }
+    }
+
+    /// Connected, and not at a match: what is open, and the two ways to be at one.
+    fn lobby(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Matches");
+        if let Some(trouble) = &self.trouble {
+            ui.label(egui::RichText::new(trouble).strong());
+        }
+        ui.label(
+            egui::RichText::new(format!(
+                "You are {}, playing {}.",
+                self.name.trim(),
+                PALETTE[self.colour].name
+            ))
+            .size(12.0),
+        );
+        ui.separator();
+
+        let mut joining = None;
+        if !self.answered {
+            ui.label("asking the relay…");
+        } else if self.open.is_empty() {
+            ui.label("Nothing is open. Host one, and somebody can join it.");
+        } else {
+            egui::Grid::new("open").spacing([12.0, 8.0]).show(ui, |ui| {
+                for open in &self.open {
+                    ui.label(egui::RichText::new(&open.host).strong());
+                    ui.label(match open.players {
+                        1 => "1 player".to_string(),
+                        many => format!("{many} players"),
+                    });
+                    if tap(ui, "Join", open.players < MAX_SEATS) {
+                        joining = Some(open.match_id.clone());
+                    }
+                    ui.end_row();
+                }
+            });
+        }
+
+        ui.add_space(6.0);
+        if tap(ui, "Look again", true) {
+            self.look_again();
+        }
+
+        ui.add_space(8.0);
+        ui.separator();
         ui.label(egui::RichText::new("Host a match").strong());
+        let mut hosting = false;
         ui.horizontal(|ui| {
             ui.add_sized(
                 [240.0, 30.0],
                 egui::TextEdit::singleline(&mut self.match_name).hint_text("what to call it"),
             );
-            if tap(ui, "Host", reachable && !self.match_name.trim().is_empty()) {
-                let seated = Seated::hosting(
-                    self.account(),
-                    self.name.trim(),
-                    PALETTE[self.colour].name,
-                    self.match_name.trim(),
-                    Box::new(self.hand.clone()),
-                );
-                self.begin(seated, now);
-            }
+            hosting = tap(ui, "Host", !self.match_name.trim().is_empty());
         });
         ui.label(
             egui::RichText::new(
@@ -496,23 +612,50 @@ impl Page {
 
         ui.add_space(8.0);
         ui.separator();
-        ui.label(egui::RichText::new("Join a match").strong());
+        ui.label(egui::RichText::new("Join by id").strong());
         ui.horizontal(|ui| {
             ui.add_sized(
                 [340.0, 30.0],
                 egui::TextEdit::singleline(&mut self.paste).hint_text("the id the host gives you"),
             );
-            if tap(ui, "Join", reachable && !self.paste.trim().is_empty()) {
-                let seated = Seated::joining(
-                    self.account(),
-                    self.name.trim(),
-                    PALETTE[self.colour].name,
-                    MatchId(self.paste.trim().to_string()),
-                    Box::new(self.hand.clone()),
-                );
-                self.begin(seated, now);
+            if tap(ui, "Join", !self.paste.trim().is_empty()) {
+                joining = Some(MatchId(self.paste.trim().to_string()));
             }
         });
+        ui.label(
+            egui::RichText::new(
+                "Still here because a listing shows only what is open to everyone, and an \
+                 id reaches a match whoever has it.",
+            )
+            .size(12.0),
+        );
+
+        ui.add_space(8.0);
+        ui.separator();
+        if tap(ui, "Disconnect", true) {
+            self.disconnect(None);
+            return;
+        }
+
+        if hosting {
+            let seated = Seated::hosting(
+                self.account(),
+                self.name.trim(),
+                PALETTE[self.colour].name,
+                self.match_name.trim(),
+                Box::new(self.hand.clone()),
+            );
+            self.sit(seated);
+        } else if let Some(match_id) = joining {
+            let seated = Seated::joining(
+                self.account(),
+                self.name.trim(),
+                PALETTE[self.colour].name,
+                match_id,
+                Box::new(self.hand.clone()),
+            );
+            self.sit(seated);
+        }
     }
 
     /// In a match that has not started.
@@ -746,12 +889,13 @@ impl Page {
             }
         });
         if done {
-            // Both buttons do the same thing, and say so differently on purpose: one
-            // person is going back to host or join another match and the other is done,
-            // and neither needs the match they have just finished.
-            self.finish(None);
+            // Both buttons go back to the lobby, and say so differently on purpose: one
+            // person is going to host or join another and the other is done. Neither needs
+            // the match they have just finished, and neither needs the socket closed —
+            // leaving the relay is its own button, one screen on.
             self.match_name.clear();
             self.paste.clear();
+            self.leave_seat(None);
         }
 
         ui.separator();
@@ -1038,8 +1182,8 @@ mod tests {
 
     #[test]
     fn with_no_seat_there_is_nothing_to_show_but_the_entry() {
-        assert_eq!(screen_for(None, false), Screen::Entry);
-        assert_eq!(screen_for(None, true), Screen::Entry);
+        assert_eq!(screen_for(false, None, false), Screen::Entry);
+        assert_eq!(screen_for(false, None, true), Screen::Entry);
     }
 
     /// A finished match shows its result whatever else is true of it, including when it is
@@ -1049,7 +1193,7 @@ mod tests {
         for stance in every_stance().into_iter().filter(|stance| stance.over) {
             for quiet in [false, true] {
                 assert_eq!(
-                    screen_for(Some(stance), quiet),
+                    screen_for(true, Some(stance), quiet),
                     Screen::Over,
                     "{stance:?} quiet: {quiet}"
                 );
@@ -1066,7 +1210,7 @@ mod tests {
         {
             for quiet in [false, true] {
                 assert_eq!(
-                    screen_for(Some(stance), quiet),
+                    screen_for(true, Some(stance), quiet),
                     Screen::Waiting,
                     "{stance:?} quiet: {quiet}"
                 );
@@ -1082,7 +1226,7 @@ mod tests {
         for stance in every_stance().into_iter().filter(|stance| stance.my_turn) {
             for quiet in [false, true] {
                 assert_ne!(
-                    screen_for(Some(stance), quiet),
+                    screen_for(true, Some(stance), quiet),
                     Screen::Halted,
                     "{stance:?} quiet: {quiet}"
                 );
@@ -1098,12 +1242,12 @@ mod tests {
             playing: true,
             ..AT_THE_TABLE
         };
-        assert_eq!(screen_for(Some(mine), false), Screen::Playing);
+        assert_eq!(screen_for(true, Some(mine), false), Screen::Playing);
         let out = Stance {
             playing: false,
             ..AT_THE_TABLE
         };
-        assert_eq!(screen_for(Some(out), false), Screen::Watching);
+        assert_eq!(screen_for(true, Some(out), false), Screen::Watching);
     }
 
     /// Quiet decides nothing while this seat has the turn, and everything while another
@@ -1118,7 +1262,7 @@ mod tests {
                 ..AT_THE_TABLE
             };
             assert_eq!(
-                screen_for(Some(theirs), false),
+                screen_for(true, Some(theirs), false),
                 if playing {
                     Screen::Playing
                 } else {
@@ -1126,7 +1270,7 @@ mod tests {
                 },
                 "a short wait is not a halt"
             );
-            assert_eq!(screen_for(Some(theirs), true), Screen::Halted);
+            assert_eq!(screen_for(true, Some(theirs), true), Screen::Halted);
         }
     }
 
@@ -1159,7 +1303,7 @@ mod tests {
     #[test]
     fn nothing_can_be_called_from_a_halted_screen() {
         for stance in every_stance() {
-            if screen_for(Some(stance), true) == Screen::Halted {
+            if screen_for(true, Some(stance), true) == Screen::Halted {
                 assert!(!may_call(stance), "halted and callable: {stance:?}");
             }
         }
@@ -1182,22 +1326,45 @@ mod tests {
     }
 
     /// Outside a browser there is no socket, and the entry screen is told so rather than
-    /// the page pretending it is in a match.
+    /// the page pretending it reached the relay.
     #[test]
-    fn without_a_browser_nothing_is_joined() {
+    fn without_a_browser_nothing_is_connected() {
         let mut page = Page::new();
         page.name = "Sean".to_string();
         page.relay = "wss://nowhere/live".to_string();
-        let seated = Seated::joining(
-            page.account(),
-            "Sean",
-            "red",
-            MatchId("whatever".to_string()),
-            Box::new(page.hand.clone()),
-        );
-        page.begin(seated, 0.0);
-        assert!(page.seated.is_none(), "there is no seat without a socket");
+        page.connect(0.0);
+        assert!(page.wire.is_none(), "there is no socket outside a browser");
+        assert!(page.seated.is_none(), "and so no seat either");
         assert!(page.trouble.is_some(), "and the reason is on the screen");
-        assert_eq!(screen_for(page.stance(), false), Screen::Entry);
+        assert_eq!(
+            screen_for(page.wire.is_some(), page.stance(), false),
+            Screen::Entry
+        );
+    }
+
+    /// A socket and no seat is the lobby, whatever else is true, and no seat and no socket
+    /// is the entry. Nothing else distinguishes the two screens, which is why connecting
+    /// is a step of its own rather than part of hosting.
+    #[test]
+    fn a_socket_without_a_seat_is_the_lobby() {
+        for quiet in [false, true] {
+            assert_eq!(screen_for(true, None, quiet), Screen::Lobby);
+            assert_eq!(screen_for(false, None, quiet), Screen::Entry);
+        }
+    }
+
+    /// Being at a match beats being connected: a seat is always drawn as the seat it is,
+    /// never as the lobby it was reached from.
+    #[test]
+    fn a_seat_is_never_drawn_as_the_lobby() {
+        for stance in every_stance() {
+            for quiet in [false, true] {
+                assert_ne!(
+                    screen_for(true, Some(stance), quiet),
+                    Screen::Lobby,
+                    "{stance:?} quiet: {quiet}"
+                );
+            }
+        }
     }
 }

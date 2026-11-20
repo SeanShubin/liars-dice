@@ -12,8 +12,7 @@ them rather than as a probe does.
 /implementation/hotseat.md — the presentation, and the `Decides` trick that lets a person
 sit behind the same trait an AI does.
 
-Not in this unit of work: the lobby and identity. Both are named under Open Items with
-what they cost.
+Not in this unit of work: identity, which is named under Open Items with what it costs.
 
 ## Approach
 
@@ -57,7 +56,8 @@ the alternative is a client that is wrong whenever somebody else is quick.
 
 | Screen | What it is for |
 |--------|----------------|
-| Entry | A name, a colour, and either host or join. Joining takes a match id, pasted. |
+| Entry | A name, a colour, and a relay. Ends at *Look for matches*, which is what opens the socket. |
+| Lobby | Connected and not at a match: what is open with a Join each, a field to host by name, a field to join by id, and the way out. |
 | Waiting | Hosted and not started: shows the match id to pass to somebody, who has joined, and the start button. The host's screen only. |
 | Playing | The seat's own view. The same panels the hot seat game draws: the table, the dialler, the history, the odds. |
 | Watching | Eliminated and the match goes on. The same panels, with nothing to press: an eliminated seat is dealt and shown exactly what any seat is, and holds no dice. |
@@ -117,9 +117,22 @@ here.
 
 ### Finding a match
 
-By pasting a match id, until the lobby exists. The host is told its id in the `created`
-frame and shows it; the other player types it in. That is enough for two people to play
-and it needs no change to `crates/relay`, where the lobby does — see Open Items.
+Two ways, and both are kept. The lobby lists what is open — host, player count, and a
+button each — and a pasted id reaches a match whoever holds it. The second is not a
+leftover: a listing shows only what is open to everybody, so an id is how somebody is
+invited to a match before anyone else takes the seat.
+
+**Connecting is a step of its own, before hosting or joining.** The lobby's question is
+the opening frame, so the socket is open before the client has decided anything, and
+hosting or joining later travels on that same socket. That is why the entry screen ends
+at *Look for matches* rather than at a Host button: a client that connected only in order
+to host could never have looked first.
+
+Which also decides what leaving means. Leaving a match drops the seat and keeps the
+socket, putting somebody back in the lobby where another match is — leaving the relay is
+its own button, one screen on. A refusal does the same and says why, because a refusal is
+the relay declining a message rather than the transport going away; only a socket that has
+actually gone takes the page back to the entry screen.
 
 ## Boundaries
 
@@ -218,14 +231,21 @@ untried is better than counting the tests that do not reach them.
 
 ## Open Items
 
-**Nothing asks for the lobby.** `Relay::open_matches` exists and no `Message` reaches it,
-so a client cannot list matches. Pasting an id is the way around it, and the lobby needs a
-message, an answer frame, and a statement about who may ask — which is a unit of work in
-`crates/relay`, not here.
-
 **A host who leaves before the start.** Host powers are the seat in the log, so a match
-whose host has gone can never be started and is still listed as joinable. The lobby is
-where that is answered, because listing is the lobby's job.
+whose host has gone can never be started and is still listed as joinable. The lobby now
+exists and still lists it, because not listing it would need a statement nobody has
+approved: `Every match that can be joined is listed` is true of it, and whether a match
+that cannot begin counts as joinable is a question about the specification rather than
+about the fold.
+
+**A second join from one account takes a second seat.** Found in the log of the first
+match two people played on the published page: the same account appears on seat 1 and
+seat 2. `join` never asks whether the account is already there, so reloading and joining
+again occupies two seats — and because `attach` moves a socket to the newest, the earlier
+seat is left with no connection and halts the match at its turn, permanently. It is in the
+log rather than the connection table, so no reconnection clears it. The fix is to answer a
+repeat with the seat already held, exactly as `host` answers with the match already made,
+and it wants a statement first.
 
 **Reconnection is written and unused.** `Message::Resume` exists and the relay replays
 everything a seat may see. Nothing in this client calls it yet, so closing a tab loses
@@ -241,9 +261,13 @@ so it is named here rather than slipped in.
 ## Status
 **Built.** Published at `/liars-dice/multiplayer/`, linked from the root, and the deploy
 writes the relay's address into the page. The entry, waiting, playing, watching, halted and
-over screens are all drawn; leaving works from every screen that offers it. 12 tests here,
-226 across the workspace, clippy clean against both the host target and `wasm32`.
+over screens are all drawn, the lobby lists what is open, and leaving works from every
+screen that offers it. 14 tests here, 249 across the workspace with DynamoDB Local up,
+clippy clean against both the host target and `wasm32`.
 
-Not done, and all of it above: the lobby, so a match is found by pasting an id; `Resume`,
-so closing a tab loses the seat; and identity, so an account is whatever a client says it
-is.
+Confirmed in a browser, and not by the author: two people on the published page hosted a
+match and joined it from a second tab. That is the socket, the frame format, the wasm
+build and the page, end to end — everything `apps/probe` could not reach.
+
+Not done, and both of it above: `Resume`, so closing a tab loses the seat; and identity,
+so an account is whatever a client says it is.
