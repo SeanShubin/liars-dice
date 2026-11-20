@@ -56,6 +56,7 @@ Not started | In progress | Built
 - [Protocol](/implementation/protocol.md) — seats, the version line, shield events
 - [Deployment](/implementation/deployment.md) — the GitHub pipeline, AWS wiring, Discord OAuth
 - [Hotseat](/implementation/hotseat.md) — one screen passed between seats, and the one presentation both deliveries draw
+- [Identity](/implementation/identity.md) — guests, Discord tickets, AI players, and what makes a match ranked
 - [Multiplayer Client](/implementation/multiplayer-client.md) — the browser half of a networked match: a socket, one seat, the same presentation
 
 ## Order
