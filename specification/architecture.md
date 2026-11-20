@@ -50,7 +50,7 @@
 - The deploy pipeline runs in GitHub
 - seanshubin.com links to the liars dice game
 - The pretty web game is reachable at seanshubin.com/liars-dice
-- The minimal web game is reachable at seanshubin.com/liars-dice/minimal
+- The minimal web game is reachable at seanshubin.com/liars-dice/multiplayer
 - seanshubin.com/liars-dice/pretty redirects to seanshubin.com/liars-dice
 - The data browser is reachable at seanshubin.com/liars-dice/admin
 - The hotseat match is reachable at seanshubin.com/liars-dice/hotseat
