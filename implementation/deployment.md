@@ -192,6 +192,26 @@ renderer, and why that is paid rather than avoided is in
 the wasm build outright; `glow` alone builds and carries nothing a two dimensional
 presentation does not use.
 
+### The networked match
+
+`seanshubin.com/liars-dice/multiplayer` is the second page, built from the same workspace
+by a second `trunk build` into a second path and linked from the root, which the gate
+checks. It is the same presentation as the hotseat page and a different source for it —
+frames from the relay rather than a table in the tab — so the two look alike because there
+is one copy of the panels rather than two kept in step.
+
+One step exists only for this page. The relay's address is a stack output, so the gate
+cannot know it: the gate builds the bundle and has no AWS credentials, which is the whole
+point of splitting the two jobs. So the page carries `RELAY_SOCKET_URL` as a placeholder
+and the deploy writes the real address over it before the sync. The step checks that the
+placeholder was there and prints the address it wrote, because a silent miss would publish
+a page that cannot connect and nothing else would notice.
+
+Why the page and not the bundle: the bundle is content-hashed and cached for a year, while
+HTML is published with `no-cache` and re-read every time. An address in the bundle would
+also mean the artifact the gate uploaded is not the artifact that gets deployed, and the
+whole arrangement rests on those being the same bytes.
+
 ### Desktop builds
 
 The pipeline builds a desktop binary per presentation and publishes it to GitHub
@@ -242,12 +262,16 @@ The static half is built and has run. One push drove the whole pipeline end to e
 first time on 2026-11-18: the gate formatted, linted with warnings denied, tested, built
 the release wasm bundle and checked every page reachable from the root, and the deploy
 updated the stack, synced both cache classes, invalidated the edge and confirmed `/` and
-`/liars-dice/hotseat/` answer 200. `scripts/push` is the way it is run.
+`/liars-dice/hotseat/` answer 200. `scripts/push` is the way it is run. Both browser pages
+are checked that way now, and the relay's own deploy is a second stack the same job
+updates.
 
 Two things that first run settled, neither of which any amount of local green could have:
 the workspace had never been compiled on Linux and it compiles clean, and the deploy role's
 trust condition had never been exercised and was wrong - see Bootstrap above.
 
-Not started: everything server side. The relay service, the DynamoDB log, the API Gateway
-WebSocket connection table and Discord OAuth are all still stubs, and the deployed stack is
-seven resources of static hosting. What is live is the hotseat match, which needs no server.
+The server side followed. The relay service, the DynamoDB log and the API Gateway
+WebSocket connection table are deployed and a whole match has played across them — see
+[Relay Service](/implementation/relay-service.md) — and the browser client that plays one
+is published beside the hotseat page. Discord OAuth is the one thing still a stub, so an
+account is whatever a client asserts.

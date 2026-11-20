@@ -338,9 +338,9 @@ one would silently make every commitment unverifiable.
   same events, same order, every round's seed matching its commitment.
 
 `crates/seat` is the client half, and it holds no transport. Frames in, frames out: the
-caller owns the socket, so `apps/probe` gives it one from a terminal and `apps/web` will
-give it one from a browser, and neither has any logic to get wrong because there is none
-there to duplicate. `crates/table` is the other arrangement of the same pieces — it owns
+caller owns the socket, so `apps/probe` gives it one from a terminal and `apps/web` gives
+it one from a browser, and neither has any logic to get wrong because there is none there
+to duplicate. `crates/table` is the other arrangement of the same pieces — it owns
 the relay and every player in one process — and the two now share the odds calculation
 rather than each having one, because that figure goes in the log and two answers to it
 would be two logs.

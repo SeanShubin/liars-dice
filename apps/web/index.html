@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Liars Dice — multiplayer</title>
+    <!--
+      Where the relay is. The deploy writes the real address over the placeholder, because
+      the deploy is the only thing that knows it: this bundle is built in the gate, which
+      has no AWS credentials and must not have any. The entry screen shows whatever is
+      here and lets it be edited, which is also how a local build reaches a deployed relay.
+    -->
+    <meta name="relay" content="RELAY_SOCKET_URL" />
+    <style>
+      html, body { margin: 0; height: 100%; background: #111; overflow: hidden; overscroll-behavior: none; }
+      canvas { display: block; width: 100%; height: 100%; outline: none; touch-action: none; user-select: none; -webkit-user-select: none; }
+    </style>
+  </head>
+  <body>
+    <canvas id="table"></canvas>
+    <link data-trunk rel="rust" data-bin="web" data-wasm-opt="z" />
+  </body>
+</html>

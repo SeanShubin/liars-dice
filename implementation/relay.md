@@ -402,7 +402,7 @@ The boundary is tested, not just stated. `tests/boundaries.rs` reads the crate's
 manifest and fails if `rules` ever appears in it, or if any dependency other than
 `protocol` and `integrity` does.
 
-Not built here, and still stubs: `crates/model`, `crates/coordinator`, `apps/local`,
-`apps/web`. A whole match already runs in one process through `relay::memory`, which is
-what `apps/local` was wanted for; what remains for it is driving two real clients with a
-rules engine on each side.
+Not built here, and all of it since built elsewhere: `crates/coordinator` is the client,
+`apps/local` drives a whole match at a terminal through `relay::memory`, and `apps/web`
+drives one seat of a real match in a browser. `crates/model` is the one thing on that list
+still a stub.

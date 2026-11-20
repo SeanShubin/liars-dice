@@ -21,7 +21,7 @@ pub mod panel;
 pub mod seating;
 pub mod widget;
 
-pub use palette::{PALETTE, Swatch, assign, distance, ink, lightness};
+pub use palette::{PALETTE, Swatch, assign, distance, index_of, ink, lightness};
 pub use panel::{
     Steps, any_shields, calls, dialler, history, odds, opening_claim, ranking, standing,
     steps_from, table, verdict,

@@ -143,11 +143,16 @@ jobs:
         working-directory: apps/hotseat
         run: trunk build --release --public-url /liars-dice/hotseat/
 
+      - name: Build the networked match for the browser
+        working-directory: apps/web
+        run: trunk build --release --public-url /liars-dice/multiplayer/
+
       - name: Assemble the site
         run: |
-          mkdir -p site/liars-dice/hotseat
+          mkdir -p site/liars-dice/hotseat site/liars-dice/multiplayer
           cp web/index.html site/index.html
           cp -r apps/hotseat/dist/* site/liars-dice/hotseat/
+          cp -r apps/web/dist/* site/liars-dice/multiplayer/
           find site -type f | sort
 
       # Nothing is published that cannot be found from the root, and nothing is
@@ -215,6 +220,19 @@ jobs:
           aws cloudformation describe-stacks --stack-name "$RELAY_STACK" \
             --query "Stacks[0].Outputs[?OutputKey=='SocketUrl'].OutputValue" --output text
 
+      # The bundle cannot carry the relay's address, because the job that built it is
+      # not allowed to know it. The page can: it is published from here, and the entry
+      # screen reads it from the page rather than from anything compiled in.
+      - name: Tell the page where the relay is
+        run: |
+          url=$(aws cloudformation describe-stacks --stack-name "$RELAY_STACK" \
+            --query "Stacks[0].Outputs[?OutputKey=='SocketUrl'].OutputValue" --output text)
+          test -n "$url"
+          page=site/liars-dice/multiplayer/index.html
+          grep -q RELAY_SOCKET_URL "$page"
+          sed -i "s|RELAY_SOCKET_URL|${url}|" "$page"
+          grep -o 'content="wss[^"]*"' "$page"
+
       - name: Read the stack's outputs
         id: stack
         run: |
@@ -250,7 +268,7 @@ jobs:
 
       - name: Check what is live
         run: |
-          for path in / /liars-dice/hotseat/; do
+          for path in / /liars-dice/hotseat/ /liars-dice/multiplayer/; do
             code=$(curl -s -o /dev/null -w "%{http_code}" "https://seanshubin.com${path}")
             echo "${path} -> ${code}"
             test "$code" = "200"

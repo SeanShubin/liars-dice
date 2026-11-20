@@ -61,13 +61,28 @@ the alternative is a client that is wrong whenever somebody else is quick.
 | Waiting | Hosted and not started: shows the match id to pass to somebody, who has joined, and the start button. The host's screen only. |
 | Playing | The seat's own view. The same panels the hot seat game draws: the table, the dialler, the history, the odds. |
 | Watching | Eliminated and the match goes on. The same panels, with nothing to press: an eliminated seat is dealt and shown exactly what any seat is, and holds no dice. |
-| Halted | Waiting on an absent player, named. Reached from Playing or Watching and left by itself when they return. |
+| Halted | Playing or Watching, with a line naming the seat that has gone quiet. Left by itself when they claim. |
 | Over | The ranking, and the choice to play again or go. |
 
 Playing and Watching are the same screen with the dialler removed, because that is what
 the difference amounts to: `Seated::playing` is whether this seat still holds dice. The
 `View` already returns nothing it should not, so an eliminated seat watching reveals
 nothing a playing seat would not have seen.
+
+**Halted is a line on that screen rather than a screen of its own**, which is a change
+from what this document first said. A page that replaced the table with the words *waiting
+on Bob* would hide the match that is waiting, and the match is the thing somebody is
+looking at. So the three are one function of two facts, and the choice is a function and
+not a field: a remembered screen would be a second place that knows whether this seat holds
+dice, and the two would disagree.
+
+**And a client cannot tell an absent player from a slow one.** Presence is deliberately not
+in the log, so nothing is coming that says Bob's tab has closed; all this page knows is that
+nothing has arrived for twenty seconds. The line therefore says what has been heard and
+never who is there — it offers both readings and says it cannot tell them apart — and
+crossing the threshold changes no rule and sends no message. A seat is never halted on its
+own turn, however long it sits there, because then the match is stopped by the person
+reading the screen and blaming somebody else for it would be a lie.
 
 **Leave is available from Playing, Watching and Halted.** From Watching it is the
 ordinary way out, and that is the case the whole mechanism exists for. From Playing it
@@ -78,6 +93,14 @@ is the point: it sits there, and whoever is left can host another, join another,
 A person reaches the match through `Hand(Rc<Cell<Option<Call>>>)` implementing `Decides`,
 exactly as in the hot seat game: the screen puts a call in and the seat takes it out, so
 nothing between a person and the relay branches on whether a seat is human.
+
+**Which is why the call buttons are drawn only on this seat's turn.** A call made out of
+turn is not refused, it is *kept*: `Seated` asks the driver only when the turn is this
+seat's, so a call put in the hand early sits there and fires the instant the turn comes
+round — a mis-click while waiting becoming a committed call a minute later, with nothing
+having said so. The dialler stays, because dialling commits nothing and thinking ahead is
+what it is for. Every screen that offers a call is one where `may_call` holds, and that is
+checked over every combination of the facts rather than reasoned about.
 
 ### A halted match is not a problem to solve
 
@@ -100,9 +123,13 @@ and it needs no change to `crates/relay`, where the lobby does — see Open Item
 
 ## Boundaries
 
-- **Depends on** `seat`, `render-minimal`, `rules`, `protocol`, `eframe` and `web-sys`.
-- **Does not depend on** `relay` directly, `table`, or any AWS crate. The relay reaches it
-  only as frames, and the one thing that knows the frame format is `wire`, through `seat`.
+- **Depends on** `seat`, `render-minimal`, `rules`, `protocol`, `coordinator`, `eframe` and
+  `web-sys`.
+- **Does not depend on** `relay` directly, `table`, `wire`, or any AWS crate. The relay
+  reaches it only as frames, and the one thing that knows the frame format is `wire`,
+  through `seat`. `MatchId` and `Refused` are re-exported by `seat` so that naming a match
+  and reporting a refusal do not cost a dependency on the service: both are the protocol,
+  not the service that speaks it.
 - **Owns** the socket, the screens, and the person's half of a `Decides`.
 - **Does not own** any rule, any secret, or any decision about what another seat holds. It
   draws from a `View`, which returns `None` for another seat's dice until the reveal, so
@@ -119,6 +146,31 @@ different source for the same panels, so the screens differ and the drawing does
 lets a whole match run in a unit test; it is the wrong shape for a client, which owns one
 player and no relay. The two arrangements already share the odds calculation, and sharing
 more would mean one of them pretending to be the other.
+
+**The account is the typed name, and the host's match name is the nonce.** Both are chosen
+so that nothing taken from a clock reaches the log. A match's identity is
+`hmac(secret, account, nonce)`, so a nonce read from a clock would make every reload a new
+match and would put a reading of the browser's clock into a permanent record; a nonce the
+person typed makes `A repeated request to host creates no second match` useful rather than
+merely true — host *tuesday night* twice and you are taken back to the match you already
+have. The same for the account: derived from the name, it is stable across reloads without
+anything being stored, and the collision between two people who type the same name is the
+identity hole below rather than a new one.
+
+**The relay's address comes from the page, not from the bundle.** The gate builds the wasm
+and has no AWS credentials, so it cannot know where the relay is; the deploy knows and
+publishes the page. So `index.html` carries `<meta name="relay" content="RELAY_SOCKET_URL">`
+and the deploy writes the real address over the placeholder, which is checked for rather
+than assumed — a silent miss would ship a page that cannot connect. The entry screen shows
+whatever it found and lets it be edited, which is the only way a local `trunk serve` can
+reach a deployed relay.
+
+**No socket outside a browser.** The native build exists so that the screens, the queue and
+the choice of screen are compiled, linted and tested by the same gate as everything else,
+and its `socket::open` says there is no transport. A second socket implementation here
+would be a second thing to keep in step with the first, tested by nothing, to no end:
+`apps/probe` already plays whole matches over a real socket from a terminal, which is what
+a native build of this would be for.
 
 **The account is asserted, not proven, and this is a hole.** Until identity exists a
 client sends whatever account it likes, so anyone who knows another player's account id
@@ -139,10 +191,30 @@ The logic is tested where the logic is: `crates/seat` plays a whole match throug
 format with no socket, and `apps/probe` plays one through the deployed relay. This crate
 is a composition root, so what is left to check is what a composition root can get wrong.
 
-- The frame queue preserves order, tested over the queue alone without a socket.
-- The screens are checked by eye, as the shield indicator was. No test can read a canvas,
-  and saying so is better than a test that pretends to.
-- Two browser tabs playing each other, by hand, once the page is published.
+- The frame queue preserves order, through a clone, which is how it is used: the callback
+  holds one handle and the frame loop holds the other.
+- A call put in the hand is taken exactly once, so pressing a button sends one claim rather
+  than one per frame until the relay answers.
+- The choice of screen, over **every** combination of the four facts it reads. It is a free
+  function of those facts rather than a method on the page, so each case is stated rather
+  than reached: a finished match shows its result whatever else is true; a match that has
+  not started can show nothing but Waiting; a seat is never halted on its own turn; and
+  quiet decides nothing until another seat has the turn.
+- A seat opened without a browser leaves the page at the entry screen with the reason on it,
+  rather than in a match it has no socket for.
+- A call is offered only on this seat's turn, over every combination of the facts, and no
+  halted screen offers one.
+- The panels themselves are checked by eye, as the shield indicator was. No test can read a
+  canvas, and saying so is better than a test that pretends to.
+- Two browser tabs playing each other, by hand.
+
+What a browser has shown so far and what it has not, because the difference matters: the
+page is served, the bundle boots, the entry screen draws, and the palette, the fields and
+the buttons are right. The socket's own paths — a frame arriving, a socket refusing to
+open, a close reported to the screen — have not been watched in a browser, because the
+deployed relay is a protocol behind this code and will refuse every opening frame until a
+deploy lands. They are the one thing here that only a browser can show, and saying they are
+untried is better than counting the tests that do not reach them.
 
 ## Open Items
 
@@ -159,9 +231,19 @@ where that is answered, because listing is the lobby's job.
 everything a seat may see. Nothing in this client calls it yet, so closing a tab loses
 the seat until the page knows to resume rather than to join.
 
-**The page is not published.** The pipeline builds and publishes one browser bundle, the
-hot seat one. This needs a second `trunk build`, a second path, and a link from the root,
-which the gate checks.
+**An asserted account is recorded as a Discord one.** The log says `discord:web-sean` for
+somebody Discord has never heard of, because `Account` has no variant for a name a client
+merely claimed. `Account::Asserted(String)` would make the hole visible in every line it
+appears on and would tell a pre-identity log from a real one at a glance, which is worth
+more than the protocol bump it costs. It is a protocol decision and wants its own statement,
+so it is named here rather than slipped in.
 
 ## Status
-Not started.
+**Built.** Published at `/liars-dice/multiplayer/`, linked from the root, and the deploy
+writes the relay's address into the page. The entry, waiting, playing, watching, halted and
+over screens are all drawn; leaving works from every screen that offers it. 12 tests here,
+226 across the workspace, clippy clean against both the host target and `wasm32`.
+
+Not done, and all of it above: the lobby, so a match is found by pasting an id; `Resume`,
+so closing a tab loses the seat; and identity, so an account is whatever a client says it
+is.

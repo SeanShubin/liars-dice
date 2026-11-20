@@ -2,8 +2,8 @@
 //!
 //! Realizes the client half of /implementation/relay-service.md's end-to-end test. The
 //! transport is the caller's: `apps/probe` gives this a socket from a terminal and
-//! `apps/web` will give it one from a browser, and neither has any logic to get wrong
-//! because there is none here to duplicate.
+//! `apps/web` gives it one from a browser, and neither has any logic to get wrong because
+//! there is none here to duplicate.
 //!
 //! `crates/table` is the other arrangement of the same pieces — it owns the relay and
 //! every player in one process, which is what lets a whole match run in a unit test. This
@@ -12,9 +12,18 @@
 use ai::Seen;
 use coordinator::{Client, Decides, Intent};
 use protocol::{Account, Event, PROTOCOL_VERSION, Seat};
-use relay::{MatchId, Message, Refused};
+use relay::Message;
+use rules::{Call, Claim, Resolution, View};
 use wire::answer::Answer;
 use wire::{Malformed, json, message};
+
+/// A match's name, and why a message was not accepted.
+///
+/// Re-exported so a client depends on this crate alone. A client does not share a library
+/// with the service that routes it — the relay reaches it as frames and nothing else — but
+/// it has to be able to name the match it is joining and to say why it was turned away,
+/// and both of those are the protocol rather than the service.
+pub use relay::{MatchId, Refused};
 
 /// Why a seat stopped.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -38,6 +47,48 @@ impl std::fmt::Display for Stopped {
 }
 
 impl std::error::Error for Stopped {}
+
+/// A round's outcome, kept so it can be drawn after the match has moved past it.
+///
+/// The four things a verdict is made of, captured at the reveal. Nothing here is read back
+/// out of the game later, because the game does not stand still: the next round opens the
+/// moment every seat acknowledges this one, and whoever opens it may claim immediately. A
+/// screen that held the game back to show an outcome would apply that claim to the round it
+/// was still showing.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Showing {
+    pub resolution: Resolution,
+    /// Who ended the round.
+    pub by: Seat,
+    /// What they called. Never a raise: a raise continues a round.
+    pub call: Call,
+    /// The claim they disputed.
+    pub claim: Claim,
+}
+
+/// A player at the match, as the log says. Indexed by seat.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Player {
+    pub name: String,
+    /// The colour they chose, by name. Distinct within a match, because the relay refuses
+    /// one another seat has taken.
+    pub colour: String,
+    pub left: bool,
+}
+
+impl Player {
+    /// A seat in the roster that no join has been seen for.
+    ///
+    /// Reachable only if a later seat's join arrived before an earlier seat's, which the
+    /// ordered log rules out. It exists so that a gap cannot be a panic.
+    fn nobody() -> Self {
+        Self {
+            name: "nobody".to_string(),
+            colour: String::new(),
+            left: false,
+        }
+    }
+}
 
 /// What this seat is here to do.
 enum Opening {
@@ -75,6 +126,8 @@ pub struct Seated {
     /// If a claim is genuinely lost the seat waits rather than guessing, which is what
     /// `Resume` is for.
     awaiting: bool,
+    /// The last round's outcome, for drawing. See [`Showing`].
+    showing: Option<Showing>,
     over: bool,
 }
 
@@ -129,6 +182,7 @@ impl Seated {
             waiting: Vec::new(),
             driver,
             awaiting: false,
+            showing: None,
             over: false,
         }
     }
@@ -180,12 +234,71 @@ impl Seated {
         }
     }
 
+    /// Whether this seat hosted the match, and so may start it.
+    ///
+    /// Read from the log rather than from how this seat was opened. The two agree today
+    /// and would not after a resume, where a client reattaches to a seat it did not open
+    /// in this session and the log is the only thing that still remembers.
+    pub fn host(&self) -> bool {
+        self.stream()
+            .iter()
+            .any(|event| matches!(event, Event::Host { seat } if Some(*seat) == self.mine))
+    }
+
     /// How many players have taken a seat, which is how a host knows when to start.
     pub fn seated(&self) -> usize {
         self.stream()
             .iter()
             .filter(|event| matches!(event, Event::Join { .. }))
             .count()
+    }
+
+    /// This seat's own view of the match, which is what a screen draws from. `None` until
+    /// the match has started.
+    ///
+    /// A view returns `None` for another seat's dice until the round is revealed, so a
+    /// panel handed one cannot draw what this seat may not see. That is a type fact rather
+    /// than a convention, and it is why a screen is given this and never a `Game`.
+    pub fn view(&self) -> Option<View<'_>> {
+        self.client.as_ref()?.view()
+    }
+
+    /// The last round's outcome, kept for drawing. `None` until a round has ended.
+    pub fn showing(&self) -> Option<&Showing> {
+        self.showing.as_ref()
+    }
+
+    /// Who is at the match, in seat order.
+    ///
+    /// Folded from the stream rather than remembered, because the log already says it and
+    /// a second copy is a second thing to keep in step. A `Join` is the only event that
+    /// carries a name, so this is the one place a screen can learn them.
+    pub fn roster(&self) -> Vec<Player> {
+        let mut seats: Vec<Player> = Vec::new();
+        for event in self.stream() {
+            match event {
+                Event::Join {
+                    seat, name, colour, ..
+                } => {
+                    let index = seat.0 as usize;
+                    if seats.len() <= index {
+                        seats.resize_with(index + 1, Player::nobody);
+                    }
+                    seats[index] = Player {
+                        name: name.clone(),
+                        colour: colour.clone(),
+                        left: false,
+                    };
+                }
+                Event::Left { seat } => {
+                    if let Some(player) = seats.get_mut(seat.0 as usize) {
+                        player.left = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        seats
     }
 
     /// Every event this seat has been told about, for checking a run against the log.
@@ -222,6 +335,24 @@ impl Seated {
         Some(json::write(&message::shape_of(&Message::Start {
             match_id,
         })))
+    }
+
+    /// Ask the driver again, without a frame having arrived.
+    ///
+    /// A seat played by an AI answers inside [`Seated::receive`], because its answer is
+    /// ready the moment the event asking for it is. A person is not: they look at the
+    /// screen and decide in their own time, by which point the frame that made it their
+    /// turn is long gone. So a frame loop calls this every frame, and the turn taking is
+    /// the same code either way — there is no second path for a human seat to drift out of
+    /// step with.
+    ///
+    /// Cheap when there is nothing to do: `act` returns before touching the driver unless
+    /// it really is this seat's turn, and a driver a person has not touched answers `None`.
+    pub fn offer(&mut self) -> Result<Vec<String>, Stopped> {
+        if self.over {
+            return Ok(Vec::new());
+        }
+        Ok(self.act()?.into_iter().collect())
     }
 
     /// Take one frame from the socket; give back the frames to send in answer.
@@ -301,6 +432,18 @@ impl Seated {
             && let Some(client) = &mut self.client
             && let Some(resolution) = client.settle()
         {
+            // Copied out before the round is left behind. `ended_by` is cleared by
+            // `begin_next_round`, and the claim that was disputed is the last entry of a
+            // history the next round forgets, so after that call neither is readable
+            // anywhere.
+            self.showing = client.ended_by().and_then(|(by, call)| {
+                Some(Showing {
+                    resolution,
+                    by,
+                    call,
+                    claim: client.public()?.history().last()?.claim,
+                })
+            });
             if resolution.over {
                 self.over = true;
                 return Ok(frames);

@@ -57,6 +57,16 @@ pub const PALETTE: [Swatch; 20] = [
     swatch("black", 28, 28, 28),
 ];
 
+/// The palette entry a colour name refers to.
+///
+/// A match carries a colour as the name a player chose, not as an index: an index means
+/// nothing outside this crate and a log is read by people. The relay refuses a colour
+/// another seat has taken, so the names in one match are distinct, and so are the swatches
+/// this maps them to.
+pub fn index_of(name: &str) -> Option<usize> {
+    PALETTE.iter().position(|swatch| swatch.name == name)
+}
+
 fn to_linear(channel: u8) -> f32 {
     let value = channel as f32 / 255.0;
     if value <= 0.04045 {
