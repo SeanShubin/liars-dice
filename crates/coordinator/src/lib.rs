@@ -195,6 +195,14 @@ impl Client {
                 Vec::new()
             }
             Event::Reveal { seed } => self.take_reveal(seed),
+            // Coordination arriving at the rules: the relay recorded that somebody left
+            // and this is what leaving means to the game.
+            Event::Left { seat } => {
+                if let Some(game) = self.game.as_mut() {
+                    game.concede(seat.0 as usize);
+                }
+                Vec::new()
+            }
             Event::Claim {
                 seat,
                 quantity,

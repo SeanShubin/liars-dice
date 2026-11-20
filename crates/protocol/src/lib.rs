@@ -147,7 +147,7 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
 ///
 /// A client cannot join a match or load a save whose version differs from its own, so no
 /// match spans two versions and no log holds two. The `version` line says which.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// A seat at a match.
 ///
@@ -223,6 +223,15 @@ pub enum Event {
     /// count of messages, not a judgement about the round, which is how the relay times
     /// the reveal without knowing any game rule.
     RoundOver {
+        seat: Seat,
+    },
+    /// A player left the match.
+    ///
+    /// Membership, not presence. Losing a connection says nothing permanent and writes
+    /// nothing; this is a player saying they are done, and it belongs in the log beside
+    /// the `join` that put them there. The rules read it as an elimination; the relay
+    /// reads it as one fewer participant to wait for.
+    Left {
         seat: Seat,
     },
     /// A player takes a seat, with the name and colour that identify them to a reader and
@@ -411,6 +420,7 @@ impl fmt::Display for Event {
             Event::Host { seat } => write!(out, "host {seat}"),
             Event::Bar { seat } => write!(out, "bar {seat}"),
             Event::Lift { seat } => write!(out, "lift {seat}"),
+            Event::Left { seat } => write!(out, "left {seat}"),
             Event::Start => write!(out, "start"),
             Event::RoundOver { seat } => write!(out, "round-over {seat}"),
             Event::PlayerOrder(order) => write!(out, "player-order {}", seats(order)),
@@ -464,6 +474,7 @@ mod tests {
             Event::Host { seat },
             Event::Bar { seat },
             Event::Lift { seat },
+            Event::Left { seat },
             Event::RoundOver { seat },
             Event::Join {
                 seat,

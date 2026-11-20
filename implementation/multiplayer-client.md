@@ -60,11 +60,37 @@ the alternative is a client that is wrong whenever somebody else is quick.
 | Entry | A name, a colour, and either host or join. Joining takes a match id, pasted. |
 | Waiting | Hosted and not started: shows the match id to pass to somebody, who has joined, and the start button. The host's screen only. |
 | Playing | The seat's own view. The same panels the hot seat game draws: the table, the dialler, the history, the odds. |
-| Over | The ranking, and nothing to press. |
+| Watching | Eliminated and the match goes on. The same panels, with nothing to press: an eliminated seat is dealt and shown exactly what any seat is, and holds no dice. |
+| Halted | Waiting on an absent player, named. Reached from Playing or Watching and left by itself when they return. |
+| Over | The ranking, and the choice to play again or go. |
+
+Playing and Watching are the same screen with the dialler removed, because that is what
+the difference amounts to: `Seated::playing` is whether this seat still holds dice. The
+`View` already returns nothing it should not, so an eliminated seat watching reveals
+nothing a playing seat would not have seen.
+
+**Leave is available from Playing, Watching and Halted.** From Watching it is the
+ordinary way out, and that is the case the whole mechanism exists for. From Playing it
+forfeits, because `A player who leaves a match is eliminated`. From Halted it is how
+somebody stops waiting on a player who is not coming back — the match stays halted, which
+is the point: it sits there, and whoever is left can host another, join another, or go.
 
 A person reaches the match through `Hand(Rc<Cell<Option<Call>>>)` implementing `Decides`,
 exactly as in the hot seat game: the screen puts a call in and the seat takes it out, so
 nothing between a person and the relay branches on whether a seat is human.
+
+### A halted match is not a problem to solve
+
+When it is an absent player's turn the match stops, and nothing times out, forfeits, or
+cleans up. The log is retained whether or not a match completes, so a halted match waits
+indefinitely for its player and the screen says whose turn it is. Everyone else is free to
+leave it and start or join another; nothing about one match constrains another.
+
+Two consequences worth having written down. Abandoned matches are permanent by design,
+which is a standing reason the lobby's scan over the log table matters — see
+`relay-service.md`'s Open Item. And a host who leaves before the start leaves a match that
+is listed as joinable and can never begin, which belongs to the lobby unit rather than
+here.
 
 ### Finding a match
 
@@ -124,6 +150,10 @@ is a composition root, so what is left to check is what a composition root can g
 so a client cannot list matches. Pasting an id is the way around it, and the lobby needs a
 message, an answer frame, and a statement about who may ask — which is a unit of work in
 `crates/relay`, not here.
+
+**A host who leaves before the start.** Host powers are the seat in the log, so a match
+whose host has gone can never be started and is still listed as joinable. The lobby is
+where that is answered, because listing is the lobby's job.
 
 **Reconnection is written and unused.** `Message::Resume` exists and the relay replays
 everything a seat may see. Nothing in this client calls it yet, so closing a tab loses

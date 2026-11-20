@@ -196,6 +196,26 @@ impl Seated {
         }
     }
 
+    /// Leave the match for good.
+    ///
+    /// Available whenever this seat is in a match, which includes after elimination —
+    /// that being the case it exists for. The rules read the departure as an elimination,
+    /// so leaving while still holding dice forfeits them.
+    pub fn leave(&self) -> Option<String> {
+        let match_id = self.match_id.clone()?;
+        Some(json::write(&message::shape_of(&Message::Leave {
+            match_id,
+        })))
+    }
+
+    /// Whether this seat still holds dice, which is what decides whether it is playing or
+    /// watching. `None` until the match has started.
+    pub fn playing(&self) -> Option<bool> {
+        let client = self.client.as_ref()?;
+        let public = client.public()?;
+        Some(!public.eliminated(client.seat().0 as usize))
+    }
+
     /// Start the match. Only the host may, and the relay says so if it is not.
     pub fn start(&self) -> Option<String> {
         let match_id = self.match_id.clone()?;

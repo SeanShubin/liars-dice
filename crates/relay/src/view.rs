@@ -31,6 +31,9 @@ pub struct MatchView {
     host: Option<Seat>,
     barred: Vec<Seat>,
     acknowledged: Vec<Seat>,
+    /// Seats that have left for good. Membership, so it comes from the log; presence does
+    /// not, and lives in the connection table.
+    left: Vec<Seat>,
 }
 
 impl MatchView {
@@ -43,6 +46,7 @@ impl MatchView {
             host: None,
             barred: Vec::new(),
             acknowledged: Vec::new(),
+            left: Vec::new(),
         };
         for event in events {
             match event {
@@ -65,6 +69,11 @@ impl MatchView {
                     }
                 }
                 Event::Lift { seat } => view.barred.retain(|barred| barred != seat),
+                Event::Left { seat } => {
+                    if !view.left.contains(seat) {
+                        view.left.push(*seat);
+                    }
+                }
                 Event::Start => view.started = true,
                 Event::RoundOver { seat } => {
                     if !view.acknowledged.contains(seat) {
@@ -90,6 +99,24 @@ impl MatchView {
     /// the round.
     pub fn round_over_count(&self) -> usize {
         self.acknowledged.len()
+    }
+
+    /// Whether this seat has left the match for good.
+    pub fn has_left(&self, seat: Seat) -> bool {
+        self.left.contains(&seat)
+    }
+
+    /// The seats taking part: joined, and not departed.
+    ///
+    /// Nothing to do with the rules and nothing to do with dice — a seat with no dice is
+    /// still taking part until it says otherwise. This is the coordination layer's answer
+    /// to who is in the match, which is the only answer the relay is entitled to have.
+    pub fn participants(&self) -> Vec<Seat> {
+        self.seats
+            .iter()
+            .map(|info| info.seat)
+            .filter(|seat| !self.has_left(*seat))
+            .collect()
     }
 
     pub fn is_barred(&self, account: &Account) -> bool {

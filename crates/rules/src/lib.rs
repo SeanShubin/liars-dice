@@ -320,6 +320,35 @@ impl Game {
     /// Rejected if that seat is already dealt, so a late or duplicated reveal cannot
     /// rewrite a round. Whether the dice agree with the round's seed is the caller's
     /// obligation: this crate knows nothing of seeds.
+    /// A player has left the match, so they hold no dice and take no further turn.
+    ///
+    /// An external input rather than a resolution. Who is taking part is coordination —
+    /// the relay's business, and it records a departure without knowing what one means.
+    /// This is the rules answering it: `A player who leaves a match is eliminated`.
+    ///
+    /// Immediate, not deferred to the round's end. The alternative deadlocks: a player
+    /// who leaves while it is their turn would have to be waited for until a boundary
+    /// that only their own turn can reach. The cost is that a claim already made this
+    /// round is judged against a smaller pool of dice than it was made against, which can
+    /// turn a true claim false through nobody's fault. Nothing a departing player can
+    /// gain by it — they are out either way — but somebody else can lose by it, and that
+    /// is the trade.
+    ///
+    /// Idempotent, and a no-op for a player who is already out, which is the common case:
+    /// an eliminated player leaving is the whole reason this exists.
+    pub fn concede(&mut self, player: usize) {
+        if player >= self.public.counts.len() || self.public.counts[player] == 0 {
+            return;
+        }
+        self.public.counts[player] = 0;
+        self.public.eliminated.push(player);
+        // The turn moves on if it was theirs, because `next_player` skips the eliminated
+        // and nobody else may act in their place.
+        if self.public.current == player {
+            self.public.current = self.public.next_player(player);
+        }
+    }
+
     pub fn install(&mut self, seat: usize, dice: [u8; SEAT]) -> Result<(), AlreadyInstalled> {
         if self.dice[seat].is_some() {
             return Err(AlreadyInstalled);
@@ -1158,6 +1187,56 @@ mod tests {
                 }
             });
         }
+    }
+
+    /// `A player who leaves a match is eliminated`.
+    #[test]
+    fn a_player_who_concedes_holds_no_dice_and_takes_no_turn() {
+        let mut game = game_of(3, 4);
+        let first = game.public().current();
+        game.concede(first);
+
+        assert!(game.public().eliminated(first), "conceding is elimination");
+        assert_eq!(game.public().count(first), 0);
+        assert_ne!(
+            game.public().current(),
+            first,
+            "the turn must move on, or the match halts at a seat that has gone"
+        );
+        assert!(
+            !game.public().ranking().is_empty() && game.public().ranking().last() == Some(&first),
+            "the first to go is last in the ranking: {:?}",
+            game.public().ranking()
+        );
+    }
+
+    /// The common case, and a no-op: somebody already out choosing to leave.
+    #[test]
+    fn conceding_twice_or_when_already_out_changes_nothing() {
+        let mut game = game_of(3, 4);
+        game.concede(2);
+        let after = game.public().ranking();
+        game.concede(2);
+        assert_eq!(
+            game.public().ranking(),
+            after,
+            "a second departure must not be a second elimination"
+        );
+        // And out of range is ignored rather than a panic: the seat comes off a wire.
+        game.concede(99);
+    }
+
+    /// Two players, one leaves: the match is complete and the other has won it.
+    #[test]
+    fn a_match_of_two_is_over_when_one_concedes() {
+        let mut game = game_of(2, 4);
+        assert!(!game.public().over());
+        game.concede(1);
+        assert!(
+            game.public().over(),
+            "one player left means the match is complete"
+        );
+        assert_eq!(game.public().ranking(), vec![0, 1]);
     }
 
     #[test]

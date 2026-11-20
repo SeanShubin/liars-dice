@@ -300,8 +300,66 @@ fn a_round_is_revealed_only_when_every_seat_has_said_it_is_over() {
     );
 }
 
+/// The reveal waits for the seats that are there, not for every seat that ever joined.
+///
+/// Without this an absent player halts the match at the reveal rather than at their turn,
+/// and `A match halts at the turn of an absent player` would be false. They catch up
+/// through `Resume`, which replays everything their seat may see.
 #[test]
-fn a_claim_is_refused_while_a_seat_is_absent_and_accepted_once_it_returns() {
+fn an_absent_seat_does_not_hold_up_the_reveal() {
+    let (mut relay, match_id) = two_player_match();
+    relay.disconnect(&connection("bob"));
+
+    let only = relay.receive(
+        &connection("alice"),
+        Message::RoundOver {
+            match_id: match_id.clone(),
+        },
+    );
+    assert!(
+        only.sends
+            .iter()
+            .any(|(_, event)| matches!(event, Event::Reveal { .. })),
+        "the one seat present must be enough to reveal the round"
+    );
+    assert_eq!(relay.view(&match_id).round, 1);
+}
+
+/// `A match continues while an eliminated player is absent`, by way of their departure.
+#[test]
+fn a_departed_seat_does_not_hold_up_the_reveal() {
+    let (mut relay, match_id) = two_player_match();
+    relay.receive(
+        &connection("bob"),
+        Message::Leave {
+            match_id: match_id.clone(),
+        },
+    );
+
+    let only = relay.receive(
+        &connection("alice"),
+        Message::RoundOver {
+            match_id: match_id.clone(),
+        },
+    );
+    assert!(
+        only.sends
+            .iter()
+            .any(|(_, event)| matches!(event, Event::Reveal { .. })),
+        "a seat that has left must not be waited on"
+    );
+}
+
+/// A claim is recorded while another seat is absent, because absence is not the relay's
+/// to enforce.
+///
+/// This test used to assert the opposite: the relay refused every claim while any seat
+/// lacked a connection. That halted a match the moment anybody's tab closed, and it
+/// halted one forever if an eliminated player left. `A match halts at the turn of an
+/// absent player` puts the halt where it belongs, and nothing has to enforce it — when it
+/// is the absent seat's turn no claim arrives, because no other client will send one.
+#[test]
+fn a_claim_is_recorded_while_another_seat_is_absent() {
     let (mut relay, match_id) = two_player_match();
     let alice = connection("alice");
     let bob = connection("bob");
@@ -313,38 +371,83 @@ fn a_claim_is_refused_while_a_seat_is_absent_and_accepted_once_it_returns() {
         face: 5,
         odds: 50.0,
     };
-    assert_eq!(
-        relay
-            .receive(
-                &alice,
-                Message::Claim {
-                    match_id: match_id.clone(),
-                    event: claim.clone(),
-                }
-            )
-            .refused,
-        Some(Refused::SeatIsAbsent)
-    );
-
-    let back = connection("bob-again");
-    relay.receive(
-        &back,
-        Message::Resume {
+    let outcome = relay.receive(
+        &alice,
+        Message::Claim {
             match_id: match_id.clone(),
-            account: discord("2"),
+            event: claim.clone(),
         },
     );
+    assert_eq!(outcome.refused, None, "absence is not the relay's business");
+    assert!(
+        relay.log().read(&match_id).contains(&claim),
+        "the claim must be recorded, since the relay records every message it receives"
+    );
+    // And nothing was sent to the seat that is not there.
+    assert!(
+        outcome.sends.iter().all(|(to, _)| to == &alice),
+        "a frame was addressed to an absent seat: {:?}",
+        outcome.sends
+    );
+}
+
+/// `A player can leave a match`, and the record says so.
+#[test]
+fn a_seat_that_leaves_is_recorded_as_having_left() {
+    let (mut relay, match_id) = two_player_match();
+    let bob = connection("bob");
+
+    let outcome = relay.receive(
+        &bob,
+        Message::Leave {
+            match_id: match_id.clone(),
+        },
+    );
+    assert_eq!(outcome.refused, None);
+    assert!(
+        relay
+            .log()
+            .read(&match_id)
+            .contains(&Event::Left { seat: Seat(1) }),
+        "leaving is membership, so it belongs in the log beside the join"
+    );
+    // The socket goes with them: a seat that has left holds no connection, so nothing is
+    // sent to it and nothing waits for it.
+    assert!(
+        relay
+            .connections()
+            .of(&match_id)
+            .iter()
+            .all(|row| row.seat != Seat(1)),
+        "a departed seat must hold no connection"
+    );
+
+    // Leaving twice is not an error and not a second event.
+    let again = relay.receive(
+        &bob,
+        Message::Leave {
+            match_id: match_id.clone(),
+        },
+    );
+    assert_eq!(again.refused, Some(Refused::NotInThisMatch));
+    let departures = relay
+        .log()
+        .read(&match_id)
+        .into_iter()
+        .filter(|event| matches!(event, Event::Left { .. }))
+        .count();
+    assert_eq!(departures, 1, "one departure, however often it is sent");
+}
+
+/// Somebody who is not in the match cannot leave it.
+#[test]
+fn a_stranger_cannot_leave_a_match() {
+    let (mut relay, match_id) = two_player_match();
     assert_eq!(
         relay
-            .receive(
-                &alice,
-                Message::Claim {
-                    match_id: match_id.clone(),
-                    event: claim,
-                }
-            )
+            .receive(&connection("stranger"), Message::Leave { match_id })
             .refused,
-        None
+        Some(Refused::NotInThisMatch)
     );
 }
 

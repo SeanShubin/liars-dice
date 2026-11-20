@@ -212,6 +212,14 @@ pub enum Message {
     Start {
         match_id: MatchId,
     },
+    /// This seat is done with the match.
+    ///
+    /// Coordination, not a rule: who is taking part is the relay's business, the same as
+    /// who hosted and who is barred. What leaving *means* belongs to the rules, which
+    /// read it as an elimination.
+    Leave {
+        match_id: MatchId,
+    },
     /// Any claim: a raise, a liar or a spot on. The relay records it and forwards it; it
     /// does not judge it.
     Claim {
@@ -378,6 +386,7 @@ impl<L: Log, C: Connections> Relay<L, C> {
             Message::Bar { match_id, seat } => self.bar(from, match_id, seat, true),
             Message::Lift { match_id, seat } => self.bar(from, match_id, seat, false),
             Message::Start { match_id } => self.start(from, match_id),
+            Message::Leave { match_id } => self.leave(from, match_id),
             Message::Claim { match_id, event } => self.claim(from, match_id, event),
             Message::RoundOver { match_id } => self.round_over(from, match_id),
             Message::Resume { match_id, account } => self.resume(from, match_id, account),
@@ -631,9 +640,6 @@ impl<L: Log, C: Connections> Relay<L, C> {
         if seat_named(&event) != Some(seat) {
             return Ok(Outcome::refused(Refused::NotYourSeat));
         }
-        if self.absent(&work) {
-            return Ok(Outcome::refused(Refused::SeatIsAbsent));
-        }
         // Recorded and forwarded without being judged. Whether it was legal is for the
         // receiving clients to decide; the relay only guarantees everyone sees the same
         // messages in the same order.
@@ -653,9 +659,6 @@ impl<L: Log, C: Connections> Relay<L, C> {
         let Some(seat) = self.seat_of(&match_id, from) else {
             return Ok(Outcome::refused(Refused::NotInThisMatch));
         };
-        if self.absent(&work) {
-            return Ok(Outcome::refused(Refused::SeatIsAbsent));
-        }
         let event = Event::RoundOver { seat };
         work.push(event.clone());
         let mut sends = self.to_everyone(&match_id, event);
@@ -663,8 +666,20 @@ impl<L: Log, C: Connections> Relay<L, C> {
         // Counted from the working copy, so this seat's own acknowledgement — pushed a
         // line ago and not yet in storage — is included. Reading the log here would
         // count every seat but the one that just spoke.
+        //
+        // Against the seats that are present and have not left, which is what
+        // `relay.md` always said and what the code used to get wrong by counting every
+        // seat that ever joined. A seat that is absent would otherwise hold the reveal,
+        // and `A match halts at the turn of an absent player` says the halt comes at
+        // their turn and not before it.
         let view = work.view();
-        if view.round_over_count() < view.seats.len() {
+        let waiting_on = self
+            .connections
+            .of(&match_id)
+            .into_iter()
+            .filter(|row| !view.has_left(row.seat))
+            .count();
+        if view.round_over_count() < waiting_on {
             self.commit(&work)?;
             return Ok(Outcome {
                 refused: None,
@@ -680,6 +695,39 @@ impl<L: Log, C: Connections> Relay<L, C> {
         // Revealing a seed without dealing the round that follows it would leave every
         // client waiting on a round that never opens.
         self.commit(&work)?;
+        Ok(Outcome {
+            refused: None,
+            sends,
+            created: None,
+        })
+    }
+
+    /// A seat leaves the match for good.
+    ///
+    /// Recorded rather than inferred. A lost connection is presence and says nothing
+    /// permanent; this is membership, and it is what lets the relay stop waiting on
+    /// somebody without knowing a single rule about why they are gone.
+    fn leave(&mut self, from: &ConnectionId, match_id: MatchId) -> Result<Outcome, Stale> {
+        let mut work = self.open(&match_id);
+        let Some(seat) = self.seat_of(&match_id, from) else {
+            return Ok(Outcome::refused(Refused::NotInThisMatch));
+        };
+        // Leaving twice is not an error and not an event. The second one would be a
+        // second elimination of a player who is already gone.
+        if work.view().has_left(seat) {
+            return Ok(Outcome {
+                refused: None,
+                sends: Vec::new(),
+                created: None,
+            });
+        }
+        let event = Event::Left { seat };
+        work.push(event.clone());
+        self.commit(&work)?;
+        // The socket goes too. A seat that has left holds no connection, so nothing is
+        // sent to it and nothing waits for it.
+        let sends = self.to_everyone(&match_id, event);
+        self.connections.detach(from);
         Ok(Outcome {
             refused: None,
             sends,
@@ -792,17 +840,6 @@ impl<L: Log, C: Connections> Relay<L, C> {
             }
         }
         visible
-    }
-
-    /// Whether any seat has nobody on it.
-    fn absent(&self, work: &Working) -> bool {
-        let view = work.view();
-        if !view.started {
-            return false;
-        }
-        let connected = self.connections.of(&work.match_id);
-        (0..view.seats.len())
-            .any(|index| !connected.iter().any(|row| row.seat == Seat(index as u8)))
     }
 
     fn seat_of(&self, match_id: &MatchId, connection: &ConnectionId) -> Option<Seat> {

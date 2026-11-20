@@ -63,6 +63,7 @@ pub fn shape_of(message: &Message) -> Shape {
             vec![of(match_id), ("seat", Value::Count(u64::from(seat.0)))],
         ),
         Message::Start { match_id } => Shape::of("start", vec![of(match_id)]),
+        Message::Leave { match_id } => Shape::of("leave", vec![of(match_id)]),
         // The one nested shape in the format. A claim carries the event it is claiming,
         // because the relay records what it received and judges none of it.
         Message::Claim { match_id, event } => Shape::of(
@@ -108,6 +109,9 @@ pub fn from_shape(shape: &Shape) -> Result<Message, Malformed> {
             seat: seat()?,
         }),
         "start" => Ok(Message::Start {
+            match_id: match_id()?,
+        }),
+        "leave" => Ok(Message::Leave {
             match_id: match_id()?,
         }),
         "claim" => Ok(Message::Claim {

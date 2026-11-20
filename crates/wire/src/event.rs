@@ -31,6 +31,7 @@ pub fn shape_of(event: &Event) -> Shape {
         Event::Host { seat: at } => Shape::of("host", vec![("seat", seat(*at))]),
         Event::Bar { seat: at } => Shape::of("bar", vec![("seat", seat(*at))]),
         Event::Lift { seat: at } => Shape::of("lift", vec![("seat", seat(*at))]),
+        Event::Left { seat: at } => Shape::of("left", vec![("seat", seat(*at))]),
         Event::Start => Shape::of("start", vec![]),
         Event::RoundOver { seat: at } => Shape::of("round-over", vec![("seat", seat(*at))]),
         Event::Join {
@@ -122,6 +123,7 @@ pub fn from_shape(shape: &Shape) -> Result<Event, Malformed> {
         "host" => Ok(Event::Host { seat: at()? }),
         "bar" => Ok(Event::Bar { seat: at()? }),
         "lift" => Ok(Event::Lift { seat: at()? }),
+        "left" => Ok(Event::Left { seat: at()? }),
         "start" => Ok(Event::Start),
         "round-over" => Ok(Event::RoundOver { seat: at()? }),
         "join" => Ok(Event::Join {

@@ -22,14 +22,17 @@
 - A match in which only one player remains is complete
 - The last remaining player wins a complete match
 - A match has the same players from its first round to its last
-- A match cannot continue while any of its players is absent
+- A match halts at the turn of an absent player
+- A match continues while an eliminated player is absent
 - A player that loses their connection is absent
 - A player who reconnects resumes their seat
+- A player can leave a match
 - The host can see which players are absent
 - The event log of a match is retained whether or not the match is completed
 
 ## Elimination
 - A player with no dice is eliminated
+- A player who leaves a match is eliminated
 - An eliminated player takes no further part in the match
 - A player lasts longer than another player if the other is eliminated first
 

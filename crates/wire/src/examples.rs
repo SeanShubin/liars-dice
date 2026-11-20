@@ -30,6 +30,7 @@ pub fn every_event() -> Vec<Event> {
         Event::Host { seat },
         Event::Bar { seat },
         Event::Lift { seat },
+        Event::Left { seat },
         Event::Start,
         Event::RoundOver { seat },
         Event::Join {
@@ -114,6 +115,9 @@ pub fn every_message() -> Vec<Message> {
             seat: Seat(2),
         },
         Message::Start {
+            match_id: match_id.clone(),
+        },
+        Message::Leave {
             match_id: match_id.clone(),
         },
         // The nested one. Its event has to survive inside a message as exactly as it does

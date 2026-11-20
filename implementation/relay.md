@@ -262,9 +262,36 @@ archiver is who knows that.
 events folded in a millisecond, against a cache that can be stale, can be lost, and would
 have to be rebuilt by a replacement relay anyway.
 
-**Enforcing absence is not a game rule.** Refusing to append while a seat is unconnected
-is about connections, which the relay owns, and it realizes a statement under Match. It
-touches no claim and no die.
+**Absence is not enforced at all, and used to be.** The relay refused every append while
+any seat lacked a connection, which realized `A match cannot continue while any of its
+players is absent` by stopping the whole match the moment anybody's tab closed — and
+stopping it forever if an eliminated player left, since the relay cannot know who is
+eliminated and never will.
+
+That statement is now `A match halts at the turn of an absent player`, and the halt needs
+no enforcement whatever: when it is the absent seat's turn, no claim arrives, because no
+other client will send one and `A client does not send an illegal claim` already covers
+it. So `absent()` and `Refused::SeatIsAbsent` are gone. A live absent player loses nothing
+by it — `liar` and `spot-on` affect only the caller and the previous claimer, and an
+absent player is neither — and they catch up through `Resume`.
+
+The reveal now waits on the seats that are present and have not left, which is what the
+two paragraphs above always said and what the code got wrong by counting every seat that
+ever joined. Without that an absent player would halt the match at the reveal rather than
+at their turn.
+
+**Membership is in the log; presence is not.** Joining and leaving are permanent facts
+about who was in a match, so `Join` and `Left` are events. Connecting and disconnecting
+are transport state that says nothing permanent, so they stay in the connection table and
+a flapping socket writes nothing. This is the line between the two layers: who is taking
+part is coordination, which the relay owns outright, while what a departure *means* is a
+rule, which it must never know. `Bar` is the older precedent — the relay has always
+decided who may participate without knowing a rule.
+
+**Leaving is coordination; being eliminated by it is a rule.** `Message::Leave` records
+`Event::Left`, and that is the whole of the relay's involvement. `rules::Game::concede`
+is the rules answering the external input, and it is where the cost of the design is
+paid — see the decision recorded on that function.
 
 **Unanimous `round-over` rather than a marker message.** Reading `liar` and `spot-on` as
 markers looked narrower, and was not: without knowing whose turn it is, the relay would
@@ -330,7 +357,13 @@ In `apps/local`, against in-memory implementations of both traits:
   log and connection table continues the match, and the round in progress is unaffected.
 - A client that disconnects mid-round, reconnects, and resumes its seat — asserting it is
   sent its own deal and no other seat's until the reveal.
-- A claim refused while a seat is absent, and accepted once it returns.
+- A claim recorded while another seat is absent, with nothing sent to the seat that is
+  not there. This test used to assert the opposite and is the one the old gate was
+  written against.
+- A reveal that proceeds on the acknowledgements of the seats that are present, and of
+  the seats that have not left.
+- A departure recorded once however often it is sent, with the socket detached, and
+  refused outright from somebody who is not in the match.
 - A join refused for a mismatched protocol version, and for a barred player, and for a
   match that has started.
 - Two appends racing for the same position: one wins, and the loser is told `Taken` rather
