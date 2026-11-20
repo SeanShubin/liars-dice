@@ -5,6 +5,7 @@
 
 ## Hosting
 - A player can host a match
+- A player cannot host a match while holding a seat in another match
 - The host can start the match
 - The host can add an AI player to a hosted match
 - An AI player does not authenticate
@@ -14,10 +15,16 @@
 
 ## Joining
 - Every match that can be joined is listed
+- A started match is listed
+- A match that is over is not listed
 - A listed match shows its host
 - A listed match shows how many players have joined
+- A listed match shows whether it can be joined
+- A listed match shows whether the player asking holds a seat in it
 - A player can join a hosted match
 - A player cannot join a match that has started
+- A player cannot join a match while holding a seat in another match
+- A client returns its player to the match they hold a seat in, without asking
 - The host can bar a player from joining the match
 - The host can lift a bar
 - A match is not listed to a player barred from it
@@ -25,7 +32,23 @@
 - A colour another player has chosen cannot be chosen
 - Two players never share a seat
 - A player holds one seat in a match
-- A match whose host has left cannot be joined
+
+## Ending
+- A match is complete when every seat present in it says so
+- A log says whether its match is complete
+- Only the host can cancel a match
+- The host can cancel a match that has not started
+- The host can cancel a started match in which no event has been recorded for a minute
+- The host cannot cancel a started match in which an event has been recorded within the minute
+- A cancel the host cannot yet make is refused with the time remaining
+- A client shows the host the time remaining before they can cancel
+- A match in which no event has been recorded for an hour is cancelled
+- A host who leaves a match that has not started cancels it
+- A cancelled match is over
+- A cancelled match cannot be joined
+- No event is recorded in a match that is over
+- A log says whether its match was cancelled
+- A log says whether a cancelled match was cancelled by its host
 
 ## Ranked
 - A match is ranked when every seat in it is held by an authenticated player

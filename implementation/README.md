@@ -58,6 +58,8 @@ Not started | In progress | Built
 - [Hotseat](/implementation/hotseat.md) — one screen passed between seats, and the one presentation both deliveries draw
 - [Identity](/implementation/identity.md) — guests, Discord tickets, AI players, and what makes a match ranked
 - [Multiplayer Client](/implementation/multiplayer-client.md) — the browser half of a networked match: a socket, one seat, the same presentation
+- [Ending a Match](/implementation/ending.md) — completion, cancelling, abandonment, and the relay's first clock reading
+- [Lobby](/implementation/lobby.md) — every match in progress, which of them you can join, and the one you are already in
 
 ## Order
 

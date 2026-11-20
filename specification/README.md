@@ -9,7 +9,7 @@
 
 ## Applications
 - [Applications](/specification/applications.md) — the presentations, the deliveries, and the desktop game
-- [Multiplayer](/specification/multiplayer.md) — hosting a match, joining, barring, versions, and saves
+- [Multiplayer](/specification/multiplayer.md) — hosting a match, joining, barring, ending a match, versions, and saves
 - [Die Rendering Prototype](/specification/die-rendering-prototype.md)
 - [Data Browser](/specification/data-browser.md) — the administrator view of the event log
 

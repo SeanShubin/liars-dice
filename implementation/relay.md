@@ -272,8 +272,13 @@ reconnection can clear it.
 
 **A match whose host has left is finished without having started.** Host powers are the
 seat in the log and nothing transfers them, so there is no start to wait for. It is
-refused with `HostHasLeft` rather than left to be discovered, and it is not listed either,
-because listing it would be offering something that is not on offer.
+refused rather than left to be discovered, and it is not listed either, because listing it
+would be offering something that is not on offer.
+
+That began as its own refusal, `HostHasLeft`, and `ending.md` folds it into cancellation:
+`A host who leaves a match that has not started cancels it`, so the refusal is `Cancelled`
+and a departing host produces the same `Event::Cancel { seat }` the Cancel button does. Two
+refusals for *this match is finished* were two names for one fact.
 
 `Refused::SeatIsAbsent` is gone in the same breath. Nothing had produced it since absence
 stopped being enforced, and a refusal a client must understand and can never receive is a

@@ -29,6 +29,8 @@
 - All match state is derivable from the event log
 - The event log is append-only
 - No event is ever modified or removed
+- The relay records when it received each event
+- The time the relay received an event decides nothing but whether a match is inactive
 - A view derived from the event log can change
 - The relay holds no game state between messages except what the log holds, or what derives from the log plus a long-lived secret
 - The relay holds the connections of the players in a match

@@ -104,16 +104,22 @@ checked over every combination of the facts rather than reasoned about.
 
 ### A halted match is not a problem to solve
 
-When it is an absent player's turn the match stops, and nothing times out, forfeits, or
-cleans up. The log is retained whether or not a match completes, so a halted match waits
-indefinitely for its player and the screen says whose turn it is. Everyone else is free to
-leave it and start or join another; nothing about one match constrains another.
+When it is an absent player's turn the match stops, and the client neither forfeits for
+them nor plays on without them. The log is retained whether or not a match completes, so a
+halted match is still there when its player comes back, and the screen says whose turn it
+is. That much is unchanged: nothing here times anybody out, and no screen makes a decision
+on an absent player's behalf.
 
-Two consequences worth having written down. Abandoned matches are permanent by design,
-which is a standing reason the lobby's scan over the log table matters — see
-`relay-service.md`'s Open Item. And a host who leaves before the start leaves a match that
-is listed as joinable and can never begin, which belongs to the lobby unit rather than
-here.
+What has changed is that the waiting is no longer unbounded, so two things this section
+used to say are now wrong. *Abandoned matches are permanent by design* is no longer true —
+`ending.md` abandons a match untouched for an hour, and lets the host cancel one that has
+been inactive for a minute. And *nothing about one match constrains another* is no longer
+true either: `A player cannot join a match while holding a seat in another match`, so
+leaving a halted match is how somebody goes and plays elsewhere rather than merely a tidy
+thing to do. See `lobby.md`.
+
+The scan over the log table still matters for the reason `relay-service.md`'s Open Item
+gives. Abandoning a match stops it being listed; it does not stop its rows being read.
 
 ### Finding a match
 

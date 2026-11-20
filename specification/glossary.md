@@ -46,6 +46,11 @@
 | Barred | Not allowed to join a match, by the host's designation. |
 | Affected | Having lost a die, gained a die, gained a shield token, or spent a shield token as a result of a resolution. |
 | Complete | Said of a match in which only one player remains. |
+| Over | Said of a match that is complete or cancelled. No further event is recorded in it. |
+| In progress | Said of a started match that is not over. |
+| Inactive | Said of a match in which the relay has recorded no event for a given length of time. |
+| Cancelled | Said of a match ended before it was complete, by its host or by abandonment. Over, and with no winner. |
+| Abandoned | Said of a match cancelled because no event was recorded in it for an hour. |
 | Administrator | A configured Discord account with access to the data browser. |
 | Guest | A player who has not authenticated, identified by an id their own client generated. |
 | Ranked | Said of a match in which every seat is held by an authenticated player. |
