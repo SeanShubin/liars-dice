@@ -184,9 +184,14 @@ count, so the lobby can say which matches are which before anybody joins one.
   is not a ticket is a client that could never recognise its own join.
 - **`apps/auth`** is new: the exchange, one Lambda, one function URL, no database. It is
   the only thing that ever holds the Discord client secret, and the only thing that talks
-  to Discord.
+  to Discord. Its library is the handler and its binary is the composition root, so every
+  answer it can give is tested without a network — the Discord call is behind a `Discord`
+  trait, a seam rather than a passed-in value because the exchange decides when to call it
+  and with what.
 - **`apps/web`** keeps the guest id, performs the redirect, posts the code, and holds the
-  ticket. It is the only place that knows local storage exists.
+  ticket. It is the only place that knows local storage exists. The fetches meet the frame
+  loop through `FromExchange`, the same cell-and-drain seam `Arrivals` uses for the socket:
+  a fetch answers on its own schedule and a frame loop does not wait.
 - **Nothing depends on `apps/auth`** except the browser. The relay does not call it; it
   verifies what the browser brings.
 
@@ -212,6 +217,26 @@ price.
 is self-describing and verified from the secret alone, so a cold Lambda with no memory of
 anything can check one. The alternative is a table of live logins, which is state to
 expire, to replicate, and to get wrong.
+
+**Two HMAC secrets, not one.** This is a correction to what the rest of this document
+assumed. The exchange has to hold the key tickets are verified with, because it mints them,
+and it is the one part of this system that talks to the public internet. Sharing the dice
+secret with it would mean that compromising the exchange let somebody predict every roll,
+and `Clients must not be able to choose their roll beforehand or alter it after the fact`
+is the property this repository is arranged around. So `relay::Secrets { dice, ticket }`,
+`/liars-dice/ticket/secret` beside `/liars-dice/relay/secret`, and only the relay ever
+holds the one that matters most.
+
+The alternative was one secret with the ticket tagged apart from the seeds, which
+`integrity` already does and which this still relies on — but a tag stops one message space
+being mistaken for another, it does not stop a second service from deriving seeds. The tag
+is about confusion and this is about reach.
+
+They fail differently too, and that is deliberate. The dice secret is mandatory, because an
+invented one would make every commitment in every match unverifiable with nothing saying
+so. The ticket secret is an `Option` in both services: missing, the relay serves guests and
+refuses every ticket, and the exchange answers *not configured* — which is `A missing
+Discord config disables login rather than failing` falling out rather than being arranged.
 
 **Twenty-four hours.** Long enough that a person does not re-authenticate inside one
 sitting, short enough that a leaked ticket stops working. What a stolen ticket buys is a
@@ -289,14 +314,12 @@ page rather than letting somebody discover it.
 thing the pipeline builds and the deploy updates — and the first piece of the system that
 talks to something outside AWS.
 
-**The registered redirect URI does not match this design.** SSM holds
-`/liars-dice/discord/redirect-uri` = `https://seanshubin.com/liars-dice/api/auth/discord/callback`,
-which was copied from the Pairwise Vote pattern and which nothing serves: the distribution
-has one behaviour and it points at S3. This document wants the redirect to come back to the
-multiplayer page itself, so the parameter and the Discord application's registration both
-have to say `https://seanshubin.com/liars-dice/multiplayer/`. Discord compares the
-`redirect_uri` exactly, so all three have to agree, and the registration can only be changed
-by hand in the Discord developer portal.
+**The Discord application's registration is the one thing not in version control.** The SSM
+parameter now says `https://seanshubin.com/liars-dice/multiplayer/`, and the authorize URL
+the page builds says the same; Discord compares the `redirect_uri` character for character,
+so the portal has to agree and only a person can make it. The old value named
+`/liars-dice/api/auth/discord/callback`, copied from the Pairwise Vote pattern, which
+nothing serves — the distribution has one behaviour and it points at S3.
 
 **The page learns the client id and the redirect URI from the exchange**, in one `GET` at
 startup, rather than from the bundle. That keeps the configuration in one place — SSM, read
@@ -307,7 +330,21 @@ page offers guest only and says why. The cost is one request per page load, incl
 guests, and a failure to reach the exchange reads as *not configured*.
 
 ## Status
-In progress. Built: `Account::Guest`, `Who`, the ticket in `integrity`, the relay's
-`identify`, `ranked`, the guest id in local storage, and AI players as guests. Not built:
-the Discord flow itself — `apps/auth`, the authorize redirect, and the page's sign-in
-button — which is waiting on the redirect URI registered with Discord. See Open Items.
+Built, except for one thing that belongs elsewhere.
+
+Built: `Account::Guest`, `Who`, the ticket in `integrity`, the relay's `identify`,
+`ranked` and `Listed.ranked`, the guest id in local storage, AI players as guests,
+`apps/auth` with its template and pipeline wiring, and the page's sign-in panel.
+
+Not built here: **the browser UI for adding an AI player to a hosted match.** This unit
+owns *a bot holds a guest account*, which is done and proved by
+`crates/seat/tests/bots.rs` — including the correction that each bot needs its own socket.
+The button that adds one belongs to `multiplayer-client.md`, because
+`The host can add an AI player to a hosted match` is a statement about the client and the
+work left is a screen holding several sockets rather than anything about identity.
+
+Waiting on two things outside this repository, neither of which stops a deploy:
+`/liars-dice/ticket/secret` being put by hand, and
+`https://seanshubin.com/liars-dice/multiplayer/` being registered in the Discord developer
+portal. Until both, login reads as off and every match is unranked — which is the designed
+behaviour and not a failure.

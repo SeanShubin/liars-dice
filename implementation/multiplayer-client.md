@@ -121,6 +121,21 @@ thing to do. See `lobby.md`.
 The scan over the log table still matters for the reason `relay-service.md`'s Open Item
 gives. Abandoning a match stops it being listed; it does not stop its rows being read.
 
+### Adding an AI player
+
+`The host can add an AI player to a hosted match` and `An AI player's turn is taken by the
+client that added it`, and what is left to build is a button and a list. `identity.md`
+owns what a bot *is* — a guest account like any unauthenticated player, so that nothing in
+the relay, the protocol or the log branches on it — and `crates/seat/tests/bots.rs` proves
+a host can play a whole match against two of them.
+
+The one thing that test corrected is the shape this screen has to take. A bot needs **its
+own socket**, because `Connections::attach` evicts a connection from wherever else it was:
+a socket is in one place, which is the invariant that decides who is sent whose dice. So
+the page holds a `Seated` and a `Wire` per bot alongside its own, drives each one in the
+same frame loop, and routes a frame by which socket it arrived on. The one-socket version
+fails with `NotTheHost`, the host having been moved off seat zero.
+
 ### Finding a match
 
 Two ways, and both are kept. The lobby lists what is open — host, player count, and a

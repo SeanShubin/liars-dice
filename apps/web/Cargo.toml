@@ -12,18 +12,31 @@ rules.workspace = true
 render-minimal.workspace = true
 eframe.workspace = true
 
-# The socket. `WebSocket`, `MessageEvent` and `BinaryType` are the transport; `Document`
-# and `Element` are how the page is asked where the relay is; `Crypto` and `Storage` are
-# how a guest gets an id that survives closing the tab.
+# The browser. `WebSocket`, `MessageEvent` and `BinaryType` are the transport;
+# `Document` and `Element` are how the page is asked where the relay and the exchange
+# are; `Crypto` and `Storage` are how a guest gets an id that survives closing the tab;
+# and `Request`, `Response`, `Headers`, `Location` and `History` are the Discord flow -
+# one fetch to the exchange, one navigation to Discord, and taking the code back out of
+# the address bar afterwards.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures.workspace = true
+js-sys.workspace = true
+wasm-bindgen.workspace = true
 web-sys = { workspace = true, features = [
     "BinaryType",
     "Crypto",
     "Document",
     "Element",
+    "Headers",
+    "History",
+    "Location",
     "MessageEvent",
+    "Performance",
+    "Request",
+    "RequestInit",
+    "Response",
     "Storage",
+    "UrlSearchParams",
     "WebSocket",
     "Window",
 ] }

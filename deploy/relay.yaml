@@ -1,23 +1,38 @@
 AWSTemplateFormatVersion: '2010-09-09'
+# The description is what the console shows and is capped at 1024 characters, so
+# everything that is reasoning rather than summary lives in comments like this one.
+#
+# Neither secret is created here. CloudFormation cannot create a SecureString
+# parameter, and a plaintext one would put the key in the template, the change set
+# and the stack events. Each is put once, by hand, by someone at a terminal:
+#
+#   aws ssm put-parameter --name /liars-dice/relay/secret \
+#     --type SecureString --value <64 hexadecimal digits>
+#   aws ssm put-parameter --name /liars-dice/ticket/secret \
+#     --type SecureString --value <64 hexadecimal digits>
+#
+# Two keys, kept apart deliberately. Round seeds derive from the first and nothing
+# but the relay ever holds it; tickets are verified with the second, and the
+# exchange holds that one too because it mints them. The exchange is the one part
+# of this system that talks to the public internet, so sharing the first with it
+# would mean a compromise there let somebody predict every roll.
+#
+# They fail differently, which is also deliberate. A missing or malformed relay
+# secret fails the cold start, because an invented one would make every commitment
+# in every match unverifiable and nothing would say so. A missing ticket secret
+# only turns signing in off: the relay serves guests and refuses every ticket, and
+# the exchange answers `not configured`.
 Description: >-
   The liars-dice relay: the event log, the connection table, the WebSocket API
-  and the function that serves its three routes.
+  and the function that serves its three routes, plus the exchange that trades a
+  Discord code for a ticket.
 
   Its own stack rather than part of seanshubin-com, which owns the hostname and
   is shared by path. This is one project's backend and nothing else depends on
   it, so it can be torn down and rebuilt without touching the site.
 
-  The HMAC secret is NOT created here. CloudFormation cannot create a
-  SecureString parameter, and a plaintext one would put the key in the template,
-  the change set and the stack events. It is put once, by hand, by someone at a
-  terminal:
-
-    aws ssm put-parameter --name /liars-dice/relay/secret \
-      --type SecureString --value <64 hexadecimal digits>
-
-  A missing or malformed parameter fails the cold start rather than inventing a
-  secret, because an invented one would make every commitment in every match
-  unverifiable and nothing would say so.
+  Neither HMAC secret is created here; both are put by hand. See the comments
+  above this description for why there are two of them and how they differ.
 
 Parameters:
   ArtifactBucket:
@@ -36,6 +51,41 @@ Parameters:
     Type: String
     Default: /liars-dice/relay/secret
     Description: The SSM SecureString holding the HMAC key the round seeds derive from.
+  TicketSecretParameter:
+    Type: String
+    Default: /liars-dice/ticket/secret
+    Description: >-
+      The SSM SecureString holding the HMAC key tickets are signed with. Read by
+      the relay to verify them and by the exchange to mint them, and by nothing
+      else. Deliberately not the seed key.
+  AuthArtifactKey:
+    Type: String
+    Default: ''
+    Description: >-
+      The exchange's zip, keyed by commit. Empty means no exchange is deployed,
+      which is a legal state: the page then offers guest play only.
+  DiscordClientIdParameter:
+    Type: String
+    Default: /liars-dice/discord/client-id
+    Description: The Discord application's client id. Not a secret, and still not in the repository.
+  DiscordClientSecretParameter:
+    Type: String
+    Default: /liars-dice/discord/client-secret
+    Description: >-
+      The Discord application's client secret. The exchange is the only thing
+      that may read it, which is why the relay's own policy names one parameter.
+  DiscordRedirectUriParameter:
+    Type: String
+    Default: /liars-dice/discord/redirect-uri
+    Description: >-
+      Where Discord sends somebody back to. Must match the Discord application's
+      registration exactly, because Discord compares it character for character.
+  SiteDomain:
+    Type: String
+    Default: seanshubin.com
+    Description: >-
+      The origin the page is served from. The exchange's function URL allows this
+      one and no other.
   LogRetentionDays:
     Type: Number
     Default: 30
@@ -43,6 +93,11 @@ Parameters:
       How long the function's own logs are kept. The event log is in DynamoDB and
       is permanent; this is the operational trail, and the metric line that says
       what a lobby view cost lives in it.
+
+Conditions:
+  # No key, no exchange. The stack must be deployable before the exchange is
+  # built and before either secret is set, so every part of it is conditional.
+  HasExchange: !Not [!Equals [!Ref AuthArtifactKey, '']]
 
 Resources:
   # The only thing that cannot be reconstructed from something else, which is why
@@ -144,6 +199,7 @@ Resources:
           LOG_TABLE: !Ref LogTable
           PLACE_TABLE: !Ref PlaceTable
           SECRET_PARAMETER: !Ref SecretParameter
+          TICKET_SECRET_PARAMETER: !Ref TicketSecretParameter
 
   # Declared rather than left to the first invocation, so the retention above is
   # applied from the first line and not after thirty days of unbounded logs.
@@ -190,12 +246,15 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              # Exactly that parameter, and nothing else under /liars-dice/. The
+              # Exactly those two, and nothing else under /liars-dice/. The
               # Discord client secret lives in the same prefix and this function
-              # has no business reading it.
+              # has no business reading it: it verifies tickets, it does not mint
+              # them.
               - Effect: Allow
                 Action: ssm:GetParameter
-                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SecretParameter}"
+                Resource:
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SecretParameter}"
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${TicketSecretParameter}"
               - Effect: Allow
                 Action: kms:Decrypt
                 Resource: !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/ssm"
@@ -263,7 +322,123 @@ Resources:
       Principal: apigateway.amazonaws.com
       SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${Api}/*"
 
+  # The exchange. Its own function, its own role, and no access to the log, the
+  # places, or the key the dice derive from.
+  #
+  # `AuthArtifactKey` empty means there is nothing to deploy yet, which is why
+  # every resource here is conditional: the stack has to be deployable before
+  # the exchange exists, and before either secret is set.
+  AuthFunction:
+    Type: AWS::Lambda::Function
+    Condition: HasExchange
+    Properties:
+      FunctionName: liars-dice-auth
+      Description: Trades a Discord authorization code for a ticket.
+      Runtime: provided.al2023
+      Handler: bootstrap
+      Architectures:
+        - x86_64
+      Role: !GetAtt AuthFunctionRole.Arn
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref AuthArtifactKey
+      # Two calls to Discord, one after the other, each with an eight second
+      # patience inside the function. Fifteen leaves room for a cold start on top
+      # without the caller being cut off before the function can say what went
+      # wrong.
+      Timeout: 15
+      MemorySize: 256
+      Environment:
+        Variables:
+          TICKET_SECRET_PARAMETER: !Ref TicketSecretParameter
+          CLIENT_ID_PARAMETER: !Ref DiscordClientIdParameter
+          CLIENT_SECRET_PARAMETER: !Ref DiscordClientSecretParameter
+          REDIRECT_URI_PARAMETER: !Ref DiscordRedirectUriParameter
+
+  AuthFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: HasExchange
+    Properties:
+      LogGroupName: /aws/lambda/liars-dice-auth
+      RetentionInDays: !Ref LogRetentionDays
+
+  AuthFunctionRole:
+    Type: AWS::IAM::Role
+    Condition: HasExchange
+    Properties:
+      RoleName: liars-dice-auth-function
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: TheDiscordConfigAndTheTicketKey
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Four parameters, named one at a time. Not the relay's secret:
+              # this function talks to the public internet, and the key the dice
+              # derive from must not be reachable from anything that does.
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource:
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${TicketSecretParameter}"
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DiscordClientIdParameter}"
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DiscordClientSecretParameter}"
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DiscordRedirectUriParameter}"
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource: !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/ssm"
+        - PolicyName: ItsOwnLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "${AuthFunctionLogGroup.Arn}:*"
+
+  # A function URL rather than an API Gateway: one route, no stages, no
+  # authorizers, nothing to configure. `AuthType: NONE` is correct and not a
+  # shortcut — the browser calls this before anybody has signed in, so there is
+  # nothing to authenticate with. What it mints requires a Discord authorization
+  # code, which only Discord issues and only to the registered redirect.
+  AuthUrl:
+    Type: AWS::Lambda::Url
+    Condition: HasExchange
+    Properties:
+      TargetFunctionArn: !GetAtt AuthFunction.Arn
+      AuthType: NONE
+      Cors:
+        # The page and nothing else. A function URL is reachable by anything,
+        # but a browser will not hand another origin's script the answer.
+        AllowOrigins:
+          - !Sub "https://${SiteDomain}"
+        AllowMethods:
+          - GET
+          - POST
+        AllowHeaders:
+          - content-type
+        MaxAge: 3600
+
+  AuthUrlPermission:
+    Type: AWS::Lambda::Permission
+    Condition: HasExchange
+    Properties:
+      FunctionName: !Ref AuthFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: '*'
+      FunctionUrlAuthType: NONE
+
 Outputs:
+  AuthUrl:
+    Condition: HasExchange
+    Description: Where the page posts a Discord code.
+    Value: !GetAtt AuthUrl.FunctionUrl
   SocketUrl:
     Description: What a client connects to.
     Value: !Sub "wss://${Api}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"

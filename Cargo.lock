@@ -8146,10 +8146,12 @@ version = "0.0.0"
 dependencies = [
  "coordinator",
  "eframe",
+ "js-sys",
  "protocol",
  "render-minimal",
  "rules",
  "seat",
+ "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
 ]

@@ -227,6 +227,65 @@ fn may_call(stance: Stance) -> bool {
 }
 
 /// The page.
+/// A ticket, and what it says, for a page that cannot read one.
+///
+/// The exchange repeats the name and the expiry outside the ticket because the ticket is
+/// opaque here. Not a second source of truth: the relay reads the ticket and neither of
+/// these.
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct Held {
+    ticket: String,
+    name: String,
+    expires_at: u64,
+}
+
+/// What the page knows about signing in.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum Signin {
+    /// The exchange has not answered yet.
+    Asking,
+    /// Login is off.
+    ///
+    /// Either the exchange said so, or it could not be reached, or the page carries no
+    /// exchange address at all. One state for all three, because the page can do nothing
+    /// different about any of them: it offers guest play and says why.
+    Off,
+    /// Where to send somebody to authorize.
+    Offered {
+        client_id: String,
+        redirect_uri: String,
+    },
+    /// Signed in, with a ticket to present.
+    Held(Held),
+}
+
+/// What the exchange said, once a fetch that started earlier has finished.
+///
+/// The same seam as [`Arrivals`]: a browser callback pushes and the frame loop drains.
+/// A fetch answers on its own schedule and a frame loop does not wait, so they meet in a
+/// cell rather than by one blocking the other.
+#[derive(Clone, Default)]
+struct FromExchange(Rc<RefCell<Option<Answered>>>);
+
+/// One answer from the exchange.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum Answered {
+    /// The answer to *where do I send somebody*. `None` means login is off.
+    Where(Option<(String, String)>),
+    /// The answer to a code: a ticket, or why not.
+    Traded(Result<Held, String>),
+}
+
+impl FromExchange {
+    fn put(&self, answered: Answered) {
+        *self.0.borrow_mut() = Some(answered);
+    }
+
+    fn take(&self) -> Option<Answered> {
+        self.0.borrow_mut().take()
+    }
+}
+
 struct Page {
     /// Where the relay is. Read from the page, and editable so a local build can reach a
     /// deployed relay.
@@ -272,6 +331,14 @@ struct Page {
     pending: Claim,
     /// When a frame last arrived, on the frame loop's clock.
     heard: f64,
+    /// Where the exchange is, from the page. Empty means login is off.
+    exchange: String,
+    /// Whether the first frame has asked the exchange anything yet.
+    asked_the_exchange: bool,
+    /// What the page knows about signing in.
+    signin: Signin,
+    /// Where the exchange's answers land.
+    from_exchange: FromExchange,
     /// How long the host must still wait to cancel, and when the relay said so.
     ///
     /// Display only. The relay decides whether a cancel may happen — it is the only thing
@@ -287,6 +354,10 @@ impl Page {
             relay: socket::relay_from_page(),
             name: String::new(),
             guest: socket::guest_id(),
+            exchange: socket::auth_from_page(),
+            asked_the_exchange: false,
+            signin: Signin::Asking,
+            from_exchange: FromExchange::default(),
             colour: 1,
             match_name: String::new(),
             paste: String::new(),
@@ -316,9 +387,81 @@ impl Page {
     /// `Account` — a client does not send one. It says who it is and the relay decides what
     /// that means, which is why a page cannot claim a Discord account without a ticket.
     fn who(&self) -> Who {
-        Who::Guest {
-            id: self.guest.clone(),
-            name: self.name.trim().to_string(),
+        match &self.signin {
+            // Signed in, so the ticket is the whole answer: the account and the name both
+            // come out of it, and this page could not name them if it wanted to.
+            Signin::Held(held) => Who::Authenticated {
+                ticket: held.ticket.clone(),
+            },
+            _ => Who::Guest {
+                id: self.guest.clone(),
+                name: self.name.trim().to_string(),
+            },
+        }
+    }
+
+    /// What to call this person on screen.
+    ///
+    /// The Discord display name when there is one, because `An authenticated player's name
+    /// is their Discord display name` and the typed field is not theirs to set.
+    fn shown_name(&self) -> &str {
+        match &self.signin {
+            Signin::Held(held) => &held.name,
+            _ => self.name.trim(),
+        }
+    }
+
+    /// Ask the exchange what it can do, or trade a code it sent us back with.
+    ///
+    /// Called once, from the first frame, because `Page::new` runs before there is a
+    /// runtime to spawn a fetch on.
+    fn ask_the_exchange(&mut self) {
+        if self.exchange.is_empty() {
+            self.signin = Signin::Off;
+            return;
+        }
+        // A ticket already in storage outlives a reload, which is the point of keeping
+        // one. Expiry is checked here rather than trusted: a stale ticket would be
+        // refused by the relay and look like a bug.
+        if let Some(held) = socket::ticket_kept() {
+            self.signin = Signin::Held(held);
+            return;
+        }
+        match socket::code_from_url() {
+            // Back from Discord. The code is single-use and a URL holding one is a URL
+            // somebody will paste, so it is taken out of the address bar at once.
+            Some(code) => {
+                socket::forget_code();
+                socket::trade(&self.exchange, &code, &self.from_exchange);
+            }
+            None => socket::ask_where(&self.exchange, &self.from_exchange),
+        }
+    }
+
+    /// Take whatever the exchange has said since the last frame.
+    fn hear_the_exchange(&mut self) {
+        let Some(answered) = self.from_exchange.take() else {
+            return;
+        };
+        match answered {
+            Answered::Where(Some((client_id, redirect_uri))) => {
+                self.signin = Signin::Offered {
+                    client_id,
+                    redirect_uri,
+                };
+            }
+            Answered::Where(None) => self.signin = Signin::Off,
+            Answered::Traded(Ok(held)) => {
+                socket::keep_ticket(&held);
+                self.signin = Signin::Held(held);
+            }
+            Answered::Traded(Err(why)) => {
+                // Login is not off — the exchange is there and answered — so the page asks
+                // again where to send somebody, and says what went wrong meanwhile.
+                self.trouble = Some(why);
+                socket::ask_where(&self.exchange, &self.from_exchange);
+                self.signin = Signin::Asking;
+            }
         }
     }
 
@@ -494,6 +637,13 @@ impl Page {
 impl eframe::App for Page {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let now = ui.input(|input| input.time);
+        // Once, on the first frame. `Page::new` runs before there is a runtime to spawn a
+        // fetch on, so the question cannot be asked from there.
+        if !self.asked_the_exchange {
+            self.asked_the_exchange = true;
+            self.ask_the_exchange();
+        }
+        self.hear_the_exchange();
         self.pump(now);
         if self.seated.is_some() {
             ui.ctx().request_repaint_after(TICK);
@@ -542,6 +692,56 @@ impl Page {
         Some(Self::seating(seated).name(current).to_string())
     }
 
+    /// Whether to offer signing in, and what to say about it.
+    ///
+    /// Three answers and no fourth. The page asks the exchange before drawing anything
+    /// here, so a sign-in button is never shown by a page that cannot complete the flow —
+    /// `A missing Discord config disables login rather than failing`, from the one side of
+    /// it a person can see.
+    fn signing_in(&mut self, ui: &mut egui::Ui) {
+        ui.label(egui::RichText::new("Signing in").strong());
+        match self.signin.clone() {
+            Signin::Asking => {
+                ui.label(egui::RichText::new("Asking whether Discord is available…").size(12.0));
+            }
+            Signin::Off => {
+                ui.label(
+                    egui::RichText::new(
+                        "Discord sign-in is not switched on here, so every match is \
+                         unranked. Everything else works.",
+                    )
+                    .size(12.0),
+                );
+            }
+            Signin::Offered {
+                client_id,
+                redirect_uri,
+            } => {
+                if tap(ui, "Sign in with Discord", true) {
+                    socket::authorize(&client_id, &redirect_uri);
+                }
+                ui.label(
+                    egui::RichText::new(
+                        "Only a match where every seat has signed in counts as ranked. \
+                         Playing without is the same game.",
+                    )
+                    .size(12.0),
+                );
+            }
+            Signin::Held(held) => {
+                ui.label(egui::RichText::new(format!("Signed in as {}", held.name)).size(15.0));
+                if tap(ui, "Sign out", true) {
+                    // The ticket goes, and the guest id stays — so signing out is going
+                    // back to being the guest this browser already was, not becoming
+                    // somebody new.
+                    socket::forget_ticket();
+                    self.signin = Signin::Asking;
+                    socket::ask_where(&self.exchange, &self.from_exchange);
+                }
+            }
+        }
+    }
+
     /// A name, a colour, and either host or join.
     fn entry(&mut self, ui: &mut egui::Ui, now: f64) {
         ui.heading("Liars Dice");
@@ -556,17 +756,37 @@ impl Page {
             ui.add_space(6.0);
         }
 
-        ui.label(egui::RichText::new("Your name").strong());
-        ui.add_sized(
-            [240.0, 30.0],
-            egui::TextEdit::singleline(&mut self.name).hint_text("name"),
-        );
-        ui.label(
-            egui::RichText::new(
-                "Nothing checks this yet, so it is also who the relay thinks you are.",
-            )
-            .size(12.0),
-        );
+        self.signing_in(ui);
+
+        ui.add_space(8.0);
+        ui.separator();
+        match &self.signin {
+            // `An authenticated player's name is their Discord display name`, so there is
+            // nothing to type and no field to type it in.
+            Signin::Held(held) => {
+                ui.label(egui::RichText::new("Your name").strong());
+                ui.label(egui::RichText::new(&held.name).size(17.0));
+                ui.label(
+                    egui::RichText::new("From Discord, which is what makes a match ranked.")
+                        .size(12.0),
+                );
+            }
+            _ => {
+                ui.label(egui::RichText::new("Your name").strong());
+                ui.add_sized(
+                    [240.0, 30.0],
+                    egui::TextEdit::singleline(&mut self.name).hint_text("name"),
+                );
+                ui.label(
+                    egui::RichText::new(
+                        "Yours to choose, and nothing checks it. Who you are is an id this \
+                         browser keeps, so two people called the same thing are still two \
+                         people.",
+                    )
+                    .size(12.0),
+                );
+            }
+        }
 
         ui.add_space(8.0);
         ui.label(egui::RichText::new("Your dice").strong());
@@ -584,7 +804,8 @@ impl Page {
             egui::TextEdit::singleline(&mut self.relay).hint_text("wss://host/stage"),
         );
 
-        let named = !self.name.trim().is_empty();
+        // A signed-in player is already named, so there is nothing to wait for.
+        let named = !self.shown_name().is_empty();
         let reachable = named && self.relay.contains("://");
 
         ui.add_space(8.0);
@@ -1148,18 +1369,262 @@ mod socket {
         id
     }
 
-    /// Where the relay is, according to the page.
-    pub fn relay_from_page() -> String {
+    /// Where this browser keeps the ticket it was given.
+    const TICKET_KEY: &str = "liars-dice-ticket";
+
+    /// Where the exchange is, according to the page. Empty means login is off.
+    pub fn auth_from_page() -> String {
+        from_meta("auth", "AUTH_URL")
+    }
+
+    /// The `?code=` Discord sent us back with.
+    pub fn code_from_url() -> Option<String> {
+        let search = web_sys::window()?.location().search().ok()?;
+        web_sys::UrlSearchParams::new_with_str(&search)
+            .ok()?
+            .get("code")
+    }
+
+    /// Take the code out of the address bar.
+    ///
+    /// A code is single-use, and a URL holding one is a URL somebody will paste or
+    /// bookmark. `replaceState` rather than a navigation, so the page is not reloaded and
+    /// the trade already in flight is not abandoned.
+    pub fn forget_code() {
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let Ok(history) = window.history() else {
+            return;
+        };
+        let bare = window
+            .location()
+            .pathname()
+            .unwrap_or_else(|_| "/".to_string());
+        let _ = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&bare));
+    }
+
+    /// The ticket this browser is holding, if it has one that has not expired.
+    ///
+    /// Expiry is checked here rather than left to the relay. A stale ticket would be
+    /// refused with `BadTicket`, which on screen would look like a bug rather than like
+    /// *sign in again*.
+    pub fn ticket_kept() -> Option<super::Held> {
+        let kept = storage()?.get_item(TICKET_KEY).ok()??;
+        let (expires_at, rest) = kept.split_once(' ')?;
+        let expires_at: u64 = expires_at.parse().ok()?;
+        let (name_length, rest) = rest.split_once(' ')?;
+        // Length-prefixed, because a display name may hold a space and a ticket may not
+        // be truncated by one. The same reasoning as the ticket's own payload.
+        let name_length: usize = name_length.parse().ok()?;
+        let name = rest.get(..name_length)?.to_string();
+        let ticket = rest.get(name_length + 1..)?.to_string();
+        if expires_at <= seconds_now() {
+            forget_ticket();
+            return None;
+        }
+        Some(super::Held {
+            ticket,
+            name,
+            expires_at,
+        })
+    }
+
+    pub fn keep_ticket(held: &super::Held) {
+        if let Some(storage) = storage() {
+            let kept = format!(
+                "{} {} {} {}",
+                held.expires_at,
+                held.name.len(),
+                held.name,
+                held.ticket
+            );
+            let _ = storage.set_item(TICKET_KEY, &kept);
+        }
+    }
+
+    pub fn forget_ticket() {
+        if let Some(storage) = storage() {
+            let _ = storage.remove_item(TICKET_KEY);
+        }
+    }
+
+    /// Now, in seconds since the epoch.
+    ///
+    /// The one clock reading in this module, and it decides one thing: whether a ticket
+    /// this browser is holding has already expired. Nothing derived from it reaches a log,
+    /// and the relay checks the expiry again with its own clock, which is the one that
+    /// counts.
+    fn seconds_now() -> u64 {
+        web_sys::window()
+            .map(|window| window.performance().map_or(0.0, |_| js_sys::Date::now()))
+            .map(|millis| (millis / 1000.0) as u64)
+            .unwrap_or_default()
+    }
+
+    fn storage() -> Option<web_sys::Storage> {
+        web_sys::window().and_then(|window| window.local_storage().ok().flatten())
+    }
+
+    /// Send the browser to Discord to authorize.
+    ///
+    /// Built here rather than by the exchange, because only the page knows it is about to
+    /// navigate. `identify` and nothing else; `prompt=none` is deliberately absent, so a
+    /// person is asked rather than silently re-authorized.
+    pub fn authorize(client_id: &str, redirect_uri: &str) {
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let url = format!(
+            "https://discord.com/oauth2/authorize?response_type=code&client_id={}&scope=identify&redirect_uri={}",
+            encode(client_id),
+            encode(redirect_uri),
+        );
+        let _ = window.location().set_href(&url);
+    }
+
+    /// Percent-encode, for the two values that go into a query string.
+    ///
+    /// `encodeURIComponent`, which is the browser's own and is what Discord expects. A
+    /// hand-rolled one here would be a second answer to a question the platform already
+    /// answers.
+    fn encode(value: &str) -> String {
+        js_sys::encode_uri_component(value).into()
+    }
+
+    /// Ask the exchange where to send somebody.
+    pub fn ask_where(url: &str, answers: &super::FromExchange) {
+        let url = url.to_string();
+        let answers = answers.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            // Anything other than a clear *configured* reads as login being off. The page
+            // can do nothing different about an outage than about login being switched
+            // off, and offering a button that cannot work is the one thing to avoid.
+            let answered = match fetch(&url, None).await {
+                Ok(body) => read_where(&body),
+                Err(_) => None,
+            };
+            answers.put(super::Answered::Where(answered));
+        });
+    }
+
+    /// Trade a code for a ticket.
+    pub fn trade(url: &str, code: &str, answers: &super::FromExchange) {
+        let url = url.to_string();
+        let body = js_sys::JSON::stringify(&{
+            let object = js_sys::Object::new();
+            let _ = js_sys::Reflect::set(&object, &"code".into(), &code.into());
+            object.into()
+        })
+        .map(String::from)
+        .unwrap_or_default();
+        let answers = answers.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let answered = match fetch(&url, Some(&body)).await {
+                Ok(body) => read_traded(&body),
+                Err(why) => Err(why),
+            };
+            answers.put(super::Answered::Traded(answered));
+        });
+    }
+
+    fn read_where(body: &str) -> Option<(String, String)> {
+        let json = js_sys::JSON::parse(body).ok()?;
+        if field(&json, "configured")?.as_bool() != Some(true) {
+            return None;
+        }
+        Some((
+            field(&json, "clientId")?.as_string()?,
+            field(&json, "redirectUri")?.as_string()?,
+        ))
+    }
+
+    fn read_traded(body: &str) -> Result<super::Held, String> {
+        let Ok(json) = js_sys::JSON::parse(body) else {
+            return Err("The sign-in service answered something unreadable.".to_string());
+        };
+        if let Some(error) = field(&json, "error").and_then(|value| value.as_string()) {
+            // Discord's own wording is in `detail` and is for a log rather than a person:
+            // `invalid_grant` means nothing to anybody but whoever set the redirect up.
+            return Err(match error.as_str() {
+                "refused" => "Discord would not accept that sign-in. Try again.".to_string(),
+                "unreachable" => "Discord could not be reached. Try again shortly.".to_string(),
+                _ => "Signing in is not available right now.".to_string(),
+            });
+        }
+        let read = |name: &str| field(&json, name).and_then(|value| value.as_string());
+        let expires_at = field(&json, "expiresAt")
+            .and_then(|value| value.as_f64())
+            .map(|seconds| seconds as u64);
+        match (read("ticket"), read("name"), expires_at) {
+            (Some(ticket), Some(name), Some(expires_at)) => Ok(super::Held {
+                ticket,
+                name,
+                expires_at,
+            }),
+            _ => Err("The sign-in service answered without a ticket.".to_string()),
+        }
+    }
+
+    fn field(json: &wasm_bindgen::JsValue, name: &str) -> Option<wasm_bindgen::JsValue> {
+        js_sys::Reflect::get(json, &name.into()).ok()
+    }
+
+    /// One request to the exchange. `None` is a GET; `Some(body)` is a POST of JSON.
+    async fn fetch(url: &str, body: Option<&str>) -> Result<String, String> {
+        use eframe::wasm_bindgen::JsCast;
+
+        let window = web_sys::window().ok_or("no window")?;
+        let options = web_sys::RequestInit::new();
+        match body {
+            None => options.set_method("GET"),
+            Some(body) => {
+                options.set_method("POST");
+                options.set_body(&body.into());
+            }
+        }
+        let request = web_sys::Request::new_with_str_and_init(url, &options)
+            .map_err(|_| "The sign-in service address is not usable.".to_string())?;
+        if body.is_some() {
+            request
+                .headers()
+                .set("content-type", "application/json")
+                .map_err(|_| "could not set a header".to_string())?;
+        }
+        let answered = wasm_bindgen_futures::JsFuture::from(window.fetch_with_request(&request))
+            .await
+            .map_err(|_| "The sign-in service could not be reached.".to_string())?;
+        let answered: web_sys::Response = answered
+            .dyn_into()
+            .map_err(|_| "The sign-in service answered oddly.".to_string())?;
+        // The body is read whatever the status, because a refusal carries its reason in
+        // the body and a page that only read successes could not say why.
+        let text = wasm_bindgen_futures::JsFuture::from(
+            answered.text().map_err(|_| "no body".to_string())?,
+        )
+        .await
+        .map_err(|_| "The sign-in service answered without a body.".to_string())?;
+        text.as_string()
+            .ok_or_else(|| "The sign-in service answered without a body.".to_string())
+    }
+
+    /// One `<meta>` tag's content, or empty if it is missing or still a placeholder.
+    fn from_meta(name: &str, placeholder: &str) -> String {
         let Some(document) = web_sys::window().and_then(|window| window.document()) else {
             return String::new();
         };
-        let Ok(Some(meta)) = document.query_selector("meta[name=relay]") else {
+        let Ok(Some(meta)) = document.query_selector(&format!("meta[name={name}]")) else {
             return String::new();
         };
         match meta.get_attribute("content") {
-            Some(url) if url != PLACEHOLDER => url,
+            Some(value) if value != placeholder => value,
             _ => String::new(),
         }
+    }
+
+    /// Where the relay is, according to the page.
+    pub fn relay_from_page() -> String {
+        from_meta("relay", PLACEHOLDER)
     }
 
     /// A browser socket, with the closures that feed it.
@@ -1278,6 +1743,42 @@ mod socket {
     /// Fixed, because a desktop build of this page is a compile check and not a client.
     pub fn guest_id() -> String {
         "0".repeat(32)
+    }
+
+    /// Nothing outside a browser, so login is off and every path through the page that
+    /// depends on it takes the branch it would take for a deployment with no exchange.
+    pub fn auth_from_page() -> String {
+        String::new()
+    }
+
+    pub fn code_from_url() -> Option<String> {
+        None
+    }
+
+    pub fn forget_code() {}
+
+    pub fn ticket_kept() -> Option<super::Held> {
+        None
+    }
+
+    pub fn keep_ticket(_held: &super::Held) {}
+
+    pub fn forget_ticket() {}
+
+    pub fn authorize(_client_id: &str, _redirect_uri: &str) {}
+
+    /// Answers at once, and answers that login is off.
+    ///
+    /// Not an empty stub: it puts the same answer a deployment with no exchange would, so
+    /// a desktop build takes the branch a real page takes rather than a branch of its own.
+    pub fn ask_where(_url: &str, answers: &super::FromExchange) {
+        answers.put(super::Answered::Where(None));
+    }
+
+    pub fn trade(_url: &str, _code: &str, answers: &super::FromExchange) {
+        answers.put(super::Answered::Traded(Err(
+            "Signing in needs a browser.".to_string()
+        )));
     }
 
     pub fn open(

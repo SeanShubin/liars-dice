@@ -114,7 +114,11 @@ jobs:
       #
       # `bootstrap` is the name the provided runtime execs, which is why the zip
       # holds one file by that name.
-      - name: Build the relay for Lambda
+      # Two functions, one container. Installing the toolchain is the expensive
+      # part, so the second binary costs almost nothing over the first. Each zip
+      # holds one file called `bootstrap`, which is the name the provided runtime
+      # execs — so they are built into separate directories and zipped apart.
+      - name: Build the relay and the exchange for Lambda
         run: |
           docker run --rm -v "$PWD":/src -w /src \
             public.ecr.aws/amazonlinux/amazonlinux:2023 bash -lc '
@@ -123,18 +127,24 @@ jobs:
               curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
                 | sh -s -- -y --profile minimal --default-toolchain stable
               . "$HOME/.cargo/env"
-              cargo build --release -p relay-service --target-dir /tmp/lambda
+              cargo build --release -p relay-service -p auth --target-dir /tmp/lambda
               cd /tmp/lambda/release
               cp relay-service bootstrap
               strip bootstrap
               zip -q -9 /src/bootstrap.zip bootstrap
+              rm bootstrap
+              cp auth bootstrap
+              strip bootstrap
+              zip -q -9 /src/auth.zip bootstrap
             '
-          ls -l bootstrap.zip
+          ls -l bootstrap.zip auth.zip
 
       - uses: actions/upload-artifact@v4
         with:
           name: relay
-          path: bootstrap.zip
+          path: |
+            bootstrap.zip
+            auth.zip
           retention-days: 7
 
       # The bundle the deploy publishes is the one the gate built. Nothing is
@@ -204,34 +214,49 @@ jobs:
       # The key carries the commit, which is what makes CloudFormation replace the
       # function's code: a redeploy of the same commit is a no-op, and a deploy of
       # a new one cannot be mistaken for it.
-      - name: Publish the relay
+      - name: Publish the relay and the exchange
         run: |
           bucket=$(aws cloudformation describe-stacks --stack-name "$BOOTSTRAP_STACK" \
             --query "Stacks[0].Outputs[?OutputKey=='ArtifactBucketName'].OutputValue" \
             --output text)
           key="relay/${GITHUB_SHA}.zip"
+          auth_key="auth/${GITHUB_SHA}.zip"
           aws s3 cp relay/bootstrap.zip "s3://${bucket}/${key}"
+          aws s3 cp relay/auth.zip "s3://${bucket}/${auth_key}"
           aws cloudformation deploy \
             --template-file deploy/relay.yaml \
             --stack-name "$RELAY_STACK" \
             --capabilities CAPABILITY_NAMED_IAM \
             --no-fail-on-empty-changeset \
-            --parameter-overrides "ArtifactBucket=${bucket}" "ArtifactKey=${key}"
+            --parameter-overrides \
+              "ArtifactBucket=${bucket}" \
+              "ArtifactKey=${key}" \
+              "AuthArtifactKey=${auth_key}"
           aws cloudformation describe-stacks --stack-name "$RELAY_STACK" \
             --query "Stacks[0].Outputs[?OutputKey=='SocketUrl'].OutputValue" --output text
 
       # The bundle cannot carry the relay's address, because the job that built it is
       # not allowed to know it. The page can: it is published from here, and the entry
       # screen reads it from the page rather than from anything compiled in.
-      - name: Tell the page where the relay is
+      - name: Tell the page where the relay and the exchange are
         run: |
-          url=$(aws cloudformation describe-stacks --stack-name "$RELAY_STACK" \
-            --query "Stacks[0].Outputs[?OutputKey=='SocketUrl'].OutputValue" --output text)
+          outputs() {
+            aws cloudformation describe-stacks --stack-name "$RELAY_STACK" \
+              --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text
+          }
+          url=$(outputs SocketUrl)
+          auth=$(outputs AuthUrl)
           test -n "$url"
+          test -n "$auth"
           page=site/liars-dice/multiplayer/index.html
+          # Checked before being replaced, so a page that stopped carrying the
+          # placeholder fails the deploy rather than being published unwired.
           grep -q RELAY_SOCKET_URL "$page"
+          grep -q AUTH_URL "$page"
           sed -i "s|RELAY_SOCKET_URL|${url}|" "$page"
+          sed -i "s|AUTH_URL|${auth}|" "$page"
           grep -o 'content="wss[^"]*"' "$page"
+          grep -o 'name="auth" content="[^"]*"' "$page"
 
       - name: Read the stack's outputs
         id: stack
