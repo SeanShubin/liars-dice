@@ -56,6 +56,7 @@
 - One clock reading serves one message
 - One clock reading serves one frame
 - A composition root that needs a computed value wires a stage to compute it, then wires the rest over the result
+- An observation that arrives unasked wakes the program
 - Every program can be composed over a simulated outside world
 
 ## Deployment

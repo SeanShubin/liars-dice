@@ -33,6 +33,10 @@
 - Two players never share a seat
 - A player holds one seat in a match
 
+## Unattended
+- An unattended client shows what it has received
+- An unattended client stays able to act
+
 ## Ending
 - A match is complete when every seat present in it says so
 - A log says whether its match is complete
