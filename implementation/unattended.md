@@ -55,14 +55,22 @@ One type knows how to wake, and every mailbox calls it:
 ```rust
 /// What to poke when something arrives while nobody is looking.
 #[derive(Clone)]
-struct Waker(egui::Context);
+struct Waker(Rc<dyn Fn()>);
 
 impl Waker {
+    fn over(context: egui::Context) -> Self {
+        Self(Rc::new(move || context.request_repaint()))
+    }
+
     fn wake(&self) {
-        self.0.request_repaint();
+        (self.0)();
     }
 }
 ```
+
+A function rather than the `egui::Context` itself. A context paints and cannot count, and
+Determinism below asks for a waker a test can compose over, so holding the context
+directly would make this document contradict itself.
 
 `Arrivals::push`, `Mishap::say` and `FromExchange::put` each hold one and call it. They are
 the three places an observation enters this program unasked, and they are already the three
@@ -130,8 +138,10 @@ next keepalive is due, rather than every `TICK`. Rejected: `quiet` needs the sam
 anyway, so the computed deadline would collapse back to `TICK` in every case where a socket
 is open, and arrive carrying arithmetic that no screen can tell apart from the constant.
 
-**`Waker` holds the context rather than an `Option`.** Both composition roots have one, so
-there is no case to carry. A `Waker` that might not wake is a `Waker` nobody can rely on.
+**`Waker` has no default.** Both composition roots have a context, so there is no case to
+carry, and the mailboxes lose their derived `Default` so that every construction site has
+to be handed a real one. A `Waker` that might not wake is a `Waker` nobody can rely on,
+and a `Default` is exactly how one would get built by accident.
 
 **Not fixing the lobby's refresh.** A listing is still only true of the moment it was read,
 and `look_again` is still a button. Making the lobby poll is a design change and not this
@@ -177,4 +187,23 @@ nothing, and there is no such harness in this project. Worth knowing that the ga
 closes is the same shape as the gap that let it in.
 
 ## Status
-Not started.
+Built. 312 tests pass across the workspace, four of them new; fmt and clippy clean on the
+host and on `wasm32-unknown-unknown`; the release bundle builds under trunk.
+
+Three things the document did not say.
+
+**`Waker` holds a function, not the context.** Written up above, because the sketch and the
+Determinism section disagreed and only one of them could be built.
+
+**The repaint condition became a named method.** `Page::frame_owed` rather than a condition
+inline in `ui`, because a condition in a frame loop can only be tested by running a frame
+loop. As a method it is asserted directly: a page holding a socket and no seat is owed a
+frame, which is the assertion that fails if anybody puts the seat back.
+
+**A fourth test, that draining a mailbox wakes nobody.** Not in the plan, and worth having:
+waking on `take` as well as on `push` would be invisible — every frame would ask for the
+next one, the page would never sleep, and nothing would look wrong except the battery.
+
+The `allow(dead_code)` the first draft of `Waker::over` carried turned out to be
+unnecessary — a test binary compiles `main`, so the composition roots are callers like any
+other — and removing it is how that was established rather than assumed.

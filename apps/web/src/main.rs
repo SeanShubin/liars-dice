@@ -73,12 +73,46 @@ const UNKNOWN_COLOUR: usize = 19;
 
 /// The frames that have arrived, oldest first.
 ///
+/// What to poke when something arrives while nobody is looking.
+///
+/// `An observation that arrives unasked wakes the program`. egui runs a frame when there is
+/// input or when something asked for one, and an answer landing in a cell is neither, so
+/// without this a page nobody is touching never looks in the cell.
+///
+/// A function rather than the `egui::Context` itself, so a test can compose the page over a
+/// waker that counts instead of one that paints — `Every program can be composed over a
+/// simulated outside world`. There is no default: a waker that might not wake is one
+/// nothing can rely on, so every mailbox is handed a real one at construction.
+#[derive(Clone)]
+struct Waker(Rc<dyn Fn()>);
+
+impl Waker {
+    /// The real one. Built by a composition root, which is the only place the context is.
+    fn over(context: egui::Context) -> Self {
+        Self(Rc::new(move || context.request_repaint()))
+    }
+
+    fn wake(&self) {
+        (self.0)();
+    }
+}
+
 /// `Rc<RefCell<_>>` rather than `Arc<Mutex<_>>` because a tab is one thread and a lock
 /// nobody contends is a lie about the code.
-#[derive(Clone, Default)]
-struct Arrivals(Rc<RefCell<VecDeque<String>>>);
+#[derive(Clone)]
+struct Arrivals {
+    queue: Rc<RefCell<VecDeque<String>>>,
+    waker: Waker,
+}
 
 impl Arrivals {
+    fn new(waker: Waker) -> Self {
+        Self {
+            queue: Rc::default(),
+            waker,
+        }
+    }
+
     /// Pushed to from the socket's message callback, which only a browser has.
     #[cfg_attr(
         not(target_arch = "wasm32"),
@@ -88,11 +122,12 @@ impl Arrivals {
         )
     )]
     fn push(&self, frame: String) {
-        self.0.borrow_mut().push_back(frame);
+        self.queue.borrow_mut().push_back(frame);
+        self.waker.wake();
     }
 
     fn take(&self) -> Option<String> {
-        self.0.borrow_mut().pop_front()
+        self.queue.borrow_mut().pop_front()
     }
 }
 
@@ -101,21 +136,32 @@ impl Arrivals {
 /// A socket that will not open, or that closes, is not something the protocol has a word
 /// for, so it is kept apart from [`Arrivals`] rather than disguised as a frame that failed
 /// to parse.
-#[derive(Clone, Default)]
-struct Mishap(Rc<RefCell<Option<String>>>);
+#[derive(Clone)]
+struct Mishap {
+    trouble: Rc<RefCell<Option<String>>>,
+    waker: Waker,
+}
 
 impl Mishap {
+    fn new(waker: Waker) -> Self {
+        Self {
+            trouble: Rc::default(),
+            waker,
+        }
+    }
+
     /// Said by the socket, which only a browser has.
     #[cfg_attr(
         not(target_arch = "wasm32"),
         allow(dead_code, reason = "the only caller is the browser socket")
     )]
     fn say(&self, trouble: impl Into<String>) {
-        *self.0.borrow_mut() = Some(trouble.into());
+        *self.trouble.borrow_mut() = Some(trouble.into());
+        self.waker.wake();
     }
 
     fn take(&self) -> Option<String> {
-        self.0.borrow_mut().take()
+        self.trouble.borrow_mut().take()
     }
 }
 
@@ -289,8 +335,11 @@ enum Signin {
 /// The same seam as [`Arrivals`]: a browser callback pushes and the frame loop drains.
 /// A fetch answers on its own schedule and a frame loop does not wait, so they meet in a
 /// cell rather than by one blocking the other.
-#[derive(Clone, Default)]
-struct FromExchange(Rc<RefCell<Option<Answered>>>);
+#[derive(Clone)]
+struct FromExchange {
+    answer: Rc<RefCell<Option<Answered>>>,
+    waker: Waker,
+}
 
 /// One answer from the exchange.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -302,12 +351,20 @@ enum Answered {
 }
 
 impl FromExchange {
+    fn new(waker: Waker) -> Self {
+        Self {
+            answer: Rc::default(),
+            waker,
+        }
+    }
+
     fn put(&self, answered: Answered) {
-        *self.0.borrow_mut() = Some(answered);
+        *self.answer.borrow_mut() = Some(answered);
+        self.waker.wake();
     }
 
     fn take(&self) -> Option<Answered> {
-        self.0.borrow_mut().take()
+        self.answer.borrow_mut().take()
     }
 }
 
@@ -341,6 +398,8 @@ struct Page {
     /// What to tell the person on the entry screen.
     trouble: Option<String>,
 
+    /// Handed to every mailbox, and kept because a new socket means new mailboxes.
+    waker: Waker,
     seated: Option<Seated>,
     /// What is open to join, as the relay last said. Stale by the time it is drawn, which
     /// is why joining one can still be refused.
@@ -381,7 +440,7 @@ struct Page {
 }
 
 impl Page {
-    fn new() -> Self {
+    fn new(waker: Waker) -> Self {
         Self {
             relay: socket::relay_from_page(),
             name: String::new(),
@@ -391,7 +450,7 @@ impl Page {
             spoke: 0.0,
             returned: false,
             signin: Signin::Asking,
-            from_exchange: FromExchange::default(),
+            from_exchange: FromExchange::new(waker.clone()),
             colour: 1,
             match_name: String::new(),
             paste: String::new(),
@@ -400,8 +459,9 @@ impl Page {
             open: Vec::new(),
             answered: false,
             wire: None,
-            arrivals: Arrivals::default(),
-            mishap: Mishap::default(),
+            arrivals: Arrivals::new(waker.clone()),
+            mishap: Mishap::new(waker.clone()),
+            waker,
             hand: Hand::default(),
             pending: Claim {
                 quantity: 1,
@@ -508,8 +568,8 @@ impl Page {
         // A new socket, so the question of where this player belongs is open again.
         self.returned = false;
         self.spoke = now;
-        self.arrivals = Arrivals::default();
-        self.mishap = Mishap::default();
+        self.arrivals = Arrivals::new(self.waker.clone());
+        self.mishap = Mishap::new(self.waker.clone());
         self.hand = Hand::default();
         self.open = Vec::new();
         self.answered = false;
@@ -592,6 +652,19 @@ impl Page {
         }
         self.spoke = now;
         self.say(vec![String::new()]);
+    }
+
+    /// When a frame is owed with nothing arriving, if one is.
+    ///
+    /// A socket and not a seat. The two things that need a frame when nothing is happening
+    /// are the keepalive and noticing that the relay has gone [`QUIET`], and both of those
+    /// last exactly as long as the socket does — a page waiting in the lobby holds an open
+    /// socket and must go on saying so, or the ten minute idle timeout takes it.
+    ///
+    /// A page with no socket owes nothing on a clock and sleeps until something wakes it,
+    /// which is why the entry screen does not spin while it waits for the exchange.
+    fn frame_owed(&self) -> Option<Duration> {
+        self.wire.is_some().then_some(TICK)
     }
 
     /// Apply everything that has arrived, then let the seat answer.
@@ -734,8 +807,8 @@ impl eframe::App for Page {
         self.hear_the_exchange();
         self.pump(now);
         self.keep_the_socket(now);
-        if self.seated.is_some() {
-            ui.ctx().request_repaint_after(TICK);
+        if let Some(after) = self.frame_owed() {
+            ui.ctx().request_repaint_after(after);
         }
         egui::Frame::central_panel(ui.style()).show(ui, |ui| {
             // Do not shrink to the content: a grid inside a shrinking scroll area is given
@@ -1920,7 +1993,7 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Liars Dice multiplayer",
         eframe::NativeOptions::default(),
-        Box::new(|_| Ok(Box::new(Page::new()))),
+        Box::new(|cc| Ok(Box::new(Page::new(Waker::over(cc.egui_ctx.clone()))))),
     )
 }
 
@@ -1943,7 +2016,7 @@ fn main() {
             .start(
                 canvas,
                 eframe::WebOptions::default(),
-                Box::new(|_| Ok(Box::new(Page::new()))),
+                Box::new(|cc| Ok(Box::new(Page::new(Waker::over(cc.egui_ctx.clone()))))),
             )
             .await
             .expect("the match started");
@@ -1953,6 +2026,43 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    /// A waker that counts instead of painting.
+    ///
+    /// The simulated outside world for the one observation this page cannot make for
+    /// itself: whether a frame will happen. Nothing here can run a frame, so what is
+    /// asserted is that the page asked for one.
+    #[derive(Clone, Default)]
+    struct Counted(Rc<Cell<u32>>);
+
+    impl Counted {
+        fn waker(&self) -> Waker {
+            let count = self.0.clone();
+            Waker(Rc::new(move || count.set(count.get() + 1)))
+        }
+
+        fn wakes(&self) -> u32 {
+            self.0.get()
+        }
+    }
+
+    /// A socket that keeps what it was told.
+    struct Recorder(Rc<RefCell<Vec<String>>>);
+
+    impl Wire for Recorder {
+        fn send(&self, frame: &str) -> Result<(), String> {
+            self.0.borrow_mut().push(frame.to_string());
+            Ok(())
+        }
+    }
+
+    /// A page holding an open socket, which is the state the lobby screen is in.
+    fn connected(page: &mut Page) -> Rc<RefCell<Vec<String>>> {
+        let said = Rc::new(RefCell::new(Vec::new()));
+        page.wire = Some(Box::new(Recorder(said.clone())));
+        said
+    }
 
     const AT_THE_TABLE: Stance = Stance {
         over: false,
@@ -1981,11 +2091,94 @@ mod tests {
         all
     }
 
+    /// `An unattended client stays able to act`.
+    ///
+    /// A page waiting in the lobby holds an open socket and no seat, and the keepalive
+    /// that stops API Gateway dropping it runs once per frame. Asking for frames only
+    /// while seated is how that keepalive came to be unreachable on the one screen people
+    /// wait on.
+    #[test]
+    fn a_page_holding_a_socket_is_owed_frames_whether_or_not_it_has_a_seat() {
+        let mut page = Page::new(Counted::default().waker());
+        assert_eq!(
+            page.frame_owed(),
+            None,
+            "nothing is open, so nothing is owed"
+        );
+        connected(&mut page);
+        assert!(page.seated.is_none(), "no seat, which is the whole point");
+        assert_eq!(
+            page.frame_owed(),
+            Some(TICK),
+            "a socket with nobody sitting at it still has to be kept alive"
+        );
+    }
+
+    /// The keepalive itself, which was always correct and never reached.
+    #[test]
+    fn a_silent_page_speaks_once_every_four_minutes() {
+        let mut page = Page::new(Counted::default().waker());
+        let said = connected(&mut page);
+        page.spoke = 0.0;
+
+        page.keep_the_socket(KEEPALIVE - 0.1);
+        assert!(
+            said.borrow().is_empty(),
+            "nothing is owed yet: {:?}",
+            said.borrow()
+        );
+
+        page.keep_the_socket(KEEPALIVE);
+        assert_eq!(said.borrow().len(), 1, "one keepalive, once it is due");
+        assert_eq!(
+            said.borrow()[0],
+            "",
+            "an empty frame, which the relay reads as no message at all"
+        );
+
+        page.keep_the_socket(KEEPALIVE + 1.0);
+        assert_eq!(said.borrow().len(), 1, "and not once per frame after that");
+    }
+
+    /// `An observation that arrives unasked wakes the program`, for each of the three
+    /// places an observation can arrive: a relay frame, a failed socket, and the
+    /// exchange's answer.
+    #[test]
+    fn everything_that_arrives_unasked_wakes_the_page() {
+        let counted = Counted::default();
+
+        let arrivals = Arrivals::new(counted.waker());
+        arrivals.push("a frame".to_string());
+        assert_eq!(counted.wakes(), 1, "a frame off the socket wakes the page");
+
+        let mishap = Mishap::new(counted.waker());
+        mishap.say("the socket failed");
+        assert_eq!(counted.wakes(), 2, "so does a socket that failed");
+
+        let from_exchange = FromExchange::new(counted.waker());
+        from_exchange.put(Answered::Where(None));
+        assert_eq!(counted.wakes(), 3, "so does the exchange answering");
+    }
+
+    /// Taking from a mailbox is not an arrival, so draining does not ask for another
+    /// frame. Otherwise every frame would ask for the next one and the page would never
+    /// be allowed to sleep.
+    #[test]
+    fn reading_a_mailbox_wakes_nobody() {
+        let counted = Counted::default();
+        let arrivals = Arrivals::new(counted.waker());
+        arrivals.push("a frame".to_string());
+        let before = counted.wakes();
+        assert_eq!(arrivals.take(), Some("a frame".to_string()));
+        assert_eq!(arrivals.take(), None);
+        assert_eq!(counted.wakes(), before, "draining is not an arrival");
+    }
+
     /// Frames are applied in the order they arrived, which is the order the log is in,
     /// which is the only order anything may be applied in.
     #[test]
     fn the_frame_queue_keeps_its_order() {
-        let arrivals = Arrivals::default();
+        let arrivals = Arrivals::new(Counted::default().waker());
         // Through a clone, because that is how it is used: the socket callback holds one
         // handle and the frame loop holds another.
         let callback = arrivals.clone();
@@ -2154,7 +2347,7 @@ mod tests {
     /// now display and the id is identity.
     #[test]
     fn a_page_says_it_is_a_guest_with_the_id_this_browser_keeps() {
-        let mut page = Page::new();
+        let mut page = Page::new(Counted::default().waker());
         page.name = "  Sean ".to_string();
         let once = page.who();
         assert_eq!(once, page.who(), "asking twice gives the same answer");
@@ -2174,8 +2367,8 @@ mod tests {
     /// `web-<name>`, so everybody called Ada was one account.
     #[test]
     fn the_same_name_in_two_browsers_is_two_players() {
-        let mut one = Page::new();
-        let mut other = Page::new();
+        let mut one = Page::new(Counted::default().waker());
+        let mut other = Page::new(Counted::default().waker());
         one.name = "Ada".to_string();
         other.name = "Ada".to_string();
         // The desktop build has no local storage, so the ids are equal there and the test
@@ -2189,7 +2382,7 @@ mod tests {
     /// the page pretending it reached the relay.
     #[test]
     fn without_a_browser_nothing_is_connected() {
-        let mut page = Page::new();
+        let mut page = Page::new(Counted::default().waker());
         page.name = "Sean".to_string();
         page.relay = "wss://nowhere/live".to_string();
         page.connect(0.0);
