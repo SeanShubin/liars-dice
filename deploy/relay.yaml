@@ -112,6 +112,8 @@ Resources:
           AttributeType: S
         - AttributeName: position
           AttributeType: N
+        - AttributeName: account
+          AttributeType: S
       KeySchema:
         - AttributeName: match
           KeyType: HASH
@@ -120,6 +122,31 @@ Resources:
         # total order without a lock.
         - AttributeName: position
           KeyType: RANGE
+      # Which matches an account has ever joined, for `A player cannot join a
+      # match while holding a seat in another match`.
+      #
+      # Without it, every host and every join would have to ask about every
+      # match — and the expensive answer is the common one, since discovering
+      # that somebody is in no match means looking everywhere. That is the cost
+      # `relay-service.md` already measures and calls the reason the lobby is
+      # worth watching, and putting the hot path on it knowingly is not a thing
+      # to defer to a later measurement.
+      #
+      # Sparse: only `join` rows carry an account, so this holds one row per
+      # seat ever taken rather than one per event. KEYS_ONLY because the match
+      # id is the whole of what the query needs — the caller folds each
+      # candidate anyway, since *has ever joined* is not *is in*.
+      #
+      # Not a second source of truth. DynamoDB derives it from the log's own
+      # rows, so it cannot disagree with the log any more than a sorted view of
+      # a list can disagree with the list.
+      GlobalSecondaryIndexes:
+        - IndexName: by-account
+          KeySchema:
+            - AttributeName: account
+              KeyType: HASH
+          Projection:
+            ProjectionType: KEYS_ONLY
       PointInTimeRecoverySpecification:
         PointInTimeRecoveryEnabled: true
       DeletionProtectionEnabled: true
@@ -233,7 +260,9 @@ Resources:
                   - dynamodb:PutItem
                   - dynamodb:Query
                   - dynamodb:Scan
-                Resource: !GetAtt LogTable.Arn
+                Resource:
+                  - !GetAtt LogTable.Arn
+                  - !Sub "${LogTable.Arn}/index/by-account"
               - Effect: Allow
                 Action:
                   - dynamodb:PutItem
@@ -445,6 +474,22 @@ Resources:
       Principal: '*'
       FunctionUrlAuthType: NONE
 
+  # No `FunctionUrlAuthType` here, and not by choice: Lambda refuses it on anything
+  # but `InvokeFunctionUrl` — "FunctionUrlAuthType is only supported for
+  # lambda:InvokeFunctionUrl action" — and `AWS::Lambda::Permission` has no field
+  # for the `lambda:InvokedViaFunctionUrl` condition the docs suggest instead. So
+  # this grant is wider than it should be: anybody could also reach the function
+  # through the Lambda API rather than only through its URL.
+  #
+  # Which buys an attacker nothing. The URL is public by design, and a fabricated
+  # invoke event is the same request a POST already makes — `request_of` reads a
+  # method and a code out of either. The function writes nowhere, holds no data, and
+  # mints only against a Discord code it cannot forge. What is left is spending
+  # invocations, which the public URL already allows.
+  #
+  # If this ever needs to be narrow, the route is a custom resource calling
+  # `add-permission` with the condition, and that is a lot of machinery for the
+  # difference above.
   AuthInvokePermission:
     Type: AWS::Lambda::Permission
     Condition: HasExchange
@@ -452,7 +497,6 @@ Resources:
       FunctionName: !Ref AuthFunction
       Action: lambda:InvokeFunction
       Principal: '*'
-      FunctionUrlAuthType: NONE
 
 Outputs:
   AuthUrl:

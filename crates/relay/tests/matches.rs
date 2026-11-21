@@ -128,8 +128,13 @@ fn two_player_match() -> (Relay<MemoryLog, MemoryConnections>, MatchId) {
     (relay, match_id)
 }
 
+/// `A started match is listed`, and says it cannot be joined rather than vanishing.
+///
+/// This test used to assert the opposite. A lobby that showed only what was on offer could
+/// not say what was going on, and a match you were in disappeared from it the moment it
+/// started — which is how a reload became unrecoverable.
 #[test]
-fn a_match_that_has_not_started_is_listed_and_one_that_has_is_not() {
+fn a_started_match_is_listed_and_says_it_cannot_be_joined() {
     let mut relay = relay();
     let alice = connection("alice");
     let match_id = host(&mut relay, &alice);
@@ -138,6 +143,7 @@ fn a_match_that_has_not_started_is_listed_and_one_that_has_is_not() {
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].host, "Alice");
     assert_eq!(listed[0].players, 1);
+    assert!(listed[0].joinable, "hosted and waiting");
 
     relay.receive(
         &alice,
@@ -146,9 +152,21 @@ fn a_match_that_has_not_started_is_listed_and_one_that_has_is_not() {
         },
         moment(),
     );
+    let listed = relay.open_matches(None, moment());
+    assert_eq!(listed.len(), 1, "still listed: {listed:?}");
+    assert!(
+        !listed[0].joinable,
+        "`A player cannot join a match that has started`"
+    );
+
+    // And over, it is gone.
+    assert_eq!(
+        cancel(&mut relay, &alice, &match_id, CANCEL_AFTER_SECONDS),
+        None
+    );
     assert!(
         relay.open_matches(None, moment()).is_empty(),
-        "a started match cannot be joined, so it is not listed"
+        "`A match that is over is not listed`"
     );
 }
 
@@ -206,9 +224,10 @@ fn asking_what_is_open_lists_the_matches_that_are() {
         )
         .listed
         .expect("a listing");
+    assert_eq!(after.len(), 1, "a started match is still listed: {after:?}");
     assert!(
-        after.is_empty(),
-        "a started match cannot be joined, so it is not listed: {after:?}"
+        !after[0].joinable,
+        "and says it cannot be joined, which is what the lobby draws it greyed for"
     );
 }
 
@@ -1003,12 +1022,44 @@ fn hosting_twice_on_purpose_creates_two_matches() {
         request("one"),
         moment(),
     );
+    let hosted = one.created.clone().expect("a match");
+    // A different nonce names a different match — but this account is now in the first
+    // one, and `A player cannot host a match while holding a seat in another match`. The
+    // property this test was written for has moved to `integrity`, where naming lives;
+    // what it checks here is that the second request is refused rather than quietly
+    // making a match nobody can get to.
     let two = relay.receive(
         &ConnectionId("socket-a".to_string()),
         request("two"),
         moment(),
     );
-    assert_ne!(one.created, two.created);
+    assert_eq!(
+        two.refused,
+        Some(Refused::AlreadyInAMatch {
+            match_id: hosted.clone()
+        }),
+        "and it says which match, so a client can offer to go there"
+    );
+    assert_eq!(two.created, None);
+    assert_eq!(relay.log().matches().len(), 1);
+
+    // Leaving the first makes the second possible, which is what keeps the rule from
+    // being a trap.
+    relay.receive(
+        &ConnectionId("socket-a".to_string()),
+        Message::Leave { match_id: hosted },
+        moment(),
+    );
+    let again = relay.receive(
+        &ConnectionId("socket-b".to_string()),
+        request("two"),
+        moment(),
+    );
+    assert_eq!(again.refused, None);
+    assert_ne!(
+        again.created, one.created,
+        "a different nonce, a different match"
+    );
     assert_eq!(relay.log().matches().len(), 2);
 }
 
@@ -1913,8 +1964,8 @@ fn an_event_resets_the_hour() {
     );
     assert_eq!(
         relay.open_matches(None, later(ABANDON_AFTER_SECONDS)).len(),
-        0,
-        "a started match is not listed either way"
+        1,
+        "a started match is listed, abandoned or not"
     );
     assert!(
         !relay.view(&match_id).over(),
@@ -2373,4 +2424,267 @@ fn without_a_ticket_secret_guests_still_play() {
     );
     assert_eq!(guest.refused, None, "a guest does not need a ticket secret");
     assert!(guest.created.is_some());
+}
+
+// ---------------------------------------------------------------------------------------
+// The lobby: /implementation/lobby.md
+// ---------------------------------------------------------------------------------------
+
+/// The flag in the listing agrees with what `join` actually does, over every shape.
+///
+/// This is the test that pays for there being one `why_not_joinable`. It fails if anybody
+/// adds a guard to `join` and not to the listing, which is the drift that would otherwise
+/// have the lobby offer a match that refuses you with the bug in neither place.
+///
+/// The colour is deliberately outside the agreement: a colour is part of a request rather
+/// than a property of a match, so a listing promises the match will take you and not that
+/// it will take you in green.
+#[test]
+fn the_listing_and_the_refusal_say_the_same_thing() {
+    // Each case builds a relay in some shape, then asks both questions about one match.
+    let shapes: Vec<(&str, Shape)> = vec![
+        ("hosted and waiting", || {
+            let mut relay = relay();
+            let match_id = host(&mut relay, &connection("alice"));
+            (relay, match_id)
+        }),
+        ("started", two_player_match),
+        ("over", || {
+            let mut relay = relay();
+            let alice = connection("alice");
+            let match_id = host(&mut relay, &alice);
+            assert_eq!(cancel(&mut relay, &alice, &match_id, 0), None);
+            (relay, match_id)
+        }),
+        ("full", || {
+            let mut relay = relay();
+            let match_id = host(&mut relay, &connection("alice"));
+            for at in 1..relay::MAX_PLAYERS {
+                let colour = format!("colour-{at}");
+                assert_eq!(
+                    seat(
+                        &mut relay,
+                        &connection(&format!("socket-{at}")),
+                        &match_id,
+                        guest_who(&format!("filler-{at}"), "Filler"),
+                        &colour
+                    ),
+                    None,
+                    "seat {at} of a full match"
+                );
+            }
+            (relay, match_id)
+        }),
+        ("barring the asker", || {
+            let mut relay = relay();
+            let alice = connection("alice");
+            let bob = connection("bob");
+            let match_id = host(&mut relay, &alice);
+            assert_eq!(seat(&mut relay, &bob, &match_id, asker(), "blue"), None);
+            relay.receive(
+                &alice,
+                Message::Bar {
+                    match_id: match_id.clone(),
+                    seat: Seat(1),
+                },
+                moment(),
+            );
+            relay.receive(
+                &bob,
+                Message::Leave {
+                    match_id: match_id.clone(),
+                },
+                moment(),
+            );
+            (relay, match_id)
+        }),
+    ];
+
+    for (what, build) in shapes {
+        let (mut relay, match_id) = build();
+        let asking = guest("asker");
+        let listed = relay
+            .open_matches(Some(&asking), moment())
+            .into_iter()
+            .find(|open| open.match_id == match_id);
+        let refused = seat(
+            &mut relay,
+            &connection("asker-socket"),
+            &match_id,
+            asker(),
+            "indigo",
+        );
+        match listed {
+            // Listed: the flag must match whether the join was refused.
+            Some(open) => assert_eq!(
+                open.joinable,
+                refused.is_none(),
+                "{what}: listed joinable={} but join said {refused:?}",
+                open.joinable
+            ),
+            // Not listed at all is its own agreement: `A match that is over is not listed`
+            // and `A match is not listed to a player barred from it`, and both refuse.
+            None => assert!(
+                refused.is_some(),
+                "{what}: not listed, yet joining it worked"
+            ),
+        }
+    }
+}
+
+/// A relay in some shape, and the one match in it the agreement test asks about.
+type Shape = fn() -> (Relay<MemoryLog, MemoryConnections>, MatchId);
+
+/// What the asker says it is, for the agreement test above.
+fn asker() -> Who {
+    guest_who("asker", "Asker")
+}
+
+/// `A listed match shows whether the player asking holds a seat in it`.
+#[test]
+fn a_listing_marks_the_one_match_the_asker_is_in() {
+    let mut relay = relay();
+    let alice = connection("alice");
+    let bob = connection("bob");
+    let mine = host(&mut relay, &alice);
+    // A second match, hosted by somebody else, which the asker is not in.
+    let theirs = relay
+        .receive(
+            &bob,
+            Message::Host {
+                who: guest_who("bob", "Bob"),
+                colour: "blue".to_string(),
+                version: PROTOCOL_VERSION,
+                nonce: "bob-hosts".to_string(),
+            },
+            moment(),
+        )
+        .created
+        .expect("a match");
+
+    let asked = |relay: &mut Relay<MemoryLog, MemoryConnections>, account: &Account| {
+        relay
+            .open_matches(Some(account), moment())
+            .into_iter()
+            .filter(|open| open.mine)
+            .map(|open| open.match_id)
+            .collect::<Vec<_>>()
+    };
+
+    // Alice hosted `mine`, so exactly that one is hers.
+    assert_eq!(asked(&mut relay, &guest("1")), vec![mine.clone()]);
+    assert_eq!(asked(&mut relay, &guest("bob")), vec![theirs]);
+    assert_eq!(
+        asked(&mut relay, &guest("nobody")),
+        Vec::new(),
+        "somebody in no match has no match of their own"
+    );
+
+    // And leaving gives it up.
+    relay.receive(&alice, Message::Leave { match_id: mine }, moment());
+    assert_eq!(asked(&mut relay, &guest("1")), Vec::new());
+}
+
+/// `A player cannot join a match while holding a seat in another match`.
+#[test]
+fn a_player_in_one_match_cannot_join_another() {
+    let mut relay = relay();
+    let alice = connection("alice");
+    let bob = connection("bob");
+    let first = host(&mut relay, &alice);
+    let second = relay
+        .receive(
+            &bob,
+            Message::Host {
+                who: guest_who("bob", "Bob"),
+                colour: "blue".to_string(),
+                version: PROTOCOL_VERSION,
+                nonce: "bob-hosts".to_string(),
+            },
+            moment(),
+        )
+        .created
+        .expect("a match");
+
+    // Alice is in the first, so the second is refused and says where she already is.
+    assert_eq!(
+        seat(
+            &mut relay,
+            &connection("alice-elsewhere"),
+            &second,
+            guest_who("1", "Alice"),
+            "green"
+        ),
+        Some(Refused::AlreadyInAMatch {
+            match_id: first.clone()
+        })
+    );
+    // And the listing agrees without her having to try.
+    let listed = relay.open_matches(Some(&guest("1")), moment());
+    let second_row = listed
+        .iter()
+        .find(|open| open.match_id == second)
+        .expect("the other match is listed");
+    assert!(!second_row.joinable, "the lobby said so too");
+
+    // Leaving the first opens the second. Explicitly, because leaving is an elimination in
+    // the rules and must never happen as a side effect of clicking join.
+    relay.receive(
+        &alice,
+        Message::Leave {
+            match_id: first.clone(),
+        },
+        moment(),
+    );
+    assert_eq!(
+        seat(
+            &mut relay,
+            &connection("alice-elsewhere"),
+            &second,
+            guest_who("1", "Alice"),
+            "green"
+        ),
+        None,
+        "leaving is how somebody goes and plays elsewhere"
+    );
+}
+
+/// A match that is over holds nobody, so finishing one does not lock you out of the next.
+#[test]
+fn a_finished_match_does_not_hold_its_players() {
+    let mut relay = relay();
+    let alice = connection("alice");
+    let first = host(&mut relay, &alice);
+    assert_eq!(relay.match_of(&guest("1")), Some(first.clone()));
+
+    assert_eq!(cancel(&mut relay, &alice, &first, 0), None);
+    assert_eq!(
+        relay.match_of(&guest("1")),
+        None,
+        "over, so it holds nobody — otherwise finishing a game would lock you out of the next"
+    );
+
+    // So hosting again works, with no leaving required.
+    let again = relay.receive(
+        &alice,
+        Message::Host {
+            who: guest_who("1", "Alice"),
+            colour: "red".to_string(),
+            version: PROTOCOL_VERSION,
+            nonce: "second".to_string(),
+        },
+        moment(),
+    );
+    assert_eq!(again.refused, None);
+    assert!(again.created.is_some());
+}
+
+/// A seat that left is not a seat held, so leaving really does free somebody up.
+#[test]
+fn a_seat_that_left_is_not_held() {
+    let (mut relay, match_id) = two_player_match();
+    let bob = connection("bob");
+    assert_eq!(relay.match_of(&guest("2")), Some(match_id.clone()));
+    relay.receive(&bob, Message::Leave { match_id }, moment());
+    assert_eq!(relay.match_of(&guest("2")), None);
 }

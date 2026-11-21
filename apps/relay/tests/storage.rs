@@ -83,8 +83,22 @@ fn attribute(name: &str, kind: ScalarAttributeType) -> AttributeDefinition {
 }
 
 /// The log table: partitioned by match, ordered by position.
+/// The log table, and the index that answers which matches an account is in.
+///
+/// Declared here the same way `deploy/relay.yaml` declares it, so a query that works
+/// against this works against the real one. Sparse: only a `join` row carries an account.
 fn log_table(runtime: &Runtime, client: &Client) -> String {
     let table = unique("log");
+    let index = GlobalSecondaryIndex::builder()
+        .index_name(codec::BY_ACCOUNT)
+        .key_schema(key(codec::ACCOUNT, KeyType::Hash))
+        .projection(
+            Projection::builder()
+                .projection_type(ProjectionType::KeysOnly)
+                .build(),
+        )
+        .build()
+        .expect("a global secondary index");
     runtime
         .block_on(
             client
@@ -95,6 +109,8 @@ fn log_table(runtime: &Runtime, client: &Client) -> String {
                 .key_schema(key(codec::POSITION, KeyType::Range))
                 .attribute_definitions(attribute(codec::MATCH, ScalarAttributeType::S))
                 .attribute_definitions(attribute(codec::POSITION, ScalarAttributeType::N))
+                .attribute_definitions(attribute(codec::ACCOUNT, ScalarAttributeType::S))
+                .global_secondary_indexes(index)
                 .send(),
         )
         .expect("the table should be created; if nothing answers at all, see this file's header");
@@ -912,4 +928,94 @@ fn two_listings_at_once_abandon_an_expired_match_once() {
             found.0
         );
     }
+}
+
+/// The index narrows the question without changing the answer.
+///
+/// `matches_of` is allowed to be cheaper than the default and not to be different from it.
+/// That is the whole basis for `DynamoLog` overriding it, so it is worth a test rather
+/// than an argument: this builds several matches, then checks the index's answer against
+/// the honest one — every match, folded.
+#[test]
+#[ignore = "needs DynamoDB Local; the gate runs it with --include-ignored"]
+fn the_account_index_answers_what_a_full_scan_would() {
+    let (runtime, client) = arrange();
+    let log_table = log_table(&runtime, &client);
+    let place_table = place_table(&runtime, &client);
+
+    // Three accounts across two matches: one hosts, one joins, one is in neither.
+    let mut relay = relay_over(&client, &log_table, &place_table, runtime.handle().clone());
+    let first = relay
+        .receive(&ConnectionId("a".into()), host_message(0), recorded())
+        .created
+        .expect("a match");
+    assert_eq!(
+        relay
+            .receive(
+                &ConnectionId("b".into()),
+                Message::Join {
+                    match_id: first.clone(),
+                    who: Who::Guest {
+                        id: "account-1".to_string(),
+                        name: "Player 1".to_string(),
+                    },
+                    colour: "blue".to_string(),
+                    version: protocol::PROTOCOL_VERSION,
+                },
+                recorded(),
+            )
+            .refused,
+        None
+    );
+    // A second match, hosted by a third account, so there is more than one thing to find.
+    let second = relay
+        .receive(&ConnectionId("c".into()), host_message(2), recorded())
+        .created
+        .expect("a match");
+
+    let log = DynamoLog::new(
+        client.clone(),
+        &log_table,
+        runtime.handle().clone(),
+        Meter::new(),
+    );
+    // What the default would have said: every match that holds a join for the account.
+    let honest = |account: &str| {
+        let mut found: Vec<MatchId> = log
+            .matches()
+            .into_iter()
+            .filter(|match_id| {
+                log.read(match_id).events.iter().any(|event| {
+                    matches!(event, Event::Join { account: held, .. }
+                        if protocol::account_text(held) == account)
+                })
+            })
+            .collect();
+        found.sort();
+        found
+    };
+    for account in [
+        "guest:account-0",
+        "guest:account-1",
+        "guest:account-2",
+        "guest:nobody",
+        // The text of an account that exists in another form, to be sure the index is
+        // keyed on the whole account and not on part of it.
+        "discord:account-0",
+    ] {
+        let mut indexed = log.matches_of(account);
+        indexed.sort();
+        assert_eq!(
+            indexed,
+            honest(account),
+            "the index and a full read disagree about {account}"
+        );
+    }
+
+    // And the shape of what it found, so a test that passed by finding nothing twice
+    // would not pass here.
+    assert_eq!(log.matches_of("guest:account-0"), vec![first.clone()]);
+    assert_eq!(log.matches_of("guest:account-1"), vec![first]);
+    assert_eq!(log.matches_of("guest:account-2"), vec![second]);
+    assert!(log.matches_of("guest:nobody").is_empty());
 }

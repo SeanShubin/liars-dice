@@ -230,12 +230,33 @@ argued there.
 **Nothing watches a match in progress.** A started match is visible in the lobby and not
 joinable, and that is all; spectating is a different thing and is not in the specification.
 
-**`Listed` will grow `ranked`** when `identity.md` lands, derived in the same fold. Worth
-knowing that this struct is about to be touched again.
+**The AI player button is still not built.** `identity.md` owns what a bot is, and
+`crates/seat/tests/bots.rs` proves a host can play a whole match against two of them, each
+on its own socket. The screen that adds one belongs to `multiplayer-client.md`.
 
 **The lobby still scans the whole table.** This unit adds an index for *which match holds
 this account*, not for *which matches exist*. `relay-service.md`'s open item about a
 projection for the second question is untouched, and is now the only scan left on the path.
 
 ## Status
-Not started.
+Built.
+
+Two things came out of building it that the document did not say.
+
+**The client resumes rather than re-joining.** `Message::Resume` was implemented in the
+relay and sent by nothing, which is how closing a tab lost a seat; it is now `seat`'s third
+`Opening`, with no colour, because a returning player is not choosing one — their seat
+already has the colour the log recorded. Joining again would have worked, since a join from
+an account that holds a seat returns it, but it would have meant inventing a colour nobody
+uses to ask a question the log has already answered.
+
+**The page also needs a keepalive, which belongs here by consequence.** API Gateway closes
+a WebSocket after ten minutes with no traffic and every connection at two hours, and
+neither quota can be raised. Resuming makes a drop survivable; it does not make one rare.
+So `apps/web` sends an empty frame every four minutes — which the relay was already written
+for: a bodyless frame is *"not a message... closing the socket over it would punish a
+keepalive."*
+
+The two-hour cap is why this unit mattered more than it looked. A drop is not an edge case,
+it is a certainty on any session longer than two hours, and before this the only recovery
+was the host re-sharing the match id.

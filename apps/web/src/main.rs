@@ -42,6 +42,18 @@ use seat::{Ending, Listed, MatchId, Seated, Stopped, lobby};
 /// never a claim about who is there, and crossing it changes no rule and sends no message.
 const QUIET: f64 = 20.0;
 
+/// How long a socket may carry nothing before this page sends something to keep it.
+///
+/// API Gateway closes a WebSocket after ten minutes with no traffic, and that quota cannot
+/// be raised. A turn-based game is quiet for long stretches — somebody thinking, everybody
+/// talking elsewhere — so without this a lull of ten minutes drops every player in the
+/// match. The relay was written for this: a frame with no body is "not a message. Nothing
+/// to record and nothing to answer, and closing the socket over it would punish a
+/// keepalive."
+///
+/// Four minutes, so two of them can be lost before the timeout is reached.
+const KEEPALIVE: f64 = 240.0;
+
 /// What to say when a ticket cannot be read at all.
 ///
 /// Not reachable while this page only ever builds a guest, and here rather than as an
@@ -58,10 +70,6 @@ const TICK: Duration = Duration::from_millis(500);
 
 /// The swatch a colour nobody recognises is drawn in. Unreachable through the picker.
 const UNKNOWN_COLOUR: usize = 19;
-
-/// As many as a match holds. The relay refuses the eleventh, and the lobby says so before
-/// anybody tries.
-const MAX_SEATS: usize = 10;
 
 /// The frames that have arrived, oldest first.
 ///
@@ -222,6 +230,23 @@ fn remaining(countdown: Option<(u32, f64)>, now: f64) -> Option<u32> {
     }
 }
 
+fn players(count: usize) -> String {
+    match count {
+        1 => "1 player".to_string(),
+        many => format!("{many} players"),
+    }
+}
+
+/// Said only when it is true, because *unranked* is the ordinary case and labelling it
+/// would make the ordinary case look like a warning.
+fn ranked_note(ranked: bool) -> String {
+    if ranked {
+        "ranked".to_string()
+    } else {
+        String::new()
+    }
+}
+
 fn may_call(stance: Stance) -> bool {
     stance.started && !stance.over && stance.playing && stance.my_turn
 }
@@ -335,6 +360,13 @@ struct Page {
     exchange: String,
     /// Whether the first frame has asked the exchange anything yet.
     asked_the_exchange: bool,
+    /// When this page last sent a keepalive, on the frame loop's clock.
+    spoke: f64,
+    /// Whether this page has already acted on a listing that named a match of its own.
+    ///
+    /// Once per socket. Without it, every listing that arrives while the page is sitting
+    /// in the lobby would resume again, and a listing arrives whenever anybody asks.
+    returned: bool,
     /// What the page knows about signing in.
     signin: Signin,
     /// Where the exchange's answers land.
@@ -356,6 +388,8 @@ impl Page {
             guest: socket::guest_id(),
             exchange: socket::auth_from_page(),
             asked_the_exchange: false,
+            spoke: 0.0,
+            returned: false,
             signin: Signin::Asking,
             from_exchange: FromExchange::default(),
             colour: 1,
@@ -471,6 +505,9 @@ impl Page {
     /// decided anything. Hosting and joining both happen later on this same socket.
     fn connect(&mut self, now: f64) {
         self.trouble = None;
+        // A new socket, so the question of where this player belongs is open again.
+        self.returned = false;
+        self.spoke = now;
         self.arrivals = Arrivals::default();
         self.mishap = Mishap::default();
         self.hand = Hand::default();
@@ -508,6 +545,10 @@ impl Page {
     fn leave_seat(&mut self, trouble: Option<String>) {
         self.seated = None;
         self.trouble = trouble;
+        // Somebody who left must not be put straight back. `returned` is cleared only by
+        // a new socket, so the listing that arrives next does not undo a deliberate leave
+        // — and the relay agrees, because a seat that left is not a seat held.
+        self.returned = true;
         // Belongs to the match being left. Carrying it into the next one would show a
         // stale countdown over a match nothing has been asked about.
         self.countdown = None;
@@ -536,6 +577,23 @@ impl Page {
         }
     }
 
+    /// Keep the socket from being closed for being quiet.
+    ///
+    /// An empty frame, which the relay reads as no message at all. See [`KEEPALIVE`] for
+    /// why this exists rather than the socket being left alone.
+    ///
+    /// On its own timer rather than only when the socket has been idle. Real traffic
+    /// resets API Gateway's clock too, so a keepalive during an active match is redundant
+    /// — and tracking that would mean every `say` knowing what time it is, for a saving
+    /// of one empty frame every four minutes. Unconditional has no case to get wrong.
+    fn keep_the_socket(&mut self, now: f64) {
+        if self.wire.is_none() || now - self.spoke < KEEPALIVE {
+            return;
+        }
+        self.spoke = now;
+        self.say(vec![String::new()]);
+    }
+
     /// Apply everything that has arrived, then let the seat answer.
     ///
     /// The one ordering that matters is inside this function: every frame is applied before
@@ -553,6 +611,7 @@ impl Page {
             if let Some(open) = lobby::listing(&frame) {
                 self.open = open;
                 self.answered = true;
+                self.return_to_my_match();
                 continue;
             }
             let Some(seated) = &mut self.seated else {
@@ -595,6 +654,35 @@ impl Page {
                 .is_some_and(|player| player.left)
         {
             self.leave_seat(Some("You left the match.".to_string()));
+        }
+    }
+
+    /// Go back to the match this account already holds a seat in.
+    ///
+    /// `A client returns its player to the match they hold a seat in, without asking`. The
+    /// listing is what knows which one: it is the pass that already read every match, so
+    /// no second question is needed and there is nothing to keep in step.
+    ///
+    /// This is what makes a drop survivable. API Gateway closes every connection at two
+    /// hours whatever happens, and a dropped socket used to leave somebody at the entry
+    /// screen needing the match id from the host. Now the page finds its own way back.
+    fn return_to_my_match(&mut self) {
+        if self.returned || self.seated.is_some() {
+            return;
+        }
+        let Some(mine) = self.open.iter().find(|open| open.mine) else {
+            return;
+        };
+        // Once per socket, whatever listings arrive later.
+        self.returned = true;
+        let seated = Seated::resuming(
+            self.who(),
+            mine.match_id.clone(),
+            Box::new(self.hand.clone()),
+        );
+        match seated {
+            Some(seated) => self.sit(seated),
+            None => self.trouble = Some(UNREADABLE_TICKET.to_string()),
         }
     }
 
@@ -645,6 +733,7 @@ impl eframe::App for Page {
         }
         self.hear_the_exchange();
         self.pump(now);
+        self.keep_the_socket(now);
         if self.seated.is_some() {
             ui.ctx().request_repaint_after(TICK);
         }
@@ -837,7 +926,7 @@ impl Page {
         ui.label(
             egui::RichText::new(format!(
                 "You are {}, playing {}.",
-                self.name.trim(),
+                self.shown_name(),
                 PALETTE[self.colour].name
             ))
             .size(12.0),
@@ -848,21 +937,56 @@ impl Page {
         if !self.answered {
             ui.label("asking the relay…");
         } else if self.open.is_empty() {
-            ui.label("Nothing is open. Host one, and somebody can join it.");
+            ui.label("Nothing is going on. Host a match, and somebody can join it.");
         } else {
-            egui::Grid::new("open").spacing([12.0, 8.0]).show(ui, |ui| {
-                for open in &self.open {
-                    ui.label(egui::RichText::new(&open.host).strong());
-                    ui.label(match open.players {
-                        1 => "1 player".to_string(),
-                        many => format!("{many} players"),
-                    });
-                    if tap(ui, "Join", open.players < MAX_SEATS) {
-                        joining = Some(open.match_id.clone());
+            // Two groups, because `A listed match shows whether it can be joined` and the
+            // honest way to show that is to stop offering a button for the ones that
+            // cannot. The relay decides which is which: `joinable` is the refusal `join`
+            // would give, so a greyed row and a refused click can never disagree.
+            let (open, going_on): (Vec<&Listed>, Vec<&Listed>) =
+                self.open.iter().partition(|open| open.joinable);
+
+            if open.is_empty() {
+                ui.label("Nothing is open to join just now.");
+            } else {
+                ui.label(egui::RichText::new("Open to join").strong());
+                egui::Grid::new("open").spacing([12.0, 8.0]).show(ui, |ui| {
+                    for listed in &open {
+                        ui.label(egui::RichText::new(&listed.host).strong());
+                        ui.label(players(listed.players));
+                        ui.label(ranked_note(listed.ranked));
+                        if tap(ui, if listed.mine { "Rejoin" } else { "Join" }, true) {
+                            joining = Some(listed.match_id.clone());
+                        }
+                        ui.end_row();
                     }
-                    ui.end_row();
-                }
-            });
+                });
+            }
+
+            if !going_on.is_empty() {
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("In progress").strong());
+                egui::Grid::new("going-on")
+                    .spacing([12.0, 8.0])
+                    .show(ui, |ui| {
+                        for listed in &going_on {
+                            ui.label(egui::RichText::new(&listed.host).strong());
+                            ui.label(players(listed.players));
+                            ui.label(ranked_note(listed.ranked));
+                            // No button. Why there is none is the useful part, and the
+                            // relay already said it.
+                            ui.label(
+                                egui::RichText::new(if listed.mine {
+                                    "yours — reconnecting"
+                                } else {
+                                    "under way"
+                                })
+                                .size(12.0),
+                            );
+                            ui.end_row();
+                        }
+                    });
+            }
         }
 
         ui.add_space(6.0);

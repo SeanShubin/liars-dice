@@ -24,6 +24,13 @@ use wire::{KIND, Malformed, Shape, Value, event};
 pub const MATCH: &str = "match";
 /// The sort key: where in the log it sits. The conditional write is on this.
 pub const POSITION: &str = "position";
+/// The account a `join` row names. The hash key of `by-account`.
+///
+/// Only a `join` carries one, which is what makes the index sparse: it holds one row per
+/// seat ever taken rather than one per event.
+pub const ACCOUNT: &str = "account";
+/// The index that answers which matches an account has joined.
+pub const BY_ACCOUNT: &str = "by-account";
 /// When the relay recorded this row, in unix nanoseconds.
 ///
 /// `The relay records when it received each event`, and deliberately beside the event

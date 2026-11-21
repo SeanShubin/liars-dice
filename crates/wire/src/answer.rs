@@ -71,6 +71,8 @@ fn listed_shape(open: &Listed) -> Shape {
             ("host", text(&open.host)),
             ("players", Value::Count(open.players as u64)),
             ("ranked", Value::Flag(open.ranked)),
+            ("joinable", Value::Flag(open.joinable)),
+            ("mine", Value::Flag(open.mine)),
         ],
     )
 }
@@ -99,6 +101,13 @@ fn refusal(why: &Refused) -> Shape {
         Refused::NotTheHost => named("not-the-host"),
         Refused::NotInThisMatch => named("not-in-this-match"),
         Refused::BadTicket => named("bad-ticket"),
+        Refused::AlreadyInAMatch { match_id } => Shape::of(
+            REFUSED,
+            vec![
+                ("why", text("already-in-a-match")),
+                ("match", text(&match_id.0)),
+            ],
+        ),
         Refused::MatchIsOver => named("match-is-over"),
         Refused::StillActive { seconds } => Shape::of(
             REFUSED,
@@ -136,6 +145,8 @@ fn listed_of(shape: &Shape) -> Result<Listed, Malformed> {
         host: shape.text("host")?.to_string(),
         players: shape.count("players")?,
         ranked: shape.flag("ranked")?,
+        joinable: shape.flag("joinable")?,
+        mine: shape.flag("mine")?,
     })
 }
 
@@ -153,6 +164,9 @@ fn why(shape: &Shape) -> Result<Refused, Malformed> {
         "not-the-host" => Ok(Refused::NotTheHost),
         "not-in-this-match" => Ok(Refused::NotInThisMatch),
         "bad-ticket" => Ok(Refused::BadTicket),
+        "already-in-a-match" => Ok(Refused::AlreadyInAMatch {
+            match_id: MatchId(shape.text("match")?.to_string()),
+        }),
         "match-is-over" => Ok(Refused::MatchIsOver),
         "still-active" => Ok(Refused::StillActive {
             seconds: shape.count("seconds")?,

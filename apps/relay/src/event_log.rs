@@ -14,7 +14,7 @@ use protocol::{Event, Moment};
 use relay::{Log, MatchId, Recording, Taken};
 use tokio::runtime::Handle;
 
-use crate::codec::{self, MATCH, POSITION};
+use crate::codec::{self, BY_ACCOUNT, MATCH, POSITION};
 use crate::meter::Meter;
 
 /// The log, over one DynamoDB table.
@@ -208,6 +208,56 @@ impl Log for DynamoLog {
         }
         self.meter.read(events.len());
         Recording { events, last }
+    }
+
+    /// Every match this account has ever joined.
+    ///
+    /// A Query on `by-account`, not the Scan below. Every host and every join asks this,
+    /// and the expensive answer is the common one — discovering that somebody is in no
+    /// match means looking everywhere — so the hot path must not be the lobby's path.
+    ///
+    /// The index is sparse: only a `join` row carries an account, so this reads one row
+    /// per seat the account has ever taken rather than one per event. `matches_of` is
+    /// allowed to narrow and not to change the answer, and an index derived by the
+    /// database from these rows cannot: the caller folds each candidate anyway, because
+    /// *has ever joined* is not *is in*.
+    fn matches_of(&self, account: &str) -> Vec<MatchId> {
+        let began = Instant::now();
+        let mut found = std::collections::BTreeSet::new();
+        let mut pages = self
+            .client
+            .query()
+            .table_name(&self.table)
+            .index_name(BY_ACCOUNT)
+            .key_condition_expression("#account = :account")
+            .expression_attribute_names("#account", codec::ACCOUNT)
+            .expression_attribute_values(":account", AttributeValue::S(account.to_string()))
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
+            .into_paginator()
+            .send();
+        while let Some(page) = self.handle.block_on(pages.next()) {
+            let page = page.unwrap_or_else(|error| {
+                panic!(
+                    "finding the matches of an account: {}",
+                    DisplayErrorContext(&error)
+                )
+            });
+            if let Some(capacity) = page
+                .consumed_capacity()
+                .and_then(|used| used.capacity_units())
+            {
+                self.meter.capacity(capacity);
+            }
+            for item in page.items() {
+                if let Some(id) = item.get(MATCH).and_then(|value| value.as_s().ok()) {
+                    found.insert(MatchId(id.clone()));
+                }
+            }
+        }
+        // Timed as a scan, because it is the same question asked a cheaper way and the
+        // number is worth comparing against what the lobby pays.
+        self.meter.scan(began.elapsed());
+        found.into_iter().collect()
     }
 
     /// Every match the log holds, for the lobby list.

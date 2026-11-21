@@ -200,6 +200,9 @@ pub fn every_answer() -> Vec<Answer> {
         Answer::Refused(Refused::NotInThisMatch),
         Answer::Refused(Refused::MatchIsOver),
         Answer::Refused(Refused::BadTicket),
+        Answer::Refused(Refused::AlreadyInAMatch {
+            match_id: MatchId("match-8".to_string()),
+        }),
         // Zero and not zero. The relay never sends zero — a refusal means at least one
         // second remains — but zero is the number a rendering is most likely to omit or
         // read back as absent, so the format is held to it anyway.
@@ -216,6 +219,8 @@ pub fn every_answer() -> Vec<Answer> {
                 host: awkward_name(),
                 players: 1,
                 ranked: false,
+                joinable: true,
+                mine: false,
             },
             // Both values of the flag, because a rendering that dropped it would come
             // back as one of them and look right half the time.
@@ -224,6 +229,10 @@ pub fn every_answer() -> Vec<Answer> {
                 host: "Ada".to_string(),
                 players: 9,
                 ranked: true,
+                // Every flag both ways across the two rows, because a rendering that
+                // dropped one would come back as a default and look right half the time.
+                joinable: false,
+                mine: true,
             },
         ]),
     ];

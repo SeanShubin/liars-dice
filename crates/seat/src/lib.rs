@@ -92,8 +92,21 @@ impl Player {
 
 /// What this seat is here to do.
 enum Opening {
-    Host { nonce: String },
-    Join { match_id: MatchId },
+    Host {
+        nonce: String,
+    },
+    Join {
+        match_id: MatchId,
+    },
+    /// Coming back to a seat this account already holds.
+    ///
+    /// A third opening rather than a join with a colour nobody will use. `Message::Resume`
+    /// writes nothing and needs no colour, because everything it would carry is already in
+    /// the log — and until this existed it was a message the relay implemented and no
+    /// client ever sent, which is how closing a tab lost a seat.
+    Resume {
+        match_id: MatchId,
+    },
 }
 
 /// One player, waiting on frames.
@@ -196,6 +209,15 @@ impl Seated {
         Self::new(who, colour, Opening::Join { match_id }, driver)
     }
 
+    /// Return to a seat this account already holds.
+    ///
+    /// No colour, because a returning player is not choosing one: their seat already has
+    /// the colour the log recorded at the join. Everything this seat needs arrives in the
+    /// replay the relay answers with.
+    pub fn resuming(who: Who, match_id: MatchId, driver: Box<dyn Decides>) -> Option<Self> {
+        Self::new(who, String::new(), Opening::Resume { match_id }, driver)
+    }
+
     fn new(
         who: Who,
         colour: impl Into<String>,
@@ -204,7 +226,7 @@ impl Seated {
     ) -> Option<Self> {
         let match_id = match &opening {
             Opening::Host { .. } => None,
-            Opening::Join { match_id } => Some(match_id.clone()),
+            Opening::Join { match_id } | Opening::Resume { match_id } => Some(match_id.clone()),
         };
         let account = account_claimed(&who)?;
         Some(Self {
@@ -239,6 +261,10 @@ impl Seated {
                 who: self.who.clone(),
                 colour: self.colour.clone(),
                 version: PROTOCOL_VERSION,
+            },
+            Opening::Resume { match_id } => Message::Resume {
+                match_id: match_id.clone(),
+                who: self.who.clone(),
             },
         };
         json::write(&message::shape_of(&message))

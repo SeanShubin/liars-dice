@@ -199,6 +199,22 @@ pub trait Log {
 
     /// Every match the log holds, for the lobby list.
     fn matches(&self) -> Vec<MatchId>;
+
+    /// Every match this account has ever joined, for finding the one it is in.
+    ///
+    /// `account` is as `protocol::account_text` writes it. The default answers *all of
+    /// them*, which is correct and is what an in-memory log can afford; `DynamoLog`
+    /// overrides it with an index, because asking about every match on the path of every
+    /// host and every join would put the hot path on the lobby's cost.
+    ///
+    /// An override may only ever narrow this, and cannot change the answer: the index is
+    /// derived by the database from the log's own rows, so it holds exactly the matches an
+    /// account appears in. The caller folds each candidate anyway, because *has ever
+    /// joined* is not *is in*.
+    fn matches_of(&self, account: &str) -> Vec<MatchId> {
+        let _ = account;
+        self.matches()
+    }
 }
 
 /// Which socket is which seat. The one thing that is neither derived nor in the log.
@@ -250,6 +266,10 @@ impl<T: Log + ?Sized> Log for &mut T {
 
     fn matches(&self) -> Vec<MatchId> {
         (**self).matches()
+    }
+
+    fn matches_of(&self, account: &str) -> Vec<MatchId> {
+        (**self).matches_of(account)
     }
 }
 
@@ -415,6 +435,18 @@ pub enum Refused {
     /// that cannot begin is cancelling it, and two refusals for *this match is finished*
     /// was one too many. How it ended is in the log, for anybody the log is sent to.
     MatchIsOver,
+    /// This account already holds a seat in another match.
+    ///
+    /// `A player cannot join a match while holding a seat in another match`, and the id is
+    /// carried so a client can offer to take somebody there rather than leaving them to
+    /// find it.
+    ///
+    /// Refused rather than resolved by leaving the other match for them: leaving is an
+    /// elimination in the rules and goes in the log permanently, so a misclick must not
+    /// cause one.
+    AlreadyInAMatch {
+        match_id: MatchId,
+    },
     /// The ticket does not verify, has expired, or does not name a Discord account.
     ///
     /// One refusal for all of those, because `check_ticket` gives one answer for all of
@@ -469,6 +501,18 @@ pub struct Listed {
     pub match_id: MatchId,
     pub host: String,
     pub players: usize,
+    /// Whether the asking account could join it right now.
+    ///
+    /// The refusal `join` would give, inverted — not a second opinion about it. Two copies
+    /// of *can this be joined* would eventually disagree, and then the lobby offers a match
+    /// that refuses you with the bug in neither place. See `why_not_joinable`.
+    pub joinable: bool,
+    /// Whether the asking account already holds a seat in it.
+    ///
+    /// At most one listed match can say yes, because `A player cannot join a match while
+    /// holding a seat in another match`. It is how a client knows which match to return to
+    /// without being asked.
+    pub mine: bool,
     /// Whether every seat taken so far is held by an authenticated player.
     ///
     /// Derived in the same fold that produces the host and the player count, so the lobby
@@ -529,8 +573,11 @@ impl<L: Log, C: Connections> Relay<L, C> {
         &self.connections
     }
 
-    /// Every match a given account may join: hosted, not started, not over, not barring
-    /// them.
+    /// Every match worth showing, and what the asking account may do with each.
+    ///
+    /// `A started match is listed` and `A match that is over is not listed`, so this is
+    /// what is going on rather than only what is on offer. Each row carries whether the
+    /// asker can join it and whether they are already in it.
     ///
     /// Actorless in the specification, so `None` lists everything joinable. An account
     /// that has been barred is not shown the match at all.
@@ -567,27 +614,114 @@ impl<L: Log, C: Connections> Relay<L, C> {
                 let _ = self.log.append(&match_id, at, &[Event::Abandon], now);
                 continue;
             }
-            // A match with no host is one whose log is not a match at all.
-            if view.started || view.host().is_none() {
+            // A match with no host is one whose log is not a match at all. A started
+            // one is listed now — `A started match is listed` — because the lobby shows
+            // what is going on and not only what is on offer.
+            if view.host().is_none() {
                 continue;
             }
+            // `A match is not listed to a player barred from it`: not greyed out, not
+            // shown as full. Not shown.
             if let Some(account) = asking
                 && view.is_barred(account)
             {
                 continue;
             }
+            let mine = asking.is_some_and(|account| {
+                view.seat_of_account(account)
+                    .is_some_and(|seat| !view.has_left(seat))
+            });
             listed.push(Listed {
-                match_id,
                 host: view
                     .host()
                     .map(|seat| view.name_of(seat).to_string())
                     .unwrap_or_default(),
                 players: view.seats.len(),
                 ranked: view.ranked(),
+                joinable: self.why_not_joinable(&match_id, &view, asking).is_none(),
+                mine,
+                match_id,
             });
         }
         listed.sort_by(|left, right| left.match_id.cmp(&right.match_id));
         listed
+    }
+
+    /// The match this account holds a seat in, if any.
+    ///
+    /// *Holds* rather than *has ever joined*: a seat that left is not held, and a match
+    /// that is over holds nobody — otherwise finishing a game would lock somebody out of
+    /// the next one until they remembered to leave the old one, which is a worse trap than
+    /// the one this closes.
+    ///
+    /// The log is the only thing that can answer this. The connection table knows who is
+    /// connected, and a seat is held whether or not anybody is attached to it.
+    pub fn match_of(&self, account: &Account) -> Option<MatchId> {
+        let text = protocol::account_text(account);
+        for match_id in self.log.matches_of(&text) {
+            let view = MatchView::fold(&self.log.read(&match_id).events);
+            if view.over() {
+                continue;
+            }
+            if let Some(seat) = view.seat_of_account(account)
+                && !view.has_left(seat)
+            {
+                return Some(match_id);
+            }
+        }
+        None
+    }
+
+    /// Why this account cannot join this match, or `None` if it can.
+    ///
+    /// The one answer to that question. `join` returns what this returns and the listing
+    /// sets `joinable` from whether it returned anything, so the flag in the lobby *is*
+    /// the refusal rather than a second opinion about it — which is the only version of
+    /// this that cannot drift.
+    ///
+    /// The colour guard is deliberately not here. A colour is part of a request and not a
+    /// property of a match, so there is nothing for a listing to say about it: a listing
+    /// promises the match will take you, not that it will take you in green.
+    fn why_not_joinable(
+        &self,
+        match_id: &MatchId,
+        view: &MatchView,
+        asking: Option<&Account>,
+    ) -> Option<Refused> {
+        if view.over() {
+            return Some(Refused::MatchIsOver);
+        }
+        if view.host().is_none() {
+            return Some(Refused::NoSuchMatch);
+        }
+        if let Some(account) = asking {
+            // Already here, so this is a return rather than a join and none of the guards
+            // below apply: `A player holds one seat in a match`, and the one they hold is
+            // this one.
+            if view
+                .seat_of_account(account)
+                .is_some_and(|seat| !view.has_left(seat))
+            {
+                return None;
+            }
+            if view.is_barred(account) {
+                return Some(Refused::Barred);
+            }
+            if let Some(elsewhere) = self.match_of(account)
+                && &elsewhere != match_id
+            {
+                return Some(Refused::AlreadyInAMatch {
+                    match_id: elsewhere,
+                });
+            }
+        }
+        if view.started {
+            return Some(Refused::AlreadyStarted);
+        }
+        if view.seats.len() >= MAX_PLAYERS {
+            return Some(Refused::MatchIsFull);
+        }
+        None
     }
 
     pub fn view(&self, match_id: &MatchId) -> MatchView {
@@ -787,6 +921,17 @@ impl<L: Log, C: Connections> Relay<L, C> {
             &protocol::account_text(&account),
             &nonce,
         ));
+        // `A player cannot host a match while holding a seat in another match`. Checked
+        // after the id is derived rather than before, so that `A repeated request to host
+        // creates no second match` still holds: a host sending the same request twice is
+        // in a match, and the match they are in is the one they are asking for.
+        if let Some(elsewhere) = self.match_of(&account)
+            && elsewhere != match_id
+        {
+            return Ok(Outcome::refused(Refused::AlreadyInAMatch {
+                match_id: elsewhere,
+            }));
+        }
         let seat = Seat(0);
         // `fresh` rather than `open`: a new match is a claim on position zero, so a name
         // that is already taken refuses the whole message instead of appending these
@@ -866,6 +1011,12 @@ impl<L: Log, C: Connections> Relay<L, C> {
                 yours: version,
             }));
         }
+        // Every guard but the colour, from the same function the listing asks. The version
+        // is above because it is a property of the client rather than of the match, and a
+        // listing produced by this relay always matches it.
+        if let Some(why) = self.why_not_joinable(&match_id, &view, Some(&account)) {
+            return Ok(Outcome::refused(why));
+        }
         // Already here, so this is a return and not a join. `A player holds one seat in
         // a match`: answering with the seat they have is the same answer `host` gives to a
         // repeated host, and it is what `Resume` does, so a client that reloaded is caught
@@ -876,15 +1027,6 @@ impl<L: Log, C: Connections> Relay<L, C> {
         // them, and the colour that is taken is their own.
         if view.seat_of_account(&account).is_some() {
             return self.resume(from, match_id, account, now);
-        }
-        if view.started {
-            return Ok(Outcome::refused(Refused::AlreadyStarted));
-        }
-        if view.is_barred(&account) {
-            return Ok(Outcome::refused(Refused::Barred));
-        }
-        if view.seats.len() >= MAX_PLAYERS {
-            return Ok(Outcome::refused(Refused::MatchIsFull));
         }
         if view.seats.iter().any(|seat| seat.colour == colour) {
             return Ok(Outcome::refused(Refused::ColourTaken));
