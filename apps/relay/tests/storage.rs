@@ -26,7 +26,9 @@ use aws_sdk_dynamodb::types::{
 };
 use integrity::Secret;
 use protocol::{Account, Event, Moment, Seat, Who};
-use relay::{ConnectionId, Connections, Log, MatchId, Message, Outcome, Relay, Role, Taken};
+use relay::{
+    ConnectionId, Connections, Log, MatchId, Message, Outcome, Relay, Role, Secrets, Taken,
+};
 use relay_service::connections::{BY_CONNECTION, CONNECTION, PLACE, place_of};
 use relay_service::{DynamoLog, GatewayConnections, Meter, codec};
 use tokio::runtime::Runtime;
@@ -412,7 +414,14 @@ fn relay_over(
 ) -> Relay<DynamoLog, GatewayConnections> {
     let log = DynamoLog::new(client.clone(), log_table, handle.clone(), Meter::new());
     let connections = GatewayConnections::new(client.clone(), place_table, handle);
-    Relay::new(log, connections, Secret::from_bytes([5; 32]))
+    Relay::new(
+        log,
+        connections,
+        Secrets {
+            dice: Secret::from_bytes([5; 32]),
+            ticket: Some(Secret::from_bytes([5; 32])),
+        },
+    )
 }
 
 fn host_message(at: usize) -> Message {

@@ -20,7 +20,7 @@
 use integrity::Secret;
 use protocol::{Moment, Who};
 use relay::memory::{MemoryConnections, MemoryLog};
-use relay::{ConnectionId, Relay};
+use relay::{ConnectionId, Relay, Secrets};
 use seat::{Ai, Seated};
 use wire::answer::Answer;
 use wire::{answer, json, message};
@@ -41,7 +41,10 @@ impl Wire {
             relay: Relay::new(
                 MemoryLog::new(),
                 MemoryConnections::new(),
-                Secret::from_bytes([23; 32]),
+                Secrets {
+                    dice: Secret::from_bytes([23; 32]),
+                    ticket: Some(Secret::from_bytes([23; 32])),
+                },
             ),
         }
     }

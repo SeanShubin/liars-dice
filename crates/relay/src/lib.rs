@@ -482,18 +482,42 @@ pub struct Listed {
 /// A match has at most ten players.
 pub const MAX_PLAYERS: usize = 10;
 
+/// The secrets a relay holds. Two, and kept apart on purpose.
+///
+/// The exchange that mints tickets has to hold the key they are verified with, and it is
+/// the one piece of this system that talks to the public internet. Sharing the dice secret
+/// with it would mean that compromising the exchange let somebody predict every roll, and
+/// `Clients must not be able to choose their roll beforehand or alter it after the fact` is
+/// the property this whole repository is arranged around. So they are two keys, and only
+/// the relay ever holds the one that matters most.
+///
+/// The alternative was one secret with the ticket tagged apart from the seeds, which
+/// `integrity` already does and which this still relies on. That stops one message space
+/// being mistaken for another; it does not stop a second service from deriving seeds. The
+/// tag is about confusion and this is about reach.
+pub struct Secrets {
+    /// Round seeds and match names derive from this. Nothing else ever holds it.
+    pub dice: Secret,
+    /// Tickets are verified with this. The exchange holds it too, because it mints them.
+    ///
+    /// `None` means nobody can authenticate — which is what a deployment looks like before
+    /// the parameter is set, and `deployment.md` requires that the stack deploy before the
+    /// secrets are. Guests are unaffected, so every unranked thing still works.
+    pub ticket: Option<Secret>,
+}
+
 pub struct Relay<L: Log, C: Connections> {
     log: L,
     connections: C,
-    secret: Secret,
+    secrets: Secrets,
 }
 
 impl<L: Log, C: Connections> Relay<L, C> {
-    pub fn new(log: L, connections: C, secret: Secret) -> Self {
+    pub fn new(log: L, connections: C, secrets: Secrets) -> Self {
         Self {
             log,
             connections,
-            secret,
+            secrets,
         }
     }
 
@@ -683,13 +707,17 @@ impl<L: Log, C: Connections> Relay<L, C> {
         match who {
             Who::Guest { id, name } => Ok((Account::Guest(id), name)),
             Who::Authenticated { ticket } => {
+                // No ticket secret, so nothing can be proved and nothing is guessed at.
+                // A deployment in this state serves guests and refuses sign-ins, which is
+                // the same answer the exchange gives when it cannot mint.
+                let secret = self.secrets.ticket.as_ref().ok_or(Refused::BadTicket)?;
                 // Seconds, from the one reading this message was given. The relay never
                 // calls Discord: an outbound call on the hot path would turn a Discord
                 // outage into a relay outage, and there is nothing it could learn that
                 // the ticket does not already carry.
                 let seconds = now.to_unix_nanos() / 1_000_000_000;
-                let proved = integrity::check_ticket(&self.secret, &ticket, seconds)
-                    .ok_or(Refused::BadTicket)?;
+                let proved =
+                    integrity::check_ticket(secret, &ticket, seconds).ok_or(Refused::BadTicket)?;
                 let account =
                     protocol::account_from_text(&proved.account).ok_or(Refused::BadTicket)?;
                 // A ticket may only ever prove an account that counts as proven. Nothing
@@ -755,7 +783,7 @@ impl<L: Log, C: Connections> Relay<L, C> {
         // Derived, not counted. Nothing is read to name a match, so hosting scans no
         // table and has no window between choosing a name and claiming it.
         let match_id = MatchId(integrity::name_for(
-            &self.secret,
+            &self.secrets.dice,
             &protocol::account_text(&account),
             &nonce,
         ));
@@ -935,7 +963,7 @@ impl<L: Log, C: Connections> Relay<L, C> {
         // own secret rather than stored, so anyone holding the log can recompute it, and
         // keyed apart from any round so it says nothing about anyone's dice.
         let ordering = integrity::shuffle(
-            &integrity::seed_for(&self.secret, &match_id.0, ORDER_ROUND),
+            &integrity::seed_for(&self.secrets.dice, &match_id.0, ORDER_ROUND),
             view.seats.len(),
         );
         let order = Event::PlayerOrder(ordering.iter().map(|seat| Seat(*seat as u8)).collect());
@@ -1286,7 +1314,7 @@ impl<L: Log, C: Connections> Relay<L, C> {
     /// Commit to the round, deal every seat, and send each seat only its own dice.
     fn open_round(&mut self, work: &mut Working, round: u32) -> Vec<(ConnectionId, Event)> {
         let match_id = work.match_id.clone();
-        let seed = integrity::seed_for(&self.secret, &match_id.0, round);
+        let seed = integrity::seed_for(&self.secrets.dice, &match_id.0, round);
         let commit = Event::Commit {
             digest: integrity::commit(&seed).to_hex(),
         };
@@ -1313,7 +1341,7 @@ impl<L: Log, C: Connections> Relay<L, C> {
     /// The round is over: every seat's dice, then the seed they came from.
     fn reveal(&mut self, work: &mut Working, round: u32) -> Vec<(ConnectionId, Event)> {
         let match_id = work.match_id.clone();
-        let seed = integrity::seed_for(&self.secret, &match_id.0, round);
+        let seed = integrity::seed_for(&self.secrets.dice, &match_id.0, round);
         let mut sends = Vec::new();
         let seats = work.view().seats.len();
         for index in 0..seats {

@@ -10,7 +10,7 @@ use std::time::Instant;
 use aws_sdk_apigatewaymanagement::primitives::Blob;
 use integrity::Secret;
 use protocol::Moment;
-use relay::{ConnectionId, Connections, MatchId, Outcome, Relay};
+use relay::{ConnectionId, Connections, MatchId, Outcome, Relay, Secrets};
 use wire::answer::Answer;
 use wire::{json, message};
 
@@ -28,6 +28,14 @@ pub struct Service {
     pub log_table: String,
     pub place_table: String,
     secret: Secret,
+    /// The key tickets are verified with, if there is one.
+    ///
+    /// Optional where the dice secret is mandatory, and the difference is the point. An
+    /// invented dice secret would make every commitment in every match unverifiable with
+    /// nothing saying so; a missing ticket secret means nobody can sign in, which is a
+    /// state a deployment is allowed to be in — `deployment.md` requires that the stack
+    /// deploy before the secrets are set, and guests are unaffected.
+    ticket_secret: Option<Secret>,
 }
 
 /// The service could not be built, so no invocation can be served.
@@ -88,6 +96,7 @@ fn now() -> Moment {
 pub const LOG_TABLE: &str = "LOG_TABLE";
 pub const PLACE_TABLE: &str = "PLACE_TABLE";
 pub const SECRET_PARAMETER: &str = "SECRET_PARAMETER";
+pub const TICKET_SECRET_PARAMETER: &str = "TICKET_SECRET_PARAMETER";
 
 impl Service {
     pub async fn new(config: aws_config::SdkConfig) -> Result<Self, NotConfigured> {
@@ -96,12 +105,29 @@ impl Service {
         };
         let parameter = variable(SECRET_PARAMETER)?;
         let secret = read_secret(&config, &parameter).await?;
+        // Read if it is there and not missed if it is not, which is why this is not
+        // `read_secret` with a `?`. A failure here disables signing in; it must not take
+        // the service down with it.
+        let ticket_secret = match variable(TICKET_SECRET_PARAMETER) {
+            Ok(name) => match read_secret(&config, &name).await {
+                Ok(secret) => Some(secret),
+                Err(why) => {
+                    eprintln!("signing in is off: {why}");
+                    None
+                }
+            },
+            Err(why) => {
+                eprintln!("signing in is off: {why}");
+                None
+            }
+        };
         Ok(Self {
             dynamodb: aws_sdk_dynamodb::Client::new(&config),
             log_table: variable(LOG_TABLE)?,
             place_table: variable(PLACE_TABLE)?,
             config,
             secret,
+            ticket_secret,
         })
     }
 
@@ -177,13 +203,16 @@ impl Service {
 
         let log = self.log(meter);
         let connections = self.connections();
-        let secret = self.secret;
+        let secrets = Secrets {
+            dice: self.secret,
+            ticket: self.ticket_secret,
+        };
         let from = incoming.connection.clone();
         // `receive` is synchronous and the storage blocks on the SDK from inside it, which
         // is legal here and nowhere else: `spawn_blocking` hands the closure to a thread
         // that is not a runtime worker. See the async seam in the document.
         let outcome = tokio::task::spawn_blocking(move || {
-            let mut relay = Relay::new(log, connections, secret);
+            let mut relay = Relay::new(log, connections, secrets);
             relay.receive(&from, message, now)
         })
         .await?;

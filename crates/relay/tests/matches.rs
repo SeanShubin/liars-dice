@@ -9,11 +9,23 @@ use protocol::{Account, Event, Moment, PROTOCOL_VERSION, Seat, Who};
 use relay::memory::{MemoryConnections, MemoryLog};
 use relay::{
     ABANDON_AFTER_SECONDS, CANCEL_AFTER_SECONDS, Connected, ConnectionId, Connections, Ending, Log,
-    MatchId, Message, Recording, Refused, Relay, Role, Taken,
+    MatchId, Message, Recording, Refused, Relay, Role, Secrets, Taken,
 };
 
 fn secret() -> Secret {
     Secret::from_bytes([3u8; 32])
+}
+
+/// Both secrets, the same value. A test that cares about them differing says so.
+fn secrets() -> Secrets {
+    both(secret())
+}
+
+fn both(secret: Secret) -> Secrets {
+    Secrets {
+        dice: secret,
+        ticket: Some(secret),
+    }
 }
 
 /// The moment every message in these tests arrives at, unless a test says otherwise.
@@ -32,7 +44,7 @@ fn later(seconds: u64) -> Moment {
 }
 
 fn relay() -> Relay<MemoryLog, MemoryConnections> {
-    Relay::new(MemoryLog::new(), MemoryConnections::new(), secret())
+    Relay::new(MemoryLog::new(), MemoryConnections::new(), secrets())
 }
 
 /// An unauthenticated account, which is what a client can actually produce.
@@ -517,7 +529,7 @@ fn a_seat_holding_two_sockets_does_not_hold_the_round_still() {
     let mut relay = Relay::new(
         MemoryLog::new(),
         SeatHeldTwice(MemoryConnections::new()),
-        secret(),
+        secrets(),
     );
     let alice = connection("alice");
     let bob = connection("bob");
@@ -933,7 +945,7 @@ fn hosting_the_same_request_twice_creates_one_match() {
     let mut relay = Relay::new(
         MemoryLog::new(),
         MemoryConnections::new(),
-        Secret::from_bytes(MEDDLED_SECRET),
+        both(Secret::from_bytes(MEDDLED_SECRET)),
     );
     let request = Message::Host {
         who: meddled_host_who(),
@@ -978,7 +990,7 @@ fn hosting_twice_on_purpose_creates_two_matches() {
     let mut relay = Relay::new(
         MemoryLog::new(),
         MemoryConnections::new(),
-        Secret::from_bytes(MEDDLED_SECRET),
+        both(Secret::from_bytes(MEDDLED_SECRET)),
     );
     let request = |nonce: &str| Message::Host {
         who: meddled_host_who(),
@@ -1112,7 +1124,7 @@ fn a_join_survives_interference_at_every_append() {
         let mut relay = Relay::new(
             Meddling::interfering_after(after, &match_id, vec![interloper]),
             MemoryConnections::new(),
-            Secret::from_bytes(MEDDLED_SECRET),
+            both(Secret::from_bytes(MEDDLED_SECRET)),
         );
 
         // The host's message is itself subject to the interference. At `after == 0` the
@@ -1202,7 +1214,7 @@ fn a_join_decided_against_a_stale_log_is_decided_again() {
     let mut relay = Relay::new(
         Meddling::interfering_after(1, &match_id, vec![interloper]),
         MemoryConnections::new(),
-        Secret::from_bytes(MEDDLED_SECRET),
+        both(Secret::from_bytes(MEDDLED_SECRET)),
     );
     seat_a_host(&mut relay, &match_id);
 
@@ -1256,7 +1268,7 @@ fn a_colour_taken_while_a_join_was_decided_is_refused_on_the_retry() {
     let mut relay = Relay::new(
         Meddling::interfering_after(1, &match_id, vec![interloper]),
         MemoryConnections::new(),
-        Secret::from_bytes(MEDDLED_SECRET),
+        both(Secret::from_bytes(MEDDLED_SECRET)),
     );
     seat_a_host(&mut relay, &match_id);
 
@@ -1378,7 +1390,7 @@ fn a_replacement_relay_continues_a_round_in_progress() {
     let bob = connection("bob");
 
     let match_id = {
-        let mut first = Relay::new(&mut log, &mut connections, secret());
+        let mut first = Relay::new(&mut log, &mut connections, secrets());
         let match_id = host(&mut first, &alice);
         join(&mut first, &bob, &match_id, "2", "Bob", "blue");
         first.receive(
@@ -1399,7 +1411,7 @@ fn a_replacement_relay_continues_a_round_in_progress() {
     };
 
     // The first relay is gone. Nothing of it survives but the log and the connections.
-    let mut second = Relay::new(&mut log, &mut connections, secret());
+    let mut second = Relay::new(&mut log, &mut connections, secrets());
     let finished = second.receive(
         &bob,
         Message::RoundOver {
@@ -1625,7 +1637,7 @@ fn a_match_with_no_recorded_time_is_abandoned_at_once() {
     )
     .expect("an empty log");
     // And then its recorded time is taken away, which is what an old row looks like.
-    let mut relay = Relay::new(Untimed { inner: log }, MemoryConnections::new(), secret());
+    let mut relay = Relay::new(Untimed { inner: log }, MemoryConnections::new(), secrets());
 
     assert!(relay.open_matches(None, moment()).is_empty());
     assert_eq!(relay.view(&match_id).ending, Some(Ending::Abandoned));
@@ -2266,4 +2278,99 @@ fn a_listing_says_which_matches_are_ranked() {
     };
     assert_eq!(ranked_of(&proven), Some(true));
     assert_eq!(ranked_of(&unproven), Some(false));
+}
+
+/// The dice secret cannot verify a ticket, which is the whole point of there being two.
+///
+/// The exchange that mints tickets holds the ticket secret and talks to the public
+/// internet. If that were the dice secret, compromising the exchange would let somebody
+/// predict every roll — and `Clients must not be able to choose their roll beforehand or
+/// alter it after the fact` is what this repository is arranged around. The tag in
+/// `integrity` stops one message space being mistaken for another; it does not stop a
+/// second service from deriving seeds. This is the test for the second thing.
+#[test]
+fn a_ticket_minted_with_the_dice_secret_proves_nothing() {
+    let dice = Secret::from_bytes([3; 32]);
+    let ticket = Secret::from_bytes([77; 32]);
+    let mut relay = Relay::new(
+        MemoryLog::new(),
+        MemoryConnections::new(),
+        Secrets {
+            dice,
+            ticket: Some(ticket),
+        },
+    );
+    let minted_with_the_wrong_one = Who::Authenticated {
+        ticket: integrity::ticket(&dice, "discord:1", "Ada", u64::MAX),
+    };
+    let outcome = relay.receive(
+        &connection("ada"),
+        Message::Host {
+            who: minted_with_the_wrong_one,
+            colour: "red".to_string(),
+            version: PROTOCOL_VERSION,
+            nonce: "once".to_string(),
+        },
+        moment(),
+    );
+    assert_eq!(outcome.refused, Some(Refused::BadTicket));
+
+    // And the right one works, so this is about which key it was and not about the ticket.
+    let outcome = relay.receive(
+        &connection("ada"),
+        Message::Host {
+            who: Who::Authenticated {
+                ticket: integrity::ticket(&ticket, "discord:1", "Ada", u64::MAX),
+            },
+            colour: "red".to_string(),
+            version: PROTOCOL_VERSION,
+            nonce: "once".to_string(),
+        },
+        moment(),
+    );
+    assert_eq!(outcome.refused, None);
+}
+
+/// With no ticket secret, signing in is off and guests are unaffected.
+///
+/// The state a deployment is in before the parameter is set, which `deployment.md`
+/// requires be possible. Refusing every ticket is right; refusing to serve is not.
+#[test]
+fn without_a_ticket_secret_guests_still_play() {
+    let mut relay = Relay::new(
+        MemoryLog::new(),
+        MemoryConnections::new(),
+        Secrets {
+            dice: secret(),
+            ticket: None,
+        },
+    );
+    let refused = relay.receive(
+        &connection("ada"),
+        Message::Host {
+            who: Who::Authenticated {
+                // Minted under the dice secret, which is the only one this relay has —
+                // and still refused, because it has no ticket secret to check against.
+                ticket: integrity::ticket(&secret(), "discord:1", "Ada", u64::MAX),
+            },
+            colour: "red".to_string(),
+            version: PROTOCOL_VERSION,
+            nonce: "once".to_string(),
+        },
+        moment(),
+    );
+    assert_eq!(refused.refused, Some(Refused::BadTicket));
+
+    let guest = relay.receive(
+        &connection("sean"),
+        Message::Host {
+            who: guest_who("sean", "Sean"),
+            colour: "red".to_string(),
+            version: PROTOCOL_VERSION,
+            nonce: "guest".to_string(),
+        },
+        moment(),
+    );
+    assert_eq!(guest.refused, None, "a guest does not need a ticket secret");
+    assert!(guest.created.is_some());
 }

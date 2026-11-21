@@ -13,7 +13,7 @@ pub use coordinator::{Client, Decides, Intent, Wrong};
 use integrity::Secret;
 use protocol::{Event, Moment, PROTOCOL_VERSION, Seat, Who};
 use relay::memory::{MemoryConnections, MemoryLog};
-use relay::{ConnectionId, Log, MatchId, Message, Relay};
+use relay::{ConnectionId, Log, MatchId, Message, Relay, Secrets};
 pub use rules::Resolution;
 use rules::{Call, View};
 
@@ -119,7 +119,14 @@ pub const TABLE_EPOCH_NANOS: u64 = 1_700_000_000_000_000_000;
 impl Table {
     /// Host a match, seat everyone, and start it.
     pub fn seat(secret: Secret, drivers: Vec<(String, Box<dyn Decides>)>) -> Self {
-        let mut relay = Relay::new(MemoryLog::new(), MemoryConnections::new(), secret);
+        // The same value for both, because nothing at this table authenticates and a
+        // second fixture would say nothing. See `relay::Secrets` for why a deployment
+        // keeps them apart.
+        let secrets = Secrets {
+            dice: secret,
+            ticket: Some(secret),
+        };
+        let mut relay = Relay::new(MemoryLog::new(), MemoryConnections::new(), secrets);
         let now = Moment::from_unix_nanos(TABLE_EPOCH_NANOS);
         let colours = ["red", "blue", "green", "white", "black"];
         let mut players = Vec::new();
