@@ -93,7 +93,7 @@ impl Wire {
 /// Deliver everything, letting each seat answer, until nothing is left to deliver.
 fn settle(
     wire: &mut Wire,
-    seats: &mut Vec<(ConnectionId, Seated)>,
+    seats: &mut [(ConnectionId, Seated)],
     mut pending: Vec<(ConnectionId, String)>,
 ) {
     let mut guard = 0;
@@ -161,7 +161,6 @@ fn a_player_whose_socket_died_is_returned_to_their_own_match() {
     assert_eq!(listing.len(), 1, "one answer, the listing");
     let listed = lobby::listing(&listing[0].1).expect("a listing");
 
-    let view = wire.relay.view(&match_id);
     assert_eq!(
         listed.len(),
         1,
