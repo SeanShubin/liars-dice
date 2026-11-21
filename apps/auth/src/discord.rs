@@ -141,6 +141,41 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// The TLS stack works, which no other test here can tell us.
+    ///
+    /// Both `ring` and `aws-lc-rs` reach this binary — the AWS SDK brings one and reqwest
+    /// brings the other — and when two providers are enabled rustls can refuse to pick a
+    /// default and panic at the first handshake. `apps/probe` installs one explicitly for
+    /// exactly that reason.
+    ///
+    /// That would be a runtime failure in the one code path nothing else exercises. The
+    /// `GET` the page makes at startup needs no TLS, so a deployment could answer
+    /// `configured: true` and still be unable to reach Discord at all — green gate, green
+    /// deploy, broken on the one action only a person performs.
+    ///
+    /// So this makes a real request, with credentials that are obviously not credentials.
+    /// Being *refused* is the answer we want: a refusal means the handshake happened.
+    #[test]
+    #[ignore = "reaches discord.com; the gate runs it with --include-ignored"]
+    fn a_handshake_with_discord_succeeds_even_though_the_code_does_not() {
+        let live = Live::new().expect("a client");
+        let nobody = Login {
+            client_id: "0".to_string(),
+            client_secret: "not a secret".to_string(),
+            redirect_uri: "https://example.invalid/".to_string(),
+        };
+        match live.identify(&nobody, "not a code") {
+            Err(Trouble::Refused(_)) => {}
+            // Two causes, and this cannot tell them apart, so it names both rather than
+            // asserting the one it was written for. A red gate during a Discord outage
+            // should not read as a claim about this build.
+            Err(Trouble::Unreachable(why)) => panic!(
+                "Discord was not reached, so the code was never refused. Either this                  build cannot do TLS — two rustls providers and no default chosen, which                  is what this test exists for — or Discord is unreachable right now: {why}"
+            ),
+            Ok(identified) => panic!("discord identified nobody as {identified:?}"),
+        }
+    }
+
     /// The display name is the global one where there is one, and the handle where there
     /// is not.
     #[test]

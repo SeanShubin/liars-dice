@@ -425,12 +425,32 @@ Resources:
           - content-type
         MaxAge: 3600
 
+  # Two grants, not one, and this is not redundancy. Since October 2025 a new
+  # function URL requires both `lambda:InvokeFunctionUrl` and
+  # `lambda:InvokeFunction`, and the console and SAM add both for you while
+  # CloudFormation and the CLI add exactly what you ask for. Granting only the
+  # first produced a 403 on every request with an `AuthType: NONE` URL, a
+  # correct-looking resource policy, and nothing anywhere saying what was wrong.
+  #
+  # `FunctionUrlAuthType: NONE` on each is what keeps the pair narrow: it adds a
+  # condition on `lambda:FunctionUrlAuthType`, which a direct `InvokeFunction`
+  # API call does not carry — so neither grant lets anybody invoke this function
+  # by any route other than its URL.
   AuthUrlPermission:
     Type: AWS::Lambda::Permission
     Condition: HasExchange
     Properties:
       FunctionName: !Ref AuthFunction
       Action: lambda:InvokeFunctionUrl
+      Principal: '*'
+      FunctionUrlAuthType: NONE
+
+  AuthInvokePermission:
+    Type: AWS::Lambda::Permission
+    Condition: HasExchange
+    Properties:
+      FunctionName: !Ref AuthFunction
+      Action: lambda:InvokeFunction
       Principal: '*'
       FunctionUrlAuthType: NONE
 

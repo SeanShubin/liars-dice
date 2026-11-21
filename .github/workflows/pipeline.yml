@@ -112,8 +112,6 @@ jobs:
       # `--target-dir` is inside the container on purpose — a root-owned target/ in
       # the workspace is something the cargo cache would later trip over.
       #
-      # `bootstrap` is the name the provided runtime execs, which is why the zip
-      # holds one file by that name.
       # Two functions, one container. Installing the toolchain is the expensive
       # part, so the second binary costs almost nothing over the first. Each zip
       # holds one file called `bootstrap`, which is the name the provided runtime
