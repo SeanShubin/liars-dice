@@ -49,6 +49,10 @@ pub fn shape_of(event: &Event) -> Shape {
                 ("account", text(&account_text(account))),
             ],
         ),
+        Event::Colour { seat: at, colour } => Shape::of(
+            "colour",
+            vec![("seat", seat(*at)), ("colour", text(colour))],
+        ),
         Event::PlayerOrder(order) => Shape::of(
             "player-order",
             vec![(
@@ -136,6 +140,10 @@ pub fn from_shape(shape: &Shape) -> Result<Event, Malformed> {
             name: shape.text("name")?.to_string(),
             colour: shape.text("colour")?.to_string(),
             account: account_of(shape.text("account")?)?,
+        }),
+        "colour" => Ok(Event::Colour {
+            seat: at()?,
+            colour: shape.text("colour")?.to_string(),
         }),
         "player-order" => Ok(Event::PlayerOrder(
             shape.counts("order")?.into_iter().map(Seat).collect(),

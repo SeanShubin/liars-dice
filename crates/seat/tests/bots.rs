@@ -90,7 +90,7 @@ fn a_host_plays_a_whole_match_against_two_bots_it_added() {
     // The person, and two bots the host added. Each gets its own connection, which is the
     // correction this test exists for: a socket holds one seat.
     let host_socket = ConnectionId("page-host".to_string());
-    let host = Seated::hosting(guest("host-id", "Sean"), "red", "bots", Box::new(Ai))
+    let host = Seated::hosting(guest("host-id", "Sean"), "bots", Box::new(Ai))
         .expect("a guest is always a seat");
 
     let mut page = Page {
@@ -115,13 +115,12 @@ fn a_host_plays_a_whole_match_against_two_bots_it_added() {
         // added by the host's client, so this is the only moment anything about it is
         // special — and what it does is build an ordinary joiner.
         if !added && let Some(match_id) = page.seats[0].1.match_id().cloned() {
-            for (at, colour) in ["blue", "green"].iter().enumerate() {
+            for at in 1..=2 {
                 let socket = ConnectionId(format!("page-bot-{at}"));
                 let bot = Seated::joining(
                     // A guest id the host's client generated, and a name it chose. The
                     // relay cannot tell this from a person, which is the point.
                     guest(&format!("bot-{at}"), &format!("Ada {at}")),
-                    *colour,
                     match_id.clone(),
                     Box::new(Ai),
                 )

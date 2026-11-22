@@ -59,7 +59,6 @@ fn main() {
                 id: "probe-host".to_string(),
                 name: "Host".to_string(),
             },
-            "red",
             host_nonce,
             Box::new(Ai),
         )
@@ -88,7 +87,6 @@ fn main() {
                 id: "probe-guest".to_string(),
                 name: "Guest".to_string(),
             },
-            "blue",
             match_id,
             Box::new(Ai),
         )
@@ -117,7 +115,7 @@ struct Played {
     /// How the relay said the match ended, which is not the same as this seat working it
     /// out. The relay writes no resolution event and may not derive one, so this frame
     /// coming back is the proof that it learned the match was finished — and so that it
-    /// will stop offering the match in the lobby.
+    /// will stop offering the match on the dashboard.
     ending: Option<seat::Ending>,
 }
 

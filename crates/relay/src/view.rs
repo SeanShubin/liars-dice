@@ -92,6 +92,13 @@ impl MatchView {
                     }
                 }
                 Event::Lift { seat } => view.barred.retain(|barred| barred != seat),
+                // Last one wins, which is what `A player can change their seat's colour
+                // until the match starts` amounts to in a log that only appends.
+                Event::Colour { seat, colour } => {
+                    if let Some(info) = view.seats.iter_mut().find(|info| &info.seat == seat) {
+                        info.colour = colour.clone();
+                    }
+                }
                 Event::Left { seat } => {
                     if !view.left.contains(seat) {
                         view.left.push(*seat);

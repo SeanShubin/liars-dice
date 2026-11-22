@@ -32,6 +32,10 @@ pub fn every_event() -> Vec<Event> {
         Event::Lift { seat },
         Event::Left { seat },
         Event::Start,
+        Event::Colour {
+            seat,
+            colour: "light blue".to_string(),
+        },
         Event::RoundOver { seat },
         Event::MatchOver { seat },
         Event::Join {
@@ -104,7 +108,6 @@ pub fn every_message() -> Vec<Message> {
             who: Who::Authenticated {
                 ticket: "0011aabb.ffee0000".to_string(),
             },
-            colour: "dark red".to_string(),
             version: protocol::PROTOCOL_VERSION,
             nonce: "a nonce with a space".to_string(),
         },
@@ -114,7 +117,6 @@ pub fn every_message() -> Vec<Message> {
                 id: "0123456789abcdef0123456789abcdef".to_string(),
                 name: awkward_name(),
             },
-            colour: "dark red".to_string(),
             version: protocol::PROTOCOL_VERSION,
             nonce: "a nonce with a space".to_string(),
         },
@@ -124,7 +126,6 @@ pub fn every_message() -> Vec<Message> {
                 id: "fedcba9876543210fedcba9876543210".to_string(),
                 name: "Ada".to_string(),
             },
-            colour: "blue".to_string(),
             version: protocol::PROTOCOL_VERSION,
         },
         Message::List {

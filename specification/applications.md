@@ -15,6 +15,21 @@
 - A web game is multiplayer
 - A player using one presentation and a player using the other can be in the same match
 
+## Web
+- A web game is reached through a sign in
+- A person can sign in without an account
+- A person who signs in without an account chooses a display name
+- A signed in player holding no seat sees the dashboard
+- The dashboard is the only screen that offers to host a match
+- The dashboard is the only screen that offers to join a match
+- A seat in a match that has not started sees a lobby
+- A lobby shows every seat in the match
+- A lobby shows each seat's colour
+- A lobby is the only screen that offers to change a colour
+- Only the host's lobby offers to start the match
+- Only the host's lobby offers to add an AI player
+- Only the host's lobby offers to bar a player
+
 ## Hotseat
 - Hotseat is a seating arrangement, not a game
 - In a hotseat match every seat is in one browser

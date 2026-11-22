@@ -377,10 +377,10 @@ fn matches_lists_every_match_once_however_many_events_it_holds() {
 
 /// The counters count. The timings cannot be asserted on, which is why the counts are:
 /// a measurement nobody checked is a decoration, and these two are the numbers that
-/// trigger the lobby projection.
+/// trigger the dashboard projection.
 #[test]
 #[ignore = "needs DynamoDB Local; the gate runs it with --include-ignored"]
-fn the_meter_counts_what_a_lobby_view_cost() {
+fn the_meter_counts_what_a_dashboard_view_cost() {
     let (runtime, client) = arrange();
     let table = log_table(&runtime, &client);
     let meter = Meter::new();
@@ -400,13 +400,13 @@ fn the_meter_counts_what_a_lobby_view_cost() {
         }
     }
 
-    // What a lobby view does: find the matches, then fold each one.
+    // What a dashboard view does: find the matches, then fold each one.
     let found = log.matches();
     for match_id in &found {
         log.read(match_id);
     }
 
-    assert_eq!(meter.scans(), 1, "one scan per lobby view");
+    assert_eq!(meter.scans(), 1, "one scan per dashboard view");
     assert_eq!(meter.reads(), 3, "one read per match folded");
     assert_eq!(meter.events(), 6, "every event of every match");
 
@@ -446,7 +446,6 @@ fn host_message(at: usize) -> Message {
             id: format!("account-{at}"),
             name: format!("Player {at}"),
         },
-        colour: ["red", "blue", "green", "white"][at].to_string(),
         version: protocol::PROTOCOL_VERSION,
         nonce: format!("nonce-{at}"),
     }
@@ -747,13 +746,7 @@ fn two_joins_at_once_take_two_seats() {
             let match_id = match_id.clone();
             scope.spawn(move || {
                 let mut relay = relay_over(&client, &log_table, &place_table, handle);
-                let Message::Host {
-                    who,
-                    colour,
-                    version,
-                    ..
-                } = host_message(at)
-                else {
+                let Message::Host { who, version, .. } = host_message(at) else {
                     unreachable!("host_message makes a host message")
                 };
                 let outcome = relay.receive(
@@ -761,7 +754,6 @@ fn two_joins_at_once_take_two_seats() {
                     Message::Join {
                         match_id,
                         who,
-                        colour,
                         version,
                     },
                     recorded(),
@@ -864,7 +856,7 @@ fn attaching_a_connection_twice_leaves_it_in_one_match() {
 /// Two listings at the same instant abandon an expired match exactly once.
 ///
 /// The sweep is the one write that is not a message: nobody sent it, and two invocations
-/// reading the lobby at the same moment both decide to abandon the same match. The
+/// reading the dashboard at the same moment both decide to abandon the same match. The
 /// conditional write on the position is what makes that safe, and this is the test that
 /// says so — in one process the window is zero wide, because `open_matches` reads and
 /// appends inside one uninterrupted call. Two Lambdas have a real one.
@@ -959,7 +951,6 @@ fn the_account_index_answers_what_a_full_scan_would() {
                         id: "account-1".to_string(),
                         name: "Player 1".to_string(),
                     },
-                    colour: "blue".to_string(),
                     version: protocol::PROTOCOL_VERSION,
                 },
                 recorded(),

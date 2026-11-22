@@ -56,9 +56,9 @@ the alternative is a client that is wrong whenever somebody else is quick.
 
 | Screen | What it is for |
 |--------|----------------|
-| Entry | A name, a colour, and a relay. Ends at *Look for matches*, which is what opens the socket. |
-| Lobby | Connected and not at a match: what is open with a Join each, a field to host by name, a field to join by id, and the way out. |
-| Waiting | Hosted and not started: shows the match id to pass to somebody, who has joined, and the start button. The host's screen only. |
+| Sign in | A name and a relay. Ends at *Look for matches*, which is what opens the socket. |
+| Dashboard | Connected and not at a match: what is open with a Join each, a field to host by name, a field to join by id, and the way out. |
+| Lobby | In a match that has not started: the match id to pass to somebody, who is here, each seat's colour, and the colour picker. The host's also has the start button. |
 | Playing | The seat's own view. The same panels the hot seat game draws: the table, the dialler, the history, the odds. |
 | Watching | Eliminated and the match goes on. The same panels, with nothing to press: an eliminated seat is dealt and shown exactly what any seat is, and holds no dice. |
 | Halted | Playing or Watching, with a line naming the seat that has gone quiet. Left by itself when they claim. |
@@ -116,7 +116,7 @@ used to say are now wrong. *Abandoned matches are permanent by design* is no lon
 been inactive for a minute. And *nothing about one match constrains another* is no longer
 true either: `A player cannot join a match while holding a seat in another match`, so
 leaving a halted match is how somebody goes and plays elsewhere rather than merely a tidy
-thing to do. See `lobby.md`.
+thing to do. See `dashboard.md`.
 
 The scan over the log table still matters for the reason `relay-service.md`'s Open Item
 gives. Abandoning a match stops it being listed; it does not stop its rows being read.
@@ -138,22 +138,22 @@ fails with `NotTheHost`, the host having been moved off seat zero.
 
 ### Finding a match
 
-Two ways, and both are kept. The lobby lists what is open — host, player count, and a
+Two ways, and both are kept. The dashboard lists what is open — host, player count, and a
 button each — and a pasted id reaches a match whoever holds it. The second is not a
 leftover: a listing shows only what is open to everybody, so an id is how somebody is
 invited to a match before anyone else takes the seat.
 
-**Connecting is a step of its own, before hosting or joining.** The lobby's question is
+**Connecting is a step of its own, before hosting or joining.** The dashboard's question is
 the opening frame, so the socket is open before the client has decided anything, and
-hosting or joining later travels on that same socket. That is why the entry screen ends
+hosting or joining later travels on that same socket. That is why the sign-in screen ends
 at *Look for matches* rather than at a Host button: a client that connected only in order
 to host could never have looked first.
 
 Which also decides what leaving means. Leaving a match drops the seat and keeps the
-socket, putting somebody back in the lobby where another match is — leaving the relay is
+socket, putting somebody back on the dashboard where another match is — leaving the relay is
 its own button, one screen on. A refusal does the same and says why, because a refusal is
 the relay declining a message rather than the transport going away; only a socket that has
-actually gone takes the page back to the entry screen.
+actually gone takes the page back to the sign-in screen.
 
 ## Boundaries
 
@@ -195,7 +195,7 @@ identity hole below rather than a new one.
 and has no AWS credentials, so it cannot know where the relay is; the deploy knows and
 publishes the page. So `index.html` carries `<meta name="relay" content="RELAY_SOCKET_URL">`
 and the deploy writes the real address over the placeholder, which is checked for rather
-than assumed — a silent miss would ship a page that cannot connect. The entry screen shows
+than assumed — a silent miss would ship a page that cannot connect. The sign-in screen shows
 whatever it found and lets it be edited, which is the only way a local `trunk serve` can
 reach a deployed relay.
 
@@ -234,7 +234,7 @@ is a composition root, so what is left to check is what a composition root can g
   than reached: a finished match shows its result whatever else is true; a match that has
   not started can show nothing but Waiting; a seat is never halted on its own turn; and
   quiet decides nothing until another seat has the turn.
-- A seat opened without a browser leaves the page at the entry screen with the reason on it,
+- A seat opened without a browser leaves the page at the sign-in screen with the reason on it,
   rather than in a match it has no socket for.
 - A call is offered only on this seat's turn, over every combination of the facts, and no
   halted screen offers one.
@@ -243,7 +243,7 @@ is a composition root, so what is left to check is what a composition root can g
 - Two browser tabs playing each other, by hand.
 
 What a browser has shown so far and what it has not, because the difference matters: the
-page is served, the bundle boots, the entry screen draws, and the palette, the fields and
+page is served, the bundle boots, the sign-in screen draws, and the palette, the fields and
 the buttons are right. The socket's own paths — a frame arriving, a socket refusing to
 open, a close reported to the screen — have not been watched in a browser, because the
 deployed relay is a protocol behind this code and will refuse every opening frame until a
@@ -253,7 +253,7 @@ untried is better than counting the tests that do not reach them.
 ## Open Items
 
 **A host who leaves before the start.** Host powers are the seat in the log, so a match
-whose host has gone can never be started and is still listed as joinable. The lobby now
+whose host has gone can never be started and is still listed as joinable. The dashboard now
 exists and still lists it, because not listing it would need a statement nobody has
 approved: `Every match that can be joined is listed` is true of it, and whether a match
 that cannot begin counts as joinable is a question about the specification rather than
@@ -282,7 +282,7 @@ so it is named here rather than slipped in.
 ## Status
 **Built.** Published at `/liars-dice/multiplayer/`, linked from the root, and the deploy
 writes the relay's address into the page. The entry, waiting, playing, watching, halted and
-over screens are all drawn, the lobby lists what is open, and leaving works from every
+over screens are all drawn, the dashboard lists what is open, and leaving works from every
 screen that offers it. 14 tests here, 249 across the workspace with DynamoDB Local up,
 clippy clean against both the host target and `wasm32`.
 

@@ -214,7 +214,7 @@ impl Log for DynamoLog {
     ///
     /// A Query on `by-account`, not the Scan below. Every host and every join asks this,
     /// and the expensive answer is the common one — discovering that somebody is in no
-    /// match means looking everywhere — so the hot path must not be the lobby's path.
+    /// match means looking everywhere — so the hot path must not be the dashboard's path.
     ///
     /// The index is sparse: only a `join` row carries an account, so this reads one row
     /// per seat the account has ever taken rather than one per event. `matches_of` is
@@ -255,12 +255,12 @@ impl Log for DynamoLog {
             }
         }
         // Timed as a scan, because it is the same question asked a cheaper way and the
-        // number is worth comparing against what the lobby pays.
+        // number is worth comparing against what the dashboard pays.
         self.meter.scan(began.elapsed());
         found.into_iter().collect()
     }
 
-    /// Every match the log holds, for the lobby list.
+    /// Every match the log holds, for the dashboard list.
     ///
     /// A Scan projecting only the partition key, which grows with every event ever
     /// written rather than with the matches still open. It is timed separately for

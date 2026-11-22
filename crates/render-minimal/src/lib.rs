@@ -28,7 +28,8 @@ pub use panel::{
 };
 pub use seating::Seating;
 pub use widget::{
-    CLAIM, DIE, claim_box, colour_of, dialled_value, die, ink_of, palette_picker, shield, tap,
+    CLAIM, DIE, claim_box, colour_of, dialled_value, die, ink_of, palette_choice, palette_picker,
+    shield, tap,
 };
 
 #[cfg(test)]

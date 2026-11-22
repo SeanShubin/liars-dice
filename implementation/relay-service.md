@@ -169,10 +169,10 @@ let outcome = tokio::task::spawn_blocking(move || relay.receive(&from, message))
 stalled executor. The async-ness stops at the edge of this crate, which is where the
 decision is paid for and recorded.
 
-### Measuring what the lobby costs
+### Measuring what the dashboard costs
 
 `deployment.md` deferred the projection "until something measured asks for it", and this
-is the measuring. A lobby view does work that grows with the whole table, so the question
+is the measuring. A dashboard view does work that grows with the whole table, so the question
 is not whether it is slow today but which day it stops being fast, and that is answerable
 only by a number nobody had to go looking for.
 
@@ -183,10 +183,10 @@ handler times the call it wraps and emits one line per invocation:
 
 | Field | Why it is the number and not another |
 |-------|--------------------------------------|
-| `route` | So a lobby view and a game message are never averaged together. |
+| `route` | So a dashboard view and a game message are never averaged together. |
 | `scan_millis` | Finding which matches exist, which grows with every event ever written. |
 | `fold_millis` | Reading and folding them, which grows with the matches still open. |
-| `log_reads` | The divisor. Time without it cannot distinguish more matches from a slower table. On a lobby view it is the matches folded; on a message it is the appends, because the relay reads to find the end of the log before each one. |
+| `log_reads` | The divisor. Time without it cannot distinguish more matches from a slower table. On a dashboard view it is the matches folded; on a message it is the appends, because the relay reads to find the end of the log before each one. |
 | `events_read` | The actual work, independent of how fast the hardware was that day. |
 | `read_capacity` | What it costs and what gets throttled, from `ReturnConsumedCapacity`. |
 
@@ -272,21 +272,21 @@ runs in one process with no deployment at all. The cost is that the handler must
 test. Recorded in the Approach because it is the one place this crate's shape is not
 obvious from the library's.
 
-**The lobby list folds every log, and says so in writing.** `Relay::open_matches` folds
+**The dashboard list folds every log, and says so in writing.** `Relay::open_matches` folds
 every match's log to answer who is hosting and how many have joined. That is a read of
-every event of every match, per lobby view. At this project's size it is nothing; at some
+every event of every match, per dashboard view. At this project's size it is nothing; at some
 size it is the first thing that breaks, and the fix is a projection — a second item per
 match, updated on the events that change it.
 
 Not built now, because `deployment.md` decided the projection waits for a measurement, and
-a lobby nobody is looking at is not evidence. The measurement is built now, because
+a dashboard nobody is looking at is not evidence. The measurement is built now, because
 "it got slow" is not a trigger anyone can act on and a graph is. The trigger, so that
 neither taste nor memory is involved:
 
-- `fold_millis` p99 over a week above **200 ms** — the lobby is a page load, and a fifth
+- `fold_millis` p99 over a week above **200 ms** — the dashboard is a page load, and a fifth
   of a second of folding alone, before the scan and the socket, is where a list stops
   arriving and starts loading.
-- or `events_read` for any single lobby view above **5,000** — because a warm Lambda on an
+- or `events_read` for any single dashboard view above **5,000** — because a warm Lambda on an
   idle table can hold the time down long after the work has become absurd, and the event
   count is the leading indicator that does not depend on the weather.
 
@@ -400,7 +400,7 @@ buffer in order. The replay is exact because the log is ordered, which is the wh
 of the conditional write. Worth knowing before the client is written, because the
 alternative looks easier and is a new answer frame carrying a seat, which would be a second
 place that decides who is sitting where.
-- The counters count. Against DynamoDB Local: a lobby view over three matches of known
+- The counters count. Against DynamoDB Local: a dashboard view over three matches of known
   length reports exactly those matches and exactly that many events. The timings cannot be
   asserted on, which is why the counts are asserted on instead — a measurement nobody
   checked is a decoration, and the numbers that trigger the projection are the two that
@@ -411,7 +411,7 @@ place that decides who is sitting where.
 **Fixed.** The position is the version now, and a match is named by
 `HMAC(secret, account, nonce)` rather than by a count — see `The position is the version`
 and `What a match is called` in `relay.md`. Hosting reads nothing, so the 38 ms scan is off
-that path; the lobby's own scan remains, below. What follows is kept as the record of what
+that path; the dashboard's own scan remains, below. What follows is kept as the record of what
 a deployment found that a single process could not.
 
 **Hosting raced, and the conditional write did not save it.** `host` names a match
@@ -426,14 +426,14 @@ nobody refused, and both told they created it.
 In one process this could not happen, because `receive` is sequential — which is why the
 library's tests did not see it and why it took a deployment to find.
 
-**Nothing asks for the lobby.** `Relay::open_matches` exists and no `Message` reaches it,
+**Nothing asks for the dashboard.** `Relay::open_matches` exists and no `Message` reaches it,
 so a client on a socket cannot list open matches — the in-process harness calls the method
 directly, and a browser cannot. That is a gap in `crates/relay` rather than here, and it
 needs a message, an answer frame and a statement about who may ask. Deliberately not
 added as part of the transport: a host learns its match id from the `created` frame and a
 joiner can be told it out of band, which is enough for two command line clients to play a
 whole match and prove the service. It also means the measurement in this document reports
-`events_read` for per-message folds and nothing for a lobby view, because there are none
+`events_read` for per-message folds and nothing for a dashboard view, because there are none
 yet.
 
 The pipeline does not build a Lambda yet. A Rust function needs a cross-compiled artifact
@@ -448,7 +448,7 @@ static-hosting resources. The tests create their own, which is why they pass wit
 partition keys means a Scan, which grows with every event ever written rather than with
 the matches still open, so it is probably what the measurement above will indict first —
 and the projection would not fix it. The likely answer is a small item per match written
-on `host`, making the lobby a Query on one partition. Not decided here, because this is
+on `host`, making the dashboard a Query on one partition. Not decided here, because this is
 the document that just agreed to measure before guessing, and `scan_millis` is reported
 separately so the evidence arrives already separated from the fold's.
 
@@ -476,7 +476,7 @@ have turned into a hyphen — the codec decision, confirmed in production storag
 in a test.
 
 It cost 104 ms, and **38 ms of that was the scan**. On an empty table, on a route that has
-nothing to do with the lobby. The measurement earned its keep on the first message it ever
+nothing to do with the dashboard. The measurement earned its keep on the first message it ever
 reported: `Log::matches()` is called by `host` to name the match, so hosting scans the whole
 log table. That is the Open Item below, now with a number against it.
 
@@ -502,7 +502,7 @@ The seven tests against DynamoDB Local pass: the conditional write refuses a tak
 position without overwriting it, eight threads racing one position produce exactly one
 winner, `matches()` lists a match once however many events it holds, the reverse index
 answers `$disconnect`, and the meter reports one scan, three reads and six events for a
-lobby view over three matches. They are `#[ignore]` so a machine without Docker still
+dashboard view over three matches. They are `#[ignore]` so a machine without Docker still
 gets an honest green, and the gate runs them with `--include-ignored`.
 
 `crates/wire` is written and tested: one `Shape` decomposition for `Event` and `Message`,

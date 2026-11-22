@@ -128,7 +128,6 @@ impl Table {
         };
         let mut relay = Relay::new(MemoryLog::new(), MemoryConnections::new(), secrets);
         let now = Moment::from_unix_nanos(TABLE_EPOCH_NANOS);
-        let colours = ["red", "blue", "green", "white", "black"];
         let mut players = Vec::new();
         let mut match_id: Option<String> = None;
 
@@ -142,13 +141,11 @@ impl Table {
                 id: format!("table-{at}"),
                 name,
             };
-            let colour = colours[at % colours.len()].to_string();
             let outcome = match &match_id {
                 None => relay.receive(
                     &connection,
                     Message::Host {
                         who,
-                        colour,
                         version: PROTOCOL_VERSION,
                         // Fixed, not generated, for the same reason as the id above.
                         nonce: "table".to_string(),
@@ -160,7 +157,6 @@ impl Table {
                     Message::Join {
                         match_id: MatchId(id.to_string()),
                         who,
-                        colour,
                         version: PROTOCOL_VERSION,
                     },
                     now,

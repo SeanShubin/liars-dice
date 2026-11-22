@@ -34,7 +34,7 @@ pub enum Answer {
 pub const REFUSED: &str = "refused";
 /// The kind of a created-match frame.
 pub const CREATED: &str = "created";
-/// The kind of a lobby-listing frame.
+/// The kind of a dashboard-listing frame.
 pub const LISTING: &str = "listing";
 
 fn text(value: &str) -> Value {
@@ -60,7 +60,7 @@ pub fn shape_of(answer: &Answer) -> Shape {
 ///
 /// `A listed match shows its host` and `A listed match shows how many players have
 /// joined`, which with whether it is ranked is the whole of what a listing may say. Not
-/// the seats, not the accounts, not the colours: a lobby is read by people who are not in
+/// the seats, not the accounts, not the colours: a dashboard is read by people who are not in
 /// the match. Ranked is a property of the match rather than of anybody in it, which is
 /// why it may be said out loud.
 fn listed_shape(open: &Listed) -> Shape {

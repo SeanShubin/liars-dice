@@ -70,7 +70,8 @@ pub struct Showing {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Player {
     pub name: String,
-    /// The colour they chose, by name. Distinct within a match, because the relay refuses
+    /// The colour of their dice, by name: the last one they chose, or the one the relay
+    /// gave the seat when it was taken. Distinct within a match, because the relay refuses
     /// one another seat has taken.
     pub colour: String,
     pub left: bool,
@@ -121,7 +122,6 @@ pub struct Seated {
     /// does not need to — the client holds no secret, and recognising its own `join`
     /// coming back is not a decision about anybody's identity.
     account: Account,
-    colour: String,
     opening: Opening,
     match_id: Option<MatchId>,
     /// The seat this player is on, learned from the `join` that names its own account.
@@ -183,15 +183,9 @@ fn account_claimed(who: &Who) -> Option<Account> {
 
 impl Seated {
     /// `None` if `who` is an `Authenticated` holding something that is not a ticket.
-    pub fn hosting(
-        who: Who,
-        colour: impl Into<String>,
-        nonce: impl Into<String>,
-        driver: Box<dyn Decides>,
-    ) -> Option<Self> {
+    pub fn hosting(who: Who, nonce: impl Into<String>, driver: Box<dyn Decides>) -> Option<Self> {
         Self::new(
             who,
-            colour,
             Opening::Host {
                 nonce: nonce.into(),
             },
@@ -200,30 +194,18 @@ impl Seated {
     }
 
     /// `None` if `who` is an `Authenticated` holding something that is not a ticket.
-    pub fn joining(
-        who: Who,
-        colour: impl Into<String>,
-        match_id: MatchId,
-        driver: Box<dyn Decides>,
-    ) -> Option<Self> {
-        Self::new(who, colour, Opening::Join { match_id }, driver)
+    pub fn joining(who: Who, match_id: MatchId, driver: Box<dyn Decides>) -> Option<Self> {
+        Self::new(who, Opening::Join { match_id }, driver)
     }
 
     /// Return to a seat this account already holds.
     ///
-    /// No colour, because a returning player is not choosing one: their seat already has
-    /// the colour the log recorded at the join. Everything this seat needs arrives in the
-    /// replay the relay answers with.
+    /// Everything this seat needs arrives in the replay the relay answers with.
     pub fn resuming(who: Who, match_id: MatchId, driver: Box<dyn Decides>) -> Option<Self> {
-        Self::new(who, String::new(), Opening::Resume { match_id }, driver)
+        Self::new(who, Opening::Resume { match_id }, driver)
     }
 
-    fn new(
-        who: Who,
-        colour: impl Into<String>,
-        opening: Opening,
-        driver: Box<dyn Decides>,
-    ) -> Option<Self> {
+    fn new(who: Who, opening: Opening, driver: Box<dyn Decides>) -> Option<Self> {
         let match_id = match &opening {
             Opening::Host { .. } => None,
             Opening::Join { match_id } | Opening::Resume { match_id } => Some(match_id.clone()),
@@ -232,7 +214,6 @@ impl Seated {
         Some(Self {
             who,
             account,
-            colour: colour.into(),
             opening,
             match_id,
             mine: None,
@@ -252,14 +233,12 @@ impl Seated {
         let message = match &self.opening {
             Opening::Host { nonce } => Message::Host {
                 who: self.who.clone(),
-                colour: self.colour.clone(),
                 version: PROTOCOL_VERSION,
                 nonce: nonce.clone(),
             },
             Opening::Join { match_id } => Message::Join {
                 match_id: match_id.clone(),
                 who: self.who.clone(),
-                colour: self.colour.clone(),
                 version: PROTOCOL_VERSION,
             },
             Opening::Resume { match_id } => Message::Resume {
@@ -378,6 +357,11 @@ impl Seated {
                         left: false,
                     };
                 }
+                Event::Colour { seat, colour } => {
+                    if let Some(player) = seats.get_mut(seat.0 as usize) {
+                        player.colour = colour.clone();
+                    }
+                }
                 Event::Left { seat } => {
                     if let Some(player) = seats.get_mut(seat.0 as usize) {
                         player.left = true;
@@ -425,6 +409,18 @@ impl Seated {
         })))
     }
 
+    /// Choose the colour of this seat's dice.
+    ///
+    /// `A player can change their seat's colour until the match starts`. The relay decides
+    /// whether it may happen and says so; this only asks.
+    pub fn recolour(&self, colour: impl Into<String>) -> Option<String> {
+        let match_id = self.match_id.clone()?;
+        Some(json::write(&message::shape_of(&Message::Colour {
+            match_id,
+            colour: colour.into(),
+        })))
+    }
+
     /// Ask the driver again, without a frame having arrived.
     ///
     /// A seat played by an AI answers inside [`Seated::receive`], because its answer is
@@ -459,10 +455,10 @@ impl Seated {
                 self.match_id = Some(match_id);
                 Ok(Vec::new())
             }
-            // A listing is the lobby's answer and says nothing about this seat. One can
+            // A listing is the dashboard's answer and says nothing about this seat. One can
             // still arrive here, because the socket that asked what was open is the socket
             // that went on to sit down, and a frame in flight does not know that happened.
-            // `lobby::listing` is where a caller reads it.
+            // `dashboard::listing` is where a caller reads it.
             Answer::Listing(_) => Ok(Vec::new()),
             Answer::Event(event) => self.apply(event),
         }
@@ -557,7 +553,7 @@ impl Seated {
                 // And the relay is told. It writes no resolution event and may not derive
                 // one, so `A match is complete when every seat present in it says so` is
                 // the only way it can learn that this match is finished — and until it
-                // does, the match sits in the lobby in everybody's way.
+                // does, the match sits on the dashboard in everybody's way.
                 if let Some(match_id) = self.match_id.clone() {
                     frames.push(json::write(&message::shape_of(&Message::Over { match_id })));
                 }
@@ -670,13 +666,13 @@ fn odds_of(view: &rules::View<'_>, call: rules::Call) -> f64 {
         .unwrap_or_default()
 }
 
-/// The lobby: what is open, before there is a seat to be at.
+/// The dashboard: what is open, before there is a seat to be at.
 ///
-/// Free functions rather than a type, because there is no state here. A lobby is one
+/// Free functions rather than a type, because there is no state here. A dashboard is one
 /// question and one answer, and the socket it travels on belongs to whoever opened it —
 /// which is the same socket a [`Seated`] later speaks on, since a client connects before
 /// it knows whether it will host, join, or look first.
-pub mod lobby {
+pub mod dashboard {
     use protocol::Who;
     use relay::{Listed, Message};
     use wire::answer::Answer;
@@ -687,7 +683,7 @@ pub mod lobby {
         json::write(&message::shape_of(&Message::List { who: who.clone() }))
     }
 
-    /// What a frame says about the lobby, or `None` if it is not about the lobby.
+    /// What a frame says about the dashboard, or `None` if it is not about the dashboard.
     ///
     /// Returns rather than applies, because a listing is true of the moment it was read
     /// and the caller decides what to do about that. An empty listing is `Some(vec![])`

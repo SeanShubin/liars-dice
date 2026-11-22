@@ -45,7 +45,7 @@ pub enum Value {
     Counts(Vec<u64>),
     /// A whole shape as a field. Only `Message::Claim` needs it, which carries an event.
     Nested(Box<Shape>),
-    /// Several shapes as one field. Only the lobby's listing needs it.
+    /// Several shapes as one field. Only the dashboard's listing needs it.
     ///
     /// An empty one renders as an empty array, which reads back as an empty [`Counts`]
     /// because a JSON array carries no element type and there is nothing in it to tell

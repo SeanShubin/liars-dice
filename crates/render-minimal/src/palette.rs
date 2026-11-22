@@ -381,3 +381,96 @@ mod tests {
         assert_eq!(assigned.len(), 10);
     }
 }
+
+/// The tests that hold `protocol`'s two colour constants honest.
+///
+/// They live here because this is the only crate that knows what a colour looks like, and
+/// `protocol::ASSIGNMENT_ORDER` is a value the floating point side may check but — by
+/// `No value crosses from the floating point side to the exact side` — may not produce.
+/// The relay reads the constant; these assert it is the right one.
+#[cfg(test)]
+mod agrees_with_protocol {
+    use super::*;
+
+    /// The sequence `ASSIGNMENT_ORDER` is supposed to be: the two furthest apart colours,
+    /// then repeatedly whichever colour is furthest from every colour already chosen.
+    ///
+    /// Ties go to the lower palette index, which is what makes this a function rather
+    /// than a family of answers — and what keeps it from depending on iteration order.
+    fn greedy_order() -> Vec<usize> {
+        let table = distances();
+        let mut chosen: Vec<usize> = Vec::new();
+
+        let mut furthest = (f32::NEG_INFINITY, 0usize, 0usize);
+        for (left, row) in table.iter().enumerate() {
+            for (right, &gap) in row.iter().enumerate().skip(left + 1) {
+                if gap > furthest.0 {
+                    furthest = (gap, left, right);
+                }
+            }
+        }
+        chosen.push(furthest.1);
+        chosen.push(furthest.2);
+
+        while chosen.len() < PALETTE.len() {
+            let mut best = (f32::NEG_INFINITY, usize::MAX);
+            for (candidate, row) in table.iter().enumerate() {
+                if chosen.contains(&candidate) {
+                    continue;
+                }
+                let nearest = chosen
+                    .iter()
+                    .map(|&held| row[held])
+                    .fold(f32::INFINITY, f32::min);
+                if nearest > best.0 {
+                    best = (nearest, candidate);
+                }
+            }
+            chosen.push(best.1);
+        }
+        chosen
+    }
+
+    /// The test that fails when somebody edits a swatch or adds a colour, which is the
+    /// moment a person has to rewrite the constant rather than let a float decide it.
+    #[test]
+    fn the_assignment_order_is_the_greedy_max_min_sequence() {
+        let derived = greedy_order();
+        let declared: Vec<usize> = protocol::ASSIGNMENT_ORDER.to_vec();
+        assert_eq!(
+            derived
+                .iter()
+                .map(|&at| PALETTE[at].name)
+                .collect::<Vec<_>>(),
+            declared
+                .iter()
+                .map(|&at| PALETTE[at].name)
+                .collect::<Vec<_>>(),
+            "protocol::ASSIGNMENT_ORDER is no longer the spread the swatches imply; \
+             rewrite the constant to the derived order on the left"
+        );
+    }
+
+    /// Two declarations of the same twenty names, so this is the test that keeps them one
+    /// fact. Element by element, because a length check would pass on a swap.
+    #[test]
+    fn the_palette_and_the_protocol_name_the_same_colours() {
+        assert_eq!(PALETTE.len(), protocol::COLOURS.len());
+        for (at, swatch) in PALETTE.iter().enumerate() {
+            assert_eq!(
+                swatch.name,
+                protocol::COLOURS[at],
+                "palette entry {at} and protocol::COLOURS disagree"
+            );
+        }
+    }
+
+    /// Otherwise a seat could be given a colour no picker can show, or two seats could be
+    /// given the same one.
+    #[test]
+    fn every_colour_is_assigned_exactly_once() {
+        let mut seen = protocol::ASSIGNMENT_ORDER.to_vec();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..PALETTE.len()).collect::<Vec<_>>());
+    }
+}

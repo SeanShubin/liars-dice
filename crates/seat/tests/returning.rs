@@ -1,7 +1,7 @@
 //! A player whose socket died finds its own way back, with no id passed around.
 //!
 //! `A client returns its player to the match they hold a seat in, without asking`.
-//! Realizes *Coming back to the match you are in* in /implementation/lobby.md.
+//! Realizes *Coming back to the match you are in* in /implementation/dashboard.md.
 //!
 //! This is the test that matters for a real session. API Gateway closes every WebSocket
 //! after ten minutes of quiet and every one after two hours whatever happens, and neither
@@ -15,7 +15,7 @@ use protocol::{Moment, Who};
 use relay::memory::{MemoryConnections, MemoryLog};
 use relay::{ConnectionId, Relay, Secrets};
 use rules::{Call, View};
-use seat::{Seated, lobby};
+use seat::{Seated, dashboard};
 use wire::answer::Answer;
 use wire::{answer, json, message};
 
@@ -119,13 +119,8 @@ fn a_player_whose_socket_died_is_returned_to_their_own_match() {
     let host_socket = ConnectionId("host".to_string());
     let guest_socket = ConnectionId("guest".to_string());
 
-    let host = Seated::hosting(
-        guest("host-id", "Sean"),
-        "red",
-        "returning",
-        Box::new(Waiting),
-    )
-    .expect("a guest is always a seat");
+    let host = Seated::hosting(guest("host-id", "Sean"), "returning", Box::new(Waiting))
+        .expect("a guest is always a seat");
     let mut seats = vec![(host_socket.clone(), host)];
     let pending = vec![(host_socket.clone(), seats[0].1.opening())];
     settle(&mut wire, &mut seats, pending);
@@ -133,7 +128,6 @@ fn a_player_whose_socket_died_is_returned_to_their_own_match() {
 
     let joiner = Seated::joining(
         guest("guest-id", "Ada"),
-        "blue",
         match_id.clone(),
         Box::new(Waiting),
     )
@@ -157,9 +151,9 @@ fn a_player_whose_socket_died_is_returned_to_their_own_match() {
     // A new page, a new socket, the same guest id out of local storage. All it does is ask
     // what is going on, which is what the real page does as its opening frame.
     let returning = ConnectionId("guest-again".to_string());
-    let listing = wire.send(&returning, &lobby::ask(&guest("guest-id", "Ada")));
+    let listing = wire.send(&returning, &dashboard::ask(&guest("guest-id", "Ada")));
     assert_eq!(listing.len(), 1, "one answer, the listing");
-    let listed = lobby::listing(&listing[0].1).expect("a listing");
+    let listed = dashboard::listing(&listing[0].1).expect("a listing");
 
     assert_eq!(
         listed.len(),
@@ -215,13 +209,8 @@ fn a_player_whose_socket_died_is_returned_to_their_own_match() {
 fn a_player_who_left_is_not_marked_as_belonging_anywhere() {
     let mut wire = Wire::new();
     let host_socket = ConnectionId("host".to_string());
-    let host = Seated::hosting(
-        guest("host-id", "Sean"),
-        "red",
-        "leaving",
-        Box::new(Waiting),
-    )
-    .expect("a guest is always a seat");
+    let host = Seated::hosting(guest("host-id", "Sean"), "leaving", Box::new(Waiting))
+        .expect("a guest is always a seat");
     let mut seats = vec![(host_socket.clone(), host)];
     let pending = vec![(host_socket.clone(), seats[0].1.opening())];
     settle(&mut wire, &mut seats, pending);
@@ -231,10 +220,66 @@ fn a_player_who_left_is_not_marked_as_belonging_anywhere() {
     settle(&mut wire, &mut seats, pending);
 
     let asking = ConnectionId("host-again".to_string());
-    let listing = wire.send(&asking, &lobby::ask(&guest("host-id", "Sean")));
-    let listed = lobby::listing(&listing[0].1).expect("a listing");
+    let listing = wire.send(&asking, &dashboard::ask(&guest("host-id", "Sean")));
+    let listed = dashboard::listing(&listing[0].1).expect("a listing");
     assert!(
         listed.iter().all(|open| !open.mine),
         "nothing belongs to somebody who left: {listed:?}"
     );
+}
+
+/// A colour change reaches every seat's own roster, which is what a lobby draws from.
+///
+/// `A lobby shows each seat's colour`, and a lobby draws from `Seated::roster`, which is
+/// a client-side fold with a wildcard arm in it. So a colour change that the relay records
+/// and sends to everybody would still show up nowhere until the fold was told to apply it.
+/// The relay's tests cannot catch that: they read the log.
+#[test]
+fn a_colour_change_reaches_every_seats_roster() {
+    let mut wire = Wire::new();
+    let host_socket = ConnectionId("host".to_string());
+    let guest_socket = ConnectionId("guest".to_string());
+
+    let host = Seated::hosting(guest("host-id", "Sean"), "colours", Box::new(Waiting))
+        .expect("a guest is always a seat");
+    let mut seats = vec![(host_socket.clone(), host)];
+    let pending = vec![(host_socket.clone(), seats[0].1.opening())];
+    settle(&mut wire, &mut seats, pending);
+    let match_id = seats[0].1.match_id().expect("a match").clone();
+
+    let joiner = Seated::joining(guest("guest-id", "Ada"), match_id, Box::new(Waiting))
+        .expect("a guest is always a seat");
+    seats.push((guest_socket.clone(), joiner));
+    let pending = vec![(guest_socket.clone(), seats[1].1.opening())];
+    settle(&mut wire, &mut seats, pending);
+
+    // The colours the relay gave, before anybody chose.
+    assert_eq!(
+        colours(&seats[0].1),
+        vec!["white".to_string(), "black".to_string()],
+        "the host's roster, as given"
+    );
+
+    let asked = seats[0]
+        .1
+        .recolour("teal")
+        .expect("a seat in a match can ask");
+    settle(&mut wire, &mut seats, vec![(host_socket.clone(), asked)]);
+
+    // Both rosters, because the one that matters is the *other* seat's: a fold that
+    // applied the change only where it was asked for would pass on the asker alone.
+    for (at, seat) in seats.iter().enumerate() {
+        assert_eq!(
+            colours(&seat.1),
+            vec!["teal".to_string(), "black".to_string()],
+            "seat {at} should see the host in teal"
+        );
+    }
+}
+
+fn colours(seat: &Seated) -> Vec<String> {
+    seat.roster()
+        .into_iter()
+        .map(|player| player.colour)
+        .collect()
 }

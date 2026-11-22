@@ -9,7 +9,7 @@ use protocol::{Account, Event, Moment, PROTOCOL_VERSION, Seat, Who};
 use relay::memory::{MemoryConnections, MemoryLog};
 use relay::{
     ABANDON_AFTER_SECONDS, CANCEL_AFTER_SECONDS, Connected, ConnectionId, Connections, Ending, Log,
-    MatchId, Message, Recording, Refused, Relay, Role, Secrets, Taken,
+    MatchId, Message, Outcome, Recording, Refused, Relay, Role, Secrets, Taken,
 };
 
 fn secret() -> Secret {
@@ -78,7 +78,6 @@ fn host<L: Log, C: Connections>(relay: &mut Relay<L, C>, who: &ConnectionId) -> 
         who,
         Message::Host {
             who: guest_who("1", "Alice"),
-            colour: "red".to_string(),
             version: PROTOCOL_VERSION,
             nonce: "alice-hosts".to_string(),
         },
@@ -94,7 +93,6 @@ fn join<L: Log, C: Connections>(
     match_id: &MatchId,
     account: &str,
     name: &str,
-    colour: &str,
 ) -> Option<Refused> {
     relay
         .receive(
@@ -102,7 +100,6 @@ fn join<L: Log, C: Connections>(
             Message::Join {
                 match_id: match_id.clone(),
                 who: guest_who(account, name),
-                colour: colour.to_string(),
                 version: PROTOCOL_VERSION,
             },
             moment(),
@@ -116,7 +113,7 @@ fn two_player_match() -> (Relay<MemoryLog, MemoryConnections>, MatchId) {
     let alice = connection("alice");
     let bob = connection("bob");
     let match_id = host(&mut relay, &alice);
-    assert_eq!(join(&mut relay, &bob, &match_id, "2", "Bob", "blue"), None);
+    assert_eq!(join(&mut relay, &bob, &match_id, "2", "Bob"), None);
     let started = relay.receive(
         &alice,
         Message::Start {
@@ -130,7 +127,7 @@ fn two_player_match() -> (Relay<MemoryLog, MemoryConnections>, MatchId) {
 
 /// `A started match is listed`, and says it cannot be joined rather than vanishing.
 ///
-/// This test used to assert the opposite. A lobby that showed only what was on offer could
+/// This test used to assert the opposite. A dashboard that showed only what was on offer could
 /// not say what was going on, and a match you were in disappeared from it the moment it
 /// started — which is how a reload became unrecoverable.
 #[test]
@@ -227,7 +224,7 @@ fn asking_what_is_open_lists_the_matches_that_are() {
     assert_eq!(after.len(), 1, "a started match is still listed: {after:?}");
     assert!(
         !after[0].joinable,
-        "and says it cannot be joined, which is what the lobby draws it greyed for"
+        "and says it cannot be joined, which is what the dashboard draws it greyed for"
     );
 }
 
@@ -239,7 +236,7 @@ fn a_listing_is_answered_for_whoever_asked() {
     let alice = connection("alice");
     let bob = connection("bob");
     let match_id = host(&mut relay, &alice);
-    assert_eq!(join(&mut relay, &bob, &match_id, "2", "Bob", "blue"), None);
+    assert_eq!(join(&mut relay, &bob, &match_id, "2", "Bob"), None);
     relay.receive(
         &alice,
         Message::Bar {
@@ -280,7 +277,7 @@ fn a_barred_player_is_not_shown_the_match_and_cannot_join() {
     let alice = connection("alice");
     let bob = connection("bob");
     let match_id = host(&mut relay, &alice);
-    assert_eq!(join(&mut relay, &bob, &match_id, "2", "Bob", "blue"), None);
+    assert_eq!(join(&mut relay, &bob, &match_id, "2", "Bob"), None);
 
     relay.receive(
         &alice,
@@ -314,7 +311,7 @@ fn only_the_host_may_bar_or_start() {
     let alice = connection("alice");
     let bob = connection("bob");
     let match_id = host(&mut relay, &alice);
-    join(&mut relay, &bob, &match_id, "2", "Bob", "blue");
+    join(&mut relay, &bob, &match_id, "2", "Bob");
 
     assert_eq!(
         relay
@@ -343,8 +340,14 @@ fn only_the_host_may_bar_or_start() {
     );
 }
 
+/// A taken colour is not among these any more, and that is the point.
+///
+/// A join carries no colour: `A seat is given a colour when it is taken`, so there is
+/// nothing for a joining client to collide with. `Refused::ColourTaken` now reaches only
+/// a `Colour` message, which is the one a person sends from a screen that can see what is
+/// free.
 #[test]
-fn a_join_is_refused_for_a_mismatched_version_a_taken_colour_or_a_started_match() {
+fn a_join_is_refused_for_a_mismatched_version_or_a_started_match() {
     let mut relay = relay();
     let alice = connection("alice");
     let match_id = host(&mut relay, &alice);
@@ -354,7 +357,6 @@ fn a_join_is_refused_for_a_mismatched_version_a_taken_colour_or_a_started_match(
         Message::Join {
             match_id: match_id.clone(),
             who: guest_who("9", "Old"),
-            colour: "green".to_string(),
             version: PROTOCOL_VERSION - 1,
         },
         moment(),
@@ -368,8 +370,8 @@ fn a_join_is_refused_for_a_mismatched_version_a_taken_colour_or_a_started_match(
     );
 
     assert_eq!(
-        join(&mut relay, &connection("bob"), &match_id, "2", "Bob", "red"),
-        Some(Refused::ColourTaken)
+        join(&mut relay, &connection("bob"), &match_id, "2", "Bob"),
+        None
     );
 
     relay.receive(
@@ -380,14 +382,7 @@ fn a_join_is_refused_for_a_mismatched_version_a_taken_colour_or_a_started_match(
         moment(),
     );
     assert_eq!(
-        join(
-            &mut relay,
-            &connection("late"),
-            &match_id,
-            "3",
-            "Late",
-            "blue"
-        ),
+        join(&mut relay, &connection("late"), &match_id, "3", "Late",),
         Some(Refused::AlreadyStarted)
     );
 }
@@ -400,7 +395,7 @@ fn a_seat_is_sent_its_own_dice_and_no_others_until_the_reveal() {
     let alice = connection("alice");
     let bob = connection("bob");
     let match_id = host(&mut relay, &alice);
-    join(&mut relay, &bob, &match_id, "2", "Bob", "blue");
+    join(&mut relay, &bob, &match_id, "2", "Bob");
 
     let started = relay.receive(
         &alice,
@@ -553,7 +548,7 @@ fn a_seat_holding_two_sockets_does_not_hold_the_round_still() {
     let alice = connection("alice");
     let bob = connection("bob");
     let match_id = host(&mut relay, &alice);
-    assert_eq!(join(&mut relay, &bob, &match_id, "2", "Bob", "blue"), None);
+    assert_eq!(join(&mut relay, &bob, &match_id, "2", "Bob"), None);
     relay.receive(
         &alice,
         Message::Start {
@@ -669,7 +664,7 @@ fn joining_twice_returns_the_seat_already_held() {
     let bob = connection("bob");
     let match_id = host(&mut relay, &alice);
 
-    assert_eq!(join(&mut relay, &bob, &match_id, "2", "Bob", "blue"), None);
+    assert_eq!(join(&mut relay, &bob, &match_id, "2", "Bob"), None);
     fn seats<L: Log, C: Connections>(relay: &Relay<L, C>, match_id: &MatchId) -> usize {
         relay
             .log()
@@ -684,7 +679,7 @@ fn joining_twice_returns_the_seat_already_held() {
     // The same account again, from a new socket and under a different name and colour.
     let again = connection("bob-again");
     assert_eq!(
-        join(&mut relay, &again, &match_id, "2", "Robert", "green"),
+        join(&mut relay, &again, &match_id, "2", "Robert"),
         None,
         "coming back is not an error"
     );
@@ -724,7 +719,6 @@ fn coming_back_is_not_refused_by_your_own_seat() {
         Message::Join {
             match_id: match_id.clone(),
             who: guest_who("1", "Alice"),
-            colour: "red".to_string(),
             version: PROTOCOL_VERSION,
         },
         moment(),
@@ -744,7 +738,6 @@ fn coming_back_is_not_refused_by_your_own_seat() {
         Message::Join {
             match_id: match_id.clone(),
             who: guest_who("1", "Alice"),
-            colour: "red".to_string(),
             version: PROTOCOL_VERSION,
         },
         moment(),
@@ -758,7 +751,7 @@ fn coming_back_is_not_refused_by_your_own_seat() {
 /// `A host who leaves a match that has not started cancels it`.
 ///
 /// Host powers are the seat in the log and nothing transfers them, so a match whose host
-/// has gone is finished without having started. It used to sit in the lobby forever,
+/// has gone is finished without having started. It used to sit in the dashboard forever,
 /// offering a start that could never come; then it had a refusal of its own,
 /// `HostHasLeft`, which was a second name for *this match is finished*. Now it is a
 /// cancellation, recorded as the same event the Cancel button records.
@@ -786,14 +779,7 @@ fn a_match_whose_host_has_left_is_neither_listed_nor_joinable() {
         "a match that cannot begin is not on offer"
     );
     assert_eq!(
-        join(
-            &mut relay,
-            &connection("bob"),
-            &match_id,
-            "2",
-            "Bob",
-            "blue"
-        ),
+        join(&mut relay, &connection("bob"), &match_id, "2", "Bob",),
         Some(Refused::MatchIsOver),
         "and saying why beats letting somebody wait in it"
     );
@@ -968,7 +954,6 @@ fn hosting_the_same_request_twice_creates_one_match() {
     );
     let request = Message::Host {
         who: meddled_host_who(),
-        colour: "red".to_string(),
         version: PROTOCOL_VERSION,
         nonce: HOST_NONCE.to_string(),
     };
@@ -1013,7 +998,6 @@ fn hosting_twice_on_purpose_creates_two_matches() {
     );
     let request = |nonce: &str| Message::Host {
         who: meddled_host_who(),
-        colour: "red".to_string(),
         version: PROTOCOL_VERSION,
         nonce: nonce.to_string(),
     };
@@ -1186,7 +1170,6 @@ fn a_join_survives_interference_at_every_append() {
             &ConnectionId("host".to_string()),
             Message::Host {
                 who: meddled_host_who(),
-                colour: "red".to_string(),
                 version: PROTOCOL_VERSION,
                 nonce: HOST_NONCE.to_string(),
             },
@@ -1210,7 +1193,6 @@ fn a_join_survives_interference_at_every_append() {
             Message::Join {
                 match_id: created.clone(),
                 who: guest_who("account-late", "Late"),
-                colour: "green".to_string(),
                 version: PROTOCOL_VERSION,
             },
             moment(),
@@ -1274,7 +1256,6 @@ fn a_join_decided_against_a_stale_log_is_decided_again() {
         Message::Join {
             match_id: match_id.clone(),
             who: guest_who("account-late", "Late"),
-            colour: "green".to_string(),
             version: PROTOCOL_VERSION,
         },
         moment(),
@@ -1304,33 +1285,46 @@ fn a_join_decided_against_a_stale_log_is_decided_again() {
 
 /// A guard is decided by the commit, not merely consulted before it.
 ///
-/// The colour was free when the join was decided and taken by the time it landed, so the
-/// re-decision refuses it. `A colour another player has chosen cannot be chosen` was
+/// The colour was free when the change was decided and taken by the time it landed, so
+/// the re-decision refuses it. `A colour another player has chosen cannot be chosen` was
 /// already a statement; this is the first test that holds it under a race.
+///
+/// The vehicle used to be a join. It cannot be any more — a join carries no colour, so
+/// there is nothing for it to race over — and `Message::Colour` is the better one anyway,
+/// since it is the message a person actually sends twenty times from a picker.
 #[test]
-fn a_colour_taken_while_a_join_was_decided_is_refused_on_the_retry() {
+fn a_colour_taken_while_a_change_was_decided_is_refused_on_the_retry() {
     let match_id = meddled_match();
-    let interloper = Event::Join {
+    // Seat one takes green between the host's colour change being decided and it landing.
+    let interloper = Event::Colour {
         seat: Seat(1),
-        name: "Interloper".to_string(),
         colour: "green".to_string(),
-        account: Account::Discord("account-x".to_string()),
     };
+    // Two appends before the one that matters: the host's, and the second seat's.
     let mut relay = Relay::new(
-        Meddling::interfering_after(1, &match_id, vec![interloper]),
+        Meddling::interfering_after(2, &match_id, vec![interloper]),
         MemoryConnections::new(),
         both(Secret::from_bytes(MEDDLED_SECRET)),
     );
+    let host = ConnectionId("host".to_string());
     seat_a_host(&mut relay, &match_id);
+    // A second seat, so there is somebody for the colour to be taken by.
+    assert_eq!(
+        seat(
+            &mut relay,
+            &ConnectionId("other".to_string()),
+            &match_id,
+            guest_who("account-other", "Other"),
+        ),
+        None
+    );
 
     let outcome = relay.receive(
-        &ConnectionId("late".to_string()),
-        Message::Join {
+        &host,
+        Message::Colour {
             match_id: match_id.clone(),
-            who: guest_who("account-late", "Late"),
             // Free when this was decided. Taken by the time it tried to land.
             colour: "green".to_string(),
-            version: PROTOCOL_VERSION,
         },
         moment(),
     );
@@ -1339,22 +1333,22 @@ fn a_colour_taken_while_a_join_was_decided_is_refused_on_the_retry() {
         relay.log().spent(),
         "the interference never fired, so this proved nothing"
     );
-    // By name, not by count: two joins is also what an interference that never fired
-    // would leave, and a test that cannot tell those apart proves nothing.
-    let names: Vec<String> = relay
+    // By seat, not by count: one colour event is also what an interference that never
+    // fired would leave, and a test that cannot tell those apart proves nothing.
+    let recoloured: Vec<(u8, String)> = relay
         .log()
         .read(&match_id)
         .events
         .into_iter()
         .filter_map(|event| match event {
-            Event::Join { name, .. } => Some(name),
+            Event::Colour { seat, colour } => Some((seat.0, colour)),
             _ => None,
         })
         .collect();
     assert_eq!(
-        names,
-        vec!["Host".to_string(), "Interloper".to_string()],
-        "the interloper must be in and the refused join must leave nothing behind"
+        recoloured,
+        vec![(1, "green".to_string())],
+        "the interloper must hold green and the refused change must leave nothing behind"
     );
 }
 
@@ -1366,7 +1360,6 @@ fn seat_a_host<L: Log, C: Connections>(relay: &mut Relay<L, C>, expected: &Match
             &ConnectionId("host".to_string()),
             Message::Host {
                 who: meddled_host_who(),
-                colour: "red".to_string(),
                 version: PROTOCOL_VERSION,
                 nonce: HOST_NONCE.to_string(),
             },
@@ -1443,7 +1436,7 @@ fn a_replacement_relay_continues_a_round_in_progress() {
     let match_id = {
         let mut first = Relay::new(&mut log, &mut connections, secrets());
         let match_id = host(&mut first, &alice);
-        join(&mut first, &bob, &match_id, "2", "Bob", "blue");
+        join(&mut first, &bob, &match_id, "2", "Bob");
         first.receive(
             &alice,
             Message::Start {
@@ -1610,7 +1603,7 @@ fn a_player_who_is_not_the_host_cannot_cancel() {
 /// `A match in which no event has been recorded for an hour is cancelled`, noticed by
 /// whatever next reads it.
 ///
-/// There is no monitor. The lobby pass reads every match already, so the hour is noticed
+/// There is no monitor. The dashboard pass reads every match already, so the hour is noticed
 /// there and nowhere else.
 #[test]
 fn a_match_untouched_for_an_hour_is_abandoned_by_the_next_listing() {
@@ -1662,7 +1655,7 @@ fn listing_twice_abandons_a_match_once() {
 /// A match whose rows carry no recorded time is abandoned on the first listing.
 ///
 /// Those are the matches written before this build. `None` means inactive since forever,
-/// not *unknown, so not expired* — which would have left them in the lobby permanently,
+/// not *unknown, so not expired* — which would have left them on the dashboard permanently,
 /// and that is the problem the hour rule exists to solve.
 #[test]
 fn a_match_with_no_recorded_time_is_abandoned_at_once() {
@@ -1778,14 +1771,7 @@ fn nothing_is_recorded_in_a_match_that_is_over() {
         );
     }
     assert_eq!(
-        join(
-            &mut relay,
-            &connection("carol"),
-            &match_id,
-            "3",
-            "Carol",
-            "green"
-        ),
+        join(&mut relay, &connection("carol"), &match_id, "3", "Carol",),
         Some(Refused::MatchIsOver),
         "`A cancelled match cannot be joined`"
     );
@@ -2006,7 +1992,6 @@ fn seat<L: Log, C: Connections>(
     at: &ConnectionId,
     match_id: &MatchId,
     who: Who,
-    colour: &str,
 ) -> Option<Refused> {
     relay
         .receive(
@@ -2014,7 +1999,6 @@ fn seat<L: Log, C: Connections>(
             Message::Join {
                 match_id: match_id.clone(),
                 who,
-                colour: colour.to_string(),
                 version: PROTOCOL_VERSION,
             },
             moment(),
@@ -2035,7 +2019,6 @@ fn a_ticket_seats_the_account_and_the_name_it_proves() {
         &alice,
         Message::Host {
             who: ticket_for("450853396908343307", "Ada Lovelace"),
-            colour: "red".to_string(),
             version: PROTOCOL_VERSION,
             nonce: "once".to_string(),
         },
@@ -2075,7 +2058,6 @@ fn a_guest_id_is_taken_as_given() {
                     id: id.to_string(),
                     name: "Anybody".to_string(),
                 },
-                colour: "red".to_string(),
                 version: PROTOCOL_VERSION,
                 nonce: format!("nonce-{id}"),
             },
@@ -2107,7 +2089,6 @@ fn a_guest_cannot_spell_its_way_into_a_discord_account() {
                     id: "discord:450853396908343307".to_string(),
                     name: "Ada Lovelace".to_string(),
                 },
-                colour: "red".to_string(),
                 version: PROTOCOL_VERSION,
                 nonce: "impostor".to_string(),
             },
@@ -2168,7 +2149,6 @@ fn a_ticket_that_proves_nothing_seats_nobody() {
                 &connection(what),
                 &match_id,
                 Who::Authenticated { ticket },
-                "blue"
             ),
             Some(Refused::BadTicket),
             "{what} was accepted"
@@ -2189,7 +2169,6 @@ fn a_ticket_that_proves_nothing_seats_nobody() {
 /// test over two or three cases would pass for an implementation that looked at the first.
 #[test]
 fn ranked_is_every_seat_and_not_most_of_them() {
-    let colours = ["red", "blue", "green", "white"];
     for width in 1..4usize {
         for shape in 0..(1u32 << width) {
             let proven: Vec<bool> = (0..width).map(|at| shape >> at & 1 == 1).collect();
@@ -2208,7 +2187,6 @@ fn ranked_is_every_seat_and_not_most_of_them() {
                             &socket,
                             Message::Host {
                                 who,
-                                colour: colours[at].to_string(),
                                 version: PROTOCOL_VERSION,
                                 nonce: "ranked".to_string(),
                             },
@@ -2218,7 +2196,7 @@ fn ranked_is_every_seat_and_not_most_of_them() {
                         match_id = outcome.created;
                     }
                     Some(id) => {
-                        assert_eq!(seat(&mut relay, &socket, id, who, colours[at]), None);
+                        assert_eq!(seat(&mut relay, &socket, id, who), None);
                     }
                 }
             }
@@ -2255,7 +2233,6 @@ fn leaving_a_started_match_does_not_change_whether_it_is_ranked() {
             &alice,
             Message::Host {
                 who: ticket_for("1", "Ada"),
-                colour: "red".to_string(),
                 version: PROTOCOL_VERSION,
                 nonce: "ranked".to_string(),
             },
@@ -2264,7 +2241,7 @@ fn leaving_a_started_match_does_not_change_whether_it_is_ranked() {
         .created
         .expect("a match");
     assert_eq!(
-        seat(&mut relay, &bob, &match_id, ticket_for("2", "Bob"), "blue"),
+        seat(&mut relay, &bob, &match_id, ticket_for("2", "Bob")),
         None
     );
     relay.receive(
@@ -2298,7 +2275,6 @@ fn a_listing_says_which_matches_are_ranked() {
             &connection("ada"),
             Message::Host {
                 who: ticket_for("1", "Ada"),
-                colour: "red".to_string(),
                 version: PROTOCOL_VERSION,
                 nonce: "proven".to_string(),
             },
@@ -2311,7 +2287,6 @@ fn a_listing_says_which_matches_are_ranked() {
             &connection("sean"),
             Message::Host {
                 who: guest_who("sean", "Sean"),
-                colour: "blue".to_string(),
                 version: PROTOCOL_VERSION,
                 nonce: "unproven".to_string(),
             },
@@ -2358,7 +2333,6 @@ fn a_ticket_minted_with_the_dice_secret_proves_nothing() {
         &connection("ada"),
         Message::Host {
             who: minted_with_the_wrong_one,
-            colour: "red".to_string(),
             version: PROTOCOL_VERSION,
             nonce: "once".to_string(),
         },
@@ -2373,7 +2347,6 @@ fn a_ticket_minted_with_the_dice_secret_proves_nothing() {
             who: Who::Authenticated {
                 ticket: integrity::ticket(&ticket, "discord:1", "Ada", u64::MAX),
             },
-            colour: "red".to_string(),
             version: PROTOCOL_VERSION,
             nonce: "once".to_string(),
         },
@@ -2404,7 +2377,6 @@ fn without_a_ticket_secret_guests_still_play() {
                 // and still refused, because it has no ticket secret to check against.
                 ticket: integrity::ticket(&secret(), "discord:1", "Ada", u64::MAX),
             },
-            colour: "red".to_string(),
             version: PROTOCOL_VERSION,
             nonce: "once".to_string(),
         },
@@ -2416,7 +2388,6 @@ fn without_a_ticket_secret_guests_still_play() {
         &connection("sean"),
         Message::Host {
             who: guest_who("sean", "Sean"),
-            colour: "red".to_string(),
             version: PROTOCOL_VERSION,
             nonce: "guest".to_string(),
         },
@@ -2427,14 +2398,14 @@ fn without_a_ticket_secret_guests_still_play() {
 }
 
 // ---------------------------------------------------------------------------------------
-// The lobby: /implementation/lobby.md
+// The dashboard: /implementation/dashboard.md
 // ---------------------------------------------------------------------------------------
 
 /// The flag in the listing agrees with what `join` actually does, over every shape.
 ///
 /// This is the test that pays for there being one `why_not_joinable`. It fails if anybody
 /// adds a guard to `join` and not to the listing, which is the drift that would otherwise
-/// have the lobby offer a match that refuses you with the bug in neither place.
+/// have the dashboard offer a match that refuses you with the bug in neither place.
 ///
 /// The colour is deliberately outside the agreement: a colour is part of a request rather
 /// than a property of a match, so a listing promises the match will take you and not that
@@ -2460,14 +2431,12 @@ fn the_listing_and_the_refusal_say_the_same_thing() {
             let mut relay = relay();
             let match_id = host(&mut relay, &connection("alice"));
             for at in 1..relay::MAX_PLAYERS {
-                let colour = format!("colour-{at}");
                 assert_eq!(
                     seat(
                         &mut relay,
                         &connection(&format!("socket-{at}")),
                         &match_id,
                         guest_who(&format!("filler-{at}"), "Filler"),
-                        &colour
                     ),
                     None,
                     "seat {at} of a full match"
@@ -2480,7 +2449,7 @@ fn the_listing_and_the_refusal_say_the_same_thing() {
             let alice = connection("alice");
             let bob = connection("bob");
             let match_id = host(&mut relay, &alice);
-            assert_eq!(seat(&mut relay, &bob, &match_id, asker(), "blue"), None);
+            assert_eq!(seat(&mut relay, &bob, &match_id, asker()), None);
             relay.receive(
                 &alice,
                 Message::Bar {
@@ -2507,13 +2476,7 @@ fn the_listing_and_the_refusal_say_the_same_thing() {
             .open_matches(Some(&asking), moment())
             .into_iter()
             .find(|open| open.match_id == match_id);
-        let refused = seat(
-            &mut relay,
-            &connection("asker-socket"),
-            &match_id,
-            asker(),
-            "indigo",
-        );
+        let refused = seat(&mut relay, &connection("asker-socket"), &match_id, asker());
         match listed {
             // Listed: the flag must match whether the join was refused.
             Some(open) => assert_eq!(
@@ -2553,7 +2516,6 @@ fn a_listing_marks_the_one_match_the_asker_is_in() {
             &bob,
             Message::Host {
                 who: guest_who("bob", "Bob"),
-                colour: "blue".to_string(),
                 version: PROTOCOL_VERSION,
                 nonce: "bob-hosts".to_string(),
             },
@@ -2597,7 +2559,6 @@ fn a_player_in_one_match_cannot_join_another() {
             &bob,
             Message::Host {
                 who: guest_who("bob", "Bob"),
-                colour: "blue".to_string(),
                 version: PROTOCOL_VERSION,
                 nonce: "bob-hosts".to_string(),
             },
@@ -2613,7 +2574,6 @@ fn a_player_in_one_match_cannot_join_another() {
             &connection("alice-elsewhere"),
             &second,
             guest_who("1", "Alice"),
-            "green"
         ),
         Some(Refused::AlreadyInAMatch {
             match_id: first.clone()
@@ -2625,7 +2585,7 @@ fn a_player_in_one_match_cannot_join_another() {
         .iter()
         .find(|open| open.match_id == second)
         .expect("the other match is listed");
-    assert!(!second_row.joinable, "the lobby said so too");
+    assert!(!second_row.joinable, "the dashboard said so too");
 
     // Leaving the first opens the second. Explicitly, because leaving is an elimination in
     // the rules and must never happen as a side effect of clicking join.
@@ -2642,7 +2602,6 @@ fn a_player_in_one_match_cannot_join_another() {
             &connection("alice-elsewhere"),
             &second,
             guest_who("1", "Alice"),
-            "green"
         ),
         None,
         "leaving is how somebody goes and plays elsewhere"
@@ -2669,7 +2628,6 @@ fn a_finished_match_does_not_hold_its_players() {
         &alice,
         Message::Host {
             who: guest_who("1", "Alice"),
-            colour: "red".to_string(),
             version: PROTOCOL_VERSION,
             nonce: "second".to_string(),
         },
@@ -2687,4 +2645,225 @@ fn a_seat_that_left_is_not_held() {
     assert_eq!(relay.match_of(&guest("2")), Some(match_id.clone()));
     relay.receive(&bob, Message::Leave { match_id }, moment());
     assert_eq!(relay.match_of(&guest("2")), None);
+}
+
+// Colours: /implementation/screens.md
+
+/// The colour a seat is given, asserted against literal names.
+///
+/// `A seat is given a colour when it is taken`, from `protocol::ASSIGNMENT_ORDER`. The
+/// literals are the point: the constant exists so that the answer is the same every time,
+/// and a test that recomputed the order from the constant would assert nothing.
+#[test]
+fn a_seat_is_given_the_first_colour_nobody_holds() {
+    let mut relay = relay();
+    let match_id = host(&mut relay, &connection("alice"));
+    assert_eq!(
+        colours_of(&relay, &match_id),
+        vec!["white".to_string()],
+        "the host takes the first colour in the assignment order"
+    );
+
+    for (at, expected) in [(2, "black"), (3, "magenta"), (4, "green")] {
+        let who = connection(&format!("socket-{at}"));
+        assert_eq!(
+            join(&mut relay, &who, &match_id, &at.to_string(), "Joiner"),
+            None
+        );
+        assert_eq!(
+            colours_of(&relay, &match_id).last().map(String::as_str),
+            Some(expected),
+            "seat {at} should be given {expected}"
+        );
+    }
+}
+
+/// `A player can change their seat's colour until the match starts`.
+#[test]
+fn a_seat_can_change_its_colour_before_the_match_starts() {
+    let mut relay = relay();
+    let alice = connection("alice");
+    let match_id = host(&mut relay, &alice);
+    let bob = connection("bob");
+    assert_eq!(join(&mut relay, &bob, &match_id, "2", "Bob"), None);
+
+    let outcome = recolour(&mut relay, &alice, &match_id, "teal");
+    assert_eq!(outcome.refused, None);
+    assert_eq!(
+        colours_of(&relay, &match_id),
+        vec!["teal".to_string(), "black".to_string()],
+        "the host's seat changed and nobody else's did"
+    );
+    // `A lobby shows each seat's colour`, which needs everybody told rather than just the
+    // seat that asked.
+    let told: Vec<ConnectionId> = outcome
+        .sends
+        .iter()
+        .map(|(connection, _)| connection.clone())
+        .collect();
+    assert!(told.contains(&alice) && told.contains(&bob), "{told:?}");
+}
+
+/// Choosing the colour you already hold is not a collision with yourself.
+///
+/// The same answer `host` gives a repeated host and `join` gives a returning player: a
+/// message that asks for the state it is already in succeeds.
+#[test]
+fn choosing_the_colour_you_already_hold_succeeds() {
+    let mut relay = relay();
+    let alice = connection("alice");
+    let match_id = host(&mut relay, &alice);
+    assert_eq!(
+        recolour(&mut relay, &alice, &match_id, "white").refused,
+        None
+    );
+}
+
+/// `A colour another player has chosen cannot be chosen`.
+#[test]
+fn a_colour_another_seat_holds_is_refused() {
+    let mut relay = relay();
+    let alice = connection("alice");
+    let match_id = host(&mut relay, &alice);
+    let bob = connection("bob");
+    assert_eq!(join(&mut relay, &bob, &match_id, "2", "Bob"), None);
+
+    // Bob was given black; Alice holds white and asks for his.
+    assert_eq!(
+        recolour(&mut relay, &alice, &match_id, "black").refused,
+        Some(Refused::ColourTaken)
+    );
+    assert_eq!(
+        colours_of(&relay, &match_id),
+        vec!["white".to_string(), "black".to_string()],
+        "a refused change leaves nothing behind"
+    );
+}
+
+/// `A player cannot change their seat's colour once the match has started`.
+#[test]
+fn a_colour_cannot_be_changed_once_the_match_has_started() {
+    let mut relay = relay();
+    let alice = connection("alice");
+    let match_id = host(&mut relay, &alice);
+    assert_eq!(
+        join(&mut relay, &connection("bob"), &match_id, "2", "Bob"),
+        None
+    );
+    relay.receive(
+        &alice,
+        Message::Start {
+            match_id: match_id.clone(),
+        },
+        moment(),
+    );
+    assert_eq!(
+        recolour(&mut relay, &alice, &match_id, "teal").refused,
+        Some(Refused::AlreadyStarted)
+    );
+}
+
+/// A connection holding no seat in the match cannot colour anything in it.
+#[test]
+fn a_colour_change_from_outside_the_match_is_refused() {
+    let mut relay = relay();
+    let match_id = host(&mut relay, &connection("alice"));
+    assert_eq!(
+        recolour(&mut relay, &connection("stranger"), &match_id, "teal").refused,
+        Some(Refused::NotInThisMatch)
+    );
+}
+
+/// The seat's colour is the last change for it, over a log with two.
+///
+/// The fold rather than the message: a reader that took the first colour, or that applied
+/// a change to the wrong seat, passes every test above and fails this one.
+#[test]
+fn a_seat_wears_the_last_colour_it_chose() {
+    let mut relay = relay();
+    let alice = connection("alice");
+    let match_id = host(&mut relay, &alice);
+    assert_eq!(
+        join(&mut relay, &connection("bob"), &match_id, "2", "Bob"),
+        None
+    );
+    for colour in ["teal", "yellow", "orchid"] {
+        assert_eq!(
+            recolour(&mut relay, &alice, &match_id, colour).refused,
+            None
+        );
+    }
+    assert_eq!(
+        colours_of(&relay, &match_id),
+        vec!["orchid".to_string(), "black".to_string()]
+    );
+}
+
+fn recolour<L: Log, C: Connections>(
+    relay: &mut Relay<L, C>,
+    who: &ConnectionId,
+    match_id: &MatchId,
+    colour: &str,
+) -> Outcome {
+    relay.receive(
+        who,
+        Message::Colour {
+            match_id: match_id.clone(),
+            colour: colour.to_string(),
+        },
+        moment(),
+    )
+}
+
+/// Each seat's colour as the log says, in seat order.
+fn colours_of<L: Log, C: Connections>(relay: &Relay<L, C>, match_id: &MatchId) -> Vec<String> {
+    let mut colours: Vec<String> = Vec::new();
+    for event in relay.log().read(match_id).events {
+        match event {
+            Event::Join { seat, colour, .. } => {
+                let at = seat.0 as usize;
+                if colours.len() <= at {
+                    colours.resize(at + 1, String::new());
+                }
+                colours[at] = colour;
+            }
+            Event::Colour { seat, colour } => {
+                if let Some(held) = colours.get_mut(seat.0 as usize) {
+                    *held = colour;
+                }
+            }
+            _ => {}
+        }
+    }
+    colours
+}
+
+/// A colour somebody *changed into* is taken, not only one they were given.
+///
+/// The guard reads the folded view, so this is the test that fails if the fold ignores
+/// `Event::Colour` — which it did until it was told to apply it. Every test above passes
+/// against a fold that drops the event, because they all read the log directly.
+#[test]
+fn a_colour_somebody_changed_into_is_taken_too() {
+    let mut relay = relay();
+    let alice = connection("alice");
+    let match_id = host(&mut relay, &alice);
+    let bob = connection("bob");
+    assert_eq!(join(&mut relay, &bob, &match_id, "2", "Bob"), None);
+
+    assert_eq!(
+        recolour(&mut relay, &alice, &match_id, "teal").refused,
+        None
+    );
+    assert_eq!(
+        recolour(&mut relay, &bob, &match_id, "teal").refused,
+        Some(Refused::ColourTaken),
+        "teal is Alice's now, however she came by it"
+    );
+    // And the colour she gave up is free, which a fold that only ever added would refuse.
+    assert_eq!(
+        recolour(&mut relay, &bob, &match_id, "white").refused,
+        None,
+        "white is nobody's once Alice has left it"
+    );
 }

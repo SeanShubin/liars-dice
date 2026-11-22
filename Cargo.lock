@@ -6464,6 +6464,7 @@ dependencies = [
  "ai",
  "egui 0.37.0",
  "integrity",
+ "protocol",
  "readout",
  "rules",
 ]

@@ -78,7 +78,6 @@ fn two_seats_play_a_whole_match_through_the_wire() {
             id: "host-id".to_string(),
             name: "Host".to_string(),
         },
-        "red",
         "one",
         Box::new(Ai),
     )
@@ -114,7 +113,6 @@ fn two_seats_play_a_whole_match_through_the_wire() {
                     id: "guest-id".to_string(),
                     name: "Guest".to_string(),
                 },
-                "blue",
                 match_id.clone(),
                 Box::new(Ai),
             )
@@ -220,7 +218,7 @@ fn two_seats_play_a_whole_match_through_the_wire() {
     assert_eq!(
         wire.relay.view(&match_id).ending,
         Some(seat::Ending::Complete),
-        "the relay never learned the match was over, so it would sit in the lobby"
+        "the relay never learned the match was over, so it would sit in the dashboard"
     );
     // And both seats were told, which is what makes the ending something a screen can
     // name rather than something each client worked out privately.

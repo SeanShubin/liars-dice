@@ -12,3 +12,4 @@ readout.workspace = true
 
 [dev-dependencies]
 integrity.workspace = true
+protocol.workspace = true

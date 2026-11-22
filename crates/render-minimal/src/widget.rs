@@ -139,6 +139,49 @@ pub fn claim_box(ui: &mut Ui, swatch: usize, claim: Option<Claim>) {
     );
 }
 
+/// The palette with the colours somebody else holds unavailable, for choosing in a lobby.
+///
+/// Returns the index clicked, or `None`. A return value rather than a `&mut usize`,
+/// because the colour of a seat lives in the log and not on the page: a picker that wrote
+/// into a local field would be a second answer to *what colour am I*, and the two would
+/// disagree for as long as the relay took to agree.
+///
+/// `A colour another player has chosen cannot be chosen`, so a taken swatch is drawn
+/// disabled rather than refused after the fact.
+pub fn palette_choice(ui: &mut Ui, chosen: Option<usize>, taken: &[usize]) -> Option<usize> {
+    let mut picked = None;
+    egui::Grid::new("palette-choice")
+        .spacing([6.0, 6.0])
+        .show(ui, |ui| {
+            for (index, swatch) in PALETTE.iter().enumerate() {
+                let selected = Some(index) == chosen;
+                let held = taken.contains(&index);
+                let size = if selected { 52.0 } else { 44.0 };
+                let hint = if held {
+                    format!("{} — taken", swatch.name)
+                } else {
+                    swatch.name.to_string()
+                };
+                if ui
+                    .add_enabled(
+                        !held && !selected,
+                        Button::new("")
+                            .fill(colour_of(index))
+                            .min_size([size, size].into()),
+                    )
+                    .on_hover_text(hint)
+                    .clicked()
+                {
+                    picked = Some(index);
+                }
+                if index % 5 == 4 {
+                    ui.end_row();
+                }
+            }
+        });
+    picked
+}
+
 /// The whole palette as swatches, with the chosen one drawn larger.
 ///
 /// Used wherever a colour is picked: a desktop game's setup screen, and a hotseat lobby

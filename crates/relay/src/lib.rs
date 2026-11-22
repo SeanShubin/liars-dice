@@ -90,8 +90,26 @@ const MAX_ATTEMPTS: usize = 16;
 struct Sitting {
     account: Account,
     name: String,
-    colour: String,
     version: u32,
+}
+
+/// The colours the seats of a match hold.
+fn taken_colours(view: &MatchView) -> Vec<&str> {
+    view.seats.iter().map(|seat| seat.colour.as_str()).collect()
+}
+
+/// The colour a seat is given when it is taken.
+///
+/// `A seat is given a colour when it is taken`, from `protocol::ASSIGNMENT_ORDER`, which
+/// is a declared constant precisely so that no floating point decides the content of an
+/// event. Falls back to the first palette entry if every colour is somehow taken, which
+/// needs twenty seats and so cannot happen in a match: a fallback rather than a panic,
+/// because a seat with a repeated colour is a worse match and a panicking relay is a
+/// worse service.
+fn given_colour(taken: &[&str]) -> String {
+    protocol::free_colour(taken)
+        .unwrap_or(protocol::COLOURS[0])
+        .to_string()
 }
 
 /// One match's log as a message is being decided against it.
@@ -154,7 +172,7 @@ impl Working {
 /// What a read of one match's log returned.
 ///
 /// The events, and when the relay recorded the last of them. Both from one read, because
-/// a second method would be a second query per match — which is what the lobby pass can
+/// a second method would be a second query per match — which is what the dashboard pass can
 /// least afford — and a second reader of the same rows, which is a second thing to get
 /// wrong.
 ///
@@ -197,7 +215,7 @@ pub trait Log {
 
     fn read(&self, match_id: &MatchId) -> Recording;
 
-    /// Every match the log holds, for the lobby list.
+    /// Every match the log holds, for the dashboard list.
     fn matches(&self) -> Vec<MatchId>;
 
     /// Every match this account has ever joined, for finding the one it is in.
@@ -205,7 +223,7 @@ pub trait Log {
     /// `account` is as `protocol::account_text` writes it. The default answers *all of
     /// them*, which is correct and is what an in-memory log can afford; `DynamoLog`
     /// overrides it with an index, because asking about every match on the path of every
-    /// host and every join would put the hot path on the lobby's cost.
+    /// host and every join would put the hot path on the dashboard's cost.
     ///
     /// An override may only ever narrow this, and cannot change the answer: the index is
     /// derived by the database from the log's own rows, so it holds exactly the matches an
@@ -292,7 +310,6 @@ impl<T: Connections + ?Sized> Connections for &mut T {
 pub enum Message {
     Host {
         who: Who,
-        colour: String,
         version: u32,
         /// Which request this is, so the match it makes has a name.
         ///
@@ -304,8 +321,12 @@ pub enum Message {
     Join {
         match_id: MatchId,
         who: Who,
-        colour: String,
         version: u32,
+    },
+    /// A seat chooses the colour of its dice, which it may do until the match starts.
+    Colour {
+        match_id: MatchId,
+        colour: String,
     },
     Bar {
         match_id: MatchId,
@@ -376,6 +397,7 @@ impl Message {
             // Hosting names the match it is about to make, which does not exist yet.
             Message::Host { .. } | Message::List { .. } => None,
             Message::Join { match_id, .. }
+            | Message::Colour { match_id, .. }
             | Message::Bar { match_id, .. }
             | Message::Lift { match_id, .. }
             | Message::Start { match_id }
@@ -400,6 +422,7 @@ impl Message {
         match self {
             Message::Host { .. }
             | Message::Join { .. }
+            | Message::Colour { .. }
             | Message::Bar { .. }
             | Message::Lift { .. }
             | Message::Start { .. }
@@ -495,7 +518,7 @@ impl Outcome {
     }
 }
 
-/// A match in the lobby list.
+/// A match in the dashboard list.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Listed {
     pub match_id: MatchId,
@@ -504,7 +527,7 @@ pub struct Listed {
     /// Whether the asking account could join it right now.
     ///
     /// The refusal `join` would give, inverted — not a second opinion about it. Two copies
-    /// of *can this be joined* would eventually disagree, and then the lobby offers a match
+    /// of *can this be joined* would eventually disagree, and then the dashboard offers a match
     /// that refuses you with the bug in neither place. See `why_not_joinable`.
     pub joinable: bool,
     /// Whether the asking account already holds a seat in it.
@@ -515,7 +538,7 @@ pub struct Listed {
     pub mine: bool,
     /// Whether every seat taken so far is held by an authenticated player.
     ///
-    /// Derived in the same fold that produces the host and the player count, so the lobby
+    /// Derived in the same fold that produces the host and the player count, so the dashboard
     /// can say which matches are which before anybody joins one. True of a match that is
     /// still filling says only that it is ranked *so far*: `Whether a match is ranked is
     /// settled when it starts`, and one guest joining before then settles it the other
@@ -615,7 +638,7 @@ impl<L: Log, C: Connections> Relay<L, C> {
                 continue;
             }
             // A match with no host is one whose log is not a match at all. A started
-            // one is listed now — `A started match is listed` — because the lobby shows
+            // one is listed now — `A started match is listed` — because the dashboard shows
             // what is going on and not only what is on offer.
             if view.host().is_none() {
                 continue;
@@ -675,7 +698,7 @@ impl<L: Log, C: Connections> Relay<L, C> {
     /// Why this account cannot join this match, or `None` if it can.
     ///
     /// The one answer to that question. `join` returns what this returns and the listing
-    /// sets `joinable` from whether it returned anything, so the flag in the lobby *is*
+    /// sets `joinable` from whether it returned anything, so the flag in the dashboard *is*
     /// the refusal rather than a second opinion about it — which is the only version of
     /// this that cannot drift.
     ///
@@ -771,7 +794,6 @@ impl<L: Log, C: Connections> Relay<L, C> {
         match message {
             Message::Host {
                 who,
-                colour,
                 version,
                 nonce,
             } => match self.identify(who, now) {
@@ -780,7 +802,6 @@ impl<L: Log, C: Connections> Relay<L, C> {
                     Sitting {
                         account,
                         name,
-                        colour,
                         version,
                     },
                     nonce,
@@ -791,7 +812,6 @@ impl<L: Log, C: Connections> Relay<L, C> {
             Message::Join {
                 match_id,
                 who,
-                colour,
                 version,
             } => match self.identify(who, now) {
                 Ok((account, name)) => self.join(
@@ -800,13 +820,13 @@ impl<L: Log, C: Connections> Relay<L, C> {
                     Sitting {
                         account,
                         name,
-                        colour,
                         version,
                     },
                     now,
                 ),
                 Err(why) => Ok(Outcome::refused(why)),
             },
+            Message::Colour { match_id, colour } => self.recolour(from, match_id, colour, now),
             Message::Bar { match_id, seat } => self.bar(from, match_id, seat, true, now),
             Message::Lift { match_id, seat } => self.bar(from, match_id, seat, false, now),
             Message::Start { match_id } => self.start(from, match_id, now),
@@ -905,7 +925,6 @@ impl<L: Log, C: Connections> Relay<L, C> {
         let Sitting {
             account,
             name,
-            colour,
             version,
         } = sitting;
         if version != PROTOCOL_VERSION {
@@ -941,7 +960,10 @@ impl<L: Log, C: Connections> Relay<L, C> {
         work.push(Event::Join {
             seat,
             name,
-            colour,
+            // The first seat of a new match, so nothing is taken and this is the first
+            // colour in the assignment order. Expected to be changed in the lobby, which
+            // is the only screen that can show what is free.
+            colour: given_colour(&[]),
             account: account.clone(),
         });
         work.push(Event::Host { seat });
@@ -997,7 +1019,6 @@ impl<L: Log, C: Connections> Relay<L, C> {
         let Sitting {
             account,
             name,
-            colour,
             version,
         } = sitting;
         let mut work = self.open(&match_id, now);
@@ -1011,9 +1032,9 @@ impl<L: Log, C: Connections> Relay<L, C> {
                 yours: version,
             }));
         }
-        // Every guard but the colour, from the same function the listing asks. The version
-        // is above because it is a property of the client rather than of the match, and a
-        // listing produced by this relay always matches it.
+        // Every guard, from the same function the listing asks. The version is above
+        // because it is a property of the client rather than of the match, and a listing
+        // produced by this relay always matches it.
         if let Some(why) = self.why_not_joinable(&match_id, &view, Some(&account)) {
             return Ok(Outcome::refused(why));
         }
@@ -1023,13 +1044,10 @@ impl<L: Log, C: Connections> Relay<L, C> {
         // up rather than seated twice.
         //
         // Before the guards below on purpose. Every one of them is about taking a seat:
-        // a match that has started is one they are already in, the match being full counts
-        // them, and the colour that is taken is their own.
+        // a match that has started is one they are already in, and the match being full
+        // counts them.
         if view.seat_of_account(&account).is_some() {
             return self.resume(from, match_id, account, now);
-        }
-        if view.seats.iter().any(|seat| seat.colour == colour) {
-            return Ok(Outcome::refused(Refused::ColourTaken));
         }
         // Every guard above read the same snapshot this event is appended against, so the
         // seat, the colour, the player count and the started flag are all decided by the
@@ -1038,13 +1056,49 @@ impl<L: Log, C: Connections> Relay<L, C> {
         let event = Event::Join {
             seat,
             name,
-            colour,
+            colour: given_colour(&taken_colours(&view)),
             account,
         };
         work.push(event.clone());
         self.commit(&work)?;
         self.connections
             .attach(&match_id, from.clone(), seat, Role::Player);
+        Ok(Outcome {
+            refused: None,
+            sends: self.to_everyone(&match_id, event),
+            created: None,
+            listed: None,
+        })
+    }
+
+    /// `A player can change their seat's colour until the match starts`.
+    fn recolour(
+        &mut self,
+        from: &ConnectionId,
+        match_id: MatchId,
+        colour: String,
+        now: Moment,
+    ) -> Result<Outcome, Stale> {
+        let mut work = self.open(&match_id, now);
+        let view = work.view();
+        let Some(mine) = self.seat_of(&match_id, from) else {
+            return Ok(Outcome::refused(Refused::NotInThisMatch));
+        };
+        if view.started {
+            return Ok(Outcome::refused(Refused::AlreadyStarted));
+        }
+        // *Another* seat. Re-choosing the colour already held is not a collision with
+        // oneself, and answering a repeat with success is what `host` and `join` do.
+        if view
+            .seats
+            .iter()
+            .any(|seat| seat.seat != mine && seat.colour == colour)
+        {
+            return Ok(Outcome::refused(Refused::ColourTaken));
+        }
+        let event = Event::Colour { seat: mine, colour };
+        work.push(event.clone());
+        self.commit(&work)?;
         Ok(Outcome {
             refused: None,
             sends: self.to_everyone(&match_id, event),
@@ -1264,7 +1318,7 @@ impl<L: Log, C: Connections> Relay<L, C> {
         let mut sends = self.to_everyone(&match_id, event);
         if cancelled {
             // Before the detach, so whoever was waiting in the match is told it is over
-            // rather than left watching a lobby entry that has already gone.
+            // rather than left watching a dashboard entry that has already gone.
             sends.extend(self.to_everyone(&match_id, Event::Cancel { seat }));
         }
         self.connections.detach(from);
@@ -1397,8 +1451,8 @@ impl<L: Log, C: Connections> Relay<L, C> {
 
     /// What is open to join.
     ///
-    /// Reads everything, which is the reason the lobby has a cost worth measuring — see
-    /// `Measuring what the lobby costs` in `relay-service.md`. There is no decision to
+    /// Reads everything, which is the reason the dashboard has a cost worth measuring — see
+    /// `Measuring what the dashboard costs` in `relay-service.md`. There is no decision to
     /// invalidate, so it cannot be stale: a listing is true of the moment it was read and
     /// a match may fill before anybody acts on it, which is what the refusals on `join`
     /// are for.

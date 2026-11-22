@@ -29,11 +29,11 @@ use eframe::egui;
 use protocol::Who;
 use render_minimal::palette::{PALETTE, index_of};
 use render_minimal::{
-    Seating, calls, dialler, die, history, odds, opening_claim, palette_picker, ranking, standing,
+    Seating, calls, dialler, die, history, odds, opening_claim, palette_choice, ranking, standing,
     table, tap, verdict,
 };
 use rules::{Call, Claim, View};
-use seat::{Ending, Listed, MatchId, Seated, Stopped, lobby};
+use seat::{Ending, Listed, MatchId, Player, Seated, Stopped, dashboard};
 
 /// How long another seat may go quiet before the screen says so.
 ///
@@ -307,11 +307,11 @@ struct Stance {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Screen {
     /// A name, a colour, and a relay. Nothing has been connected to yet.
-    Entry,
+    SignIn,
     /// Connected and not at a match: what is open, and the two ways to be at one.
-    Lobby,
+    Dashboard,
     /// In a match that has not started.
-    Waiting,
+    Lobby,
     /// This seat's own view, with the dialler.
     Playing,
     /// This seat's own view, with nothing to press.
@@ -328,20 +328,20 @@ enum Screen {
 /// holds dice, and the two would disagree.
 fn screen_for(connected: bool, stance: Option<Stance>, quiet: bool) -> Screen {
     let Some(stance) = stance else {
-        // A socket and no seat is the lobby. The two are separate because the lobby is
+        // A socket and no seat is the dashboard. The two are separate because the dashboard is
         // what a client does *before* it knows whether it will host, join, or just look,
         // and that question is asked over the socket it will go on to play through.
         return if connected {
-            Screen::Lobby
+            Screen::Dashboard
         } else {
-            Screen::Entry
+            Screen::SignIn
         };
     };
     if stance.over {
         return Screen::Over;
     }
     if !stance.started {
-        return Screen::Waiting;
+        return Screen::Lobby;
     }
     // A seat is never waiting on itself, however long it has sat there: the match is
     // stopped at this screen because nobody has pressed anything on it.
@@ -353,6 +353,25 @@ fn screen_for(connected: bool, stance: Option<Stance>, quiet: bool) -> Screen {
     } else {
         Screen::Watching
     }
+}
+
+/// What the lobby's colour picker shows: this seat's colour, and the ones it may not have.
+///
+/// A free function of the roster rather than four lines inside the frame loop, for the
+/// reason `screen_for` is one: a decision inside `ui` can only be tested by running a
+/// frame loop, and this one has an off-by-one in it waiting to happen — a seat must not
+/// count its own colour as taken, or nobody could ever keep the colour they have.
+fn choosable(roster: &[Player], mine: Option<usize>) -> (Option<usize>, Vec<usize>) {
+    let chosen = mine
+        .and_then(|at| roster.get(at))
+        .and_then(|player| index_of(&player.colour));
+    let taken = roster
+        .iter()
+        .enumerate()
+        .filter(|(at, _)| Some(*at) != mine)
+        .filter_map(|(_, player)| index_of(&player.colour))
+        .collect();
+    (chosen, taken)
 }
 
 /// Whether the call buttons are offered.
@@ -493,7 +512,6 @@ struct Page {
     /// identity, which on the unranked side of the line is not worth paying anything to
     /// avoid.
     guest: String,
-    colour: usize,
     /// The name the host gives the match, which is what its identity is derived from. Host
     /// twice under one name and the relay answers with the match that already exists, which
     /// is `A repeated request to host creates no second match` made useful rather than
@@ -501,7 +519,7 @@ struct Page {
     match_name: String,
     /// The id pasted in to join somebody else's match.
     paste: String,
-    /// What to tell the person on the entry screen.
+    /// What to tell the person on the sign-in screen.
     trouble: Option<String>,
 
     /// Which player this tab is, if it is not the browser's usual one.
@@ -515,7 +533,7 @@ struct Page {
     /// What is open to join, as the relay last said. Stale by the time it is drawn, which
     /// is why joining one can still be refused.
     open: Vec<Listed>,
-    /// Whether the relay has answered the lobby yet, so an empty list can be told from a
+    /// Whether the relay has answered the dashboard yet, so an empty list can be told from a
     /// question that has not come back.
     answered: bool,
     wire: Option<Box<dyn Wire>>,
@@ -535,7 +553,7 @@ struct Page {
     /// Whether this page has already acted on a listing that named a match of its own.
     ///
     /// Once per socket. Without it, every listing that arrives while the page is sitting
-    /// in the lobby would resume again, and a listing arrives whenever anybody asks.
+    /// in the dashboard would resume again, and a listing arrives whenever anybody asks.
     returned: bool,
     /// What the page knows about signing in.
     signin: Signin,
@@ -563,7 +581,6 @@ impl Page {
             returned: false,
             signin: Signin::Asking,
             from_exchange: FromExchange::new(waker.clone()),
-            colour: 1,
             match_name: String::new(),
             paste: String::new(),
             trouble: None,
@@ -590,7 +607,7 @@ impl Page {
     ///
     /// What this page says it is.
     ///
-    /// A guest: the id this browser kept, and the name typed on the entry screen. Not an
+    /// A guest: the id this browser kept, and the name typed on the sign-in screen. Not an
     /// `Account` — a client does not send one. It says who it is and the relay decides what
     /// that means, which is why a page cannot claim a Discord account without a ticket.
     fn who(&self) -> Who {
@@ -674,7 +691,7 @@ impl Page {
 
     /// Open a socket and ask what is open.
     ///
-    /// The lobby's question is the opening frame, so a client is connected before it has
+    /// The dashboard's question is the opening frame, so a client is connected before it has
     /// decided anything. Hosting and joining both happen later on this same socket.
     fn connect(&mut self, now: f64) {
         self.trouble = None;
@@ -687,7 +704,7 @@ impl Page {
         self.open = Vec::new();
         self.answered = false;
         self.heard = now;
-        let asking = lobby::ask(&self.who());
+        let asking = dashboard::ask(&self.who());
         match socket::open(&self.relay, &asking, &self.arrivals, &self.mishap) {
             Ok(wire) => self.wire = Some(wire),
             Err(why) => {
@@ -710,7 +727,7 @@ impl Page {
     /// Ask again what is open. A listing is only true of the moment it was read.
     fn look_again(&mut self) {
         self.answered = false;
-        let asking = lobby::ask(&self.who());
+        let asking = dashboard::ask(&self.who());
         self.say(vec![asking]);
     }
 
@@ -771,11 +788,11 @@ impl Page {
     ///
     /// A socket and not a seat. The two things that need a frame when nothing is happening
     /// are the keepalive and noticing that the relay has gone [`QUIET`], and both of those
-    /// last exactly as long as the socket does — a page waiting in the lobby holds an open
+    /// last exactly as long as the socket does — a page sitting on the dashboard holds an open
     /// socket and must go on saying so, or the ten minute idle timeout takes it.
     ///
     /// A page with no socket owes nothing on a clock and sleeps until something wakes it,
-    /// which is why the entry screen does not spin while it waits for the exchange.
+    /// which is why the sign-in screen does not spin while it waits for the exchange.
     fn frame_owed(&self) -> Option<Duration> {
         self.wire.is_some().then_some(TICK)
     }
@@ -792,9 +809,9 @@ impl Page {
         }
         while let Some(frame) = self.arrivals.take() {
             self.heard = now;
-            // The lobby's answer is not about any seat, and can arrive after one has been
+            // The dashboard's answer is not about any seat, and can arrive after one has been
             // taken, because the socket that asked is the socket that sat down.
-            if let Some(open) = lobby::listing(&frame) {
+            if let Some(open) = dashboard::listing(&frame) {
                 self.open = open;
                 self.answered = true;
                 self.return_to_my_match();
@@ -808,7 +825,7 @@ impl Page {
                 Err(Stopped::Over) => return,
                 Err(why) => {
                     // A refusal is the relay declining a message, not the socket dying.
-                    // Going back to the lobby keeps the connection and says what happened.
+                    // Going back to the dashboard keeps the connection and says what happened.
                     self.leave_seat(Some(why.to_string()));
                     return;
                 }
@@ -939,9 +956,9 @@ impl Page {
         let quiet = now - self.heard > QUIET;
         let stance = self.stance();
         match screen_for(self.wire.is_some(), stance, quiet) {
-            Screen::Entry => self.entry(ui, now),
-            Screen::Lobby => self.lobby(ui),
-            Screen::Waiting => self.waiting(ui, now),
+            Screen::SignIn => self.sign_in(ui, now),
+            Screen::Dashboard => self.dashboard(ui),
+            Screen::Lobby => self.lobby(ui, now),
             // The three table screens differ in what they draw and not in what they are,
             // so they are one function given the same facts the choice was made from.
             Screen::Playing | Screen::Watching => {
@@ -973,7 +990,7 @@ impl Page {
     /// here, so a sign-in button is never shown by a page that cannot complete the flow —
     /// `A missing Discord config disables login rather than failing`, from the one side of
     /// it a person can see.
-    fn signing_in(&mut self, ui: &mut egui::Ui) {
+    fn with_discord(&mut self, ui: &mut egui::Ui) {
         ui.label(egui::RichText::new("Signing in").strong());
         match self.signin.clone() {
             Signin::Asking => {
@@ -1018,11 +1035,11 @@ impl Page {
     }
 
     /// A name, a colour, and either host or join.
-    fn entry(&mut self, ui: &mut egui::Ui, now: f64) {
+    fn sign_in(&mut self, ui: &mut egui::Ui, now: f64) {
         ui.heading("Liars Dice");
         ui.label(
-            "A match over the network. One seat per tab, one person per seat, and the \
-             dice are dealt by a relay that cannot see them either.",
+            "A match over the network. One person per seat, and the dice are dealt by a \
+             relay that cannot see them either.",
         );
         ui.separator();
 
@@ -1031,7 +1048,7 @@ impl Page {
             ui.add_space(6.0);
         }
 
-        self.signing_in(ui);
+        self.with_discord(ui);
 
         ui.add_space(8.0);
         ui.separator();
@@ -1062,14 +1079,6 @@ impl Page {
                 );
             }
         }
-
-        ui.add_space(8.0);
-        ui.label(egui::RichText::new("Your dice").strong());
-        palette_picker(ui, &mut self.colour);
-        ui.horizontal(|ui| {
-            die(ui, self.colour, Some(5));
-            ui.label(PALETTE[self.colour].name);
-        });
 
         ui.add_space(8.0);
         ui.separator();
@@ -1104,16 +1113,15 @@ impl Page {
     }
 
     /// Connected, and not at a match: what is open, and the two ways to be at one.
-    fn lobby(&mut self, ui: &mut egui::Ui) {
+    fn dashboard(&mut self, ui: &mut egui::Ui) {
         ui.heading("Matches");
         if let Some(trouble) = &self.trouble {
             ui.label(egui::RichText::new(trouble).strong());
         }
         ui.label(
             egui::RichText::new(format!(
-                "You are {}, playing {}.",
-                self.shown_name(),
-                PALETTE[self.colour].name
+                "You are {}. Your dice get their colour in the match.",
+                self.shown_name()
             ))
             .size(12.0),
         );
@@ -1233,7 +1241,6 @@ impl Page {
         if hosting {
             let seated = Seated::hosting(
                 self.who(),
-                PALETTE[self.colour].name,
                 self.match_name.trim(),
                 Box::new(self.hand.clone()),
             );
@@ -1242,12 +1249,7 @@ impl Page {
                 None => self.trouble = Some(UNREADABLE_TICKET.to_string()),
             }
         } else if let Some(match_id) = joining {
-            let seated = Seated::joining(
-                self.who(),
-                PALETTE[self.colour].name,
-                match_id,
-                Box::new(self.hand.clone()),
-            );
+            let seated = Seated::joining(self.who(), match_id, Box::new(self.hand.clone()));
             match seated {
                 Some(seated) => self.sit(seated),
                 None => self.trouble = Some(UNREADABLE_TICKET.to_string()),
@@ -1256,12 +1258,16 @@ impl Page {
     }
 
     /// In a match that has not started.
-    fn waiting(&mut self, ui: &mut egui::Ui, now: f64) {
+    fn lobby(&mut self, ui: &mut egui::Ui, now: f64) {
         let Some(seated) = &self.seated else {
             return;
         };
+        // Read once, into owned values, before anything is sent. This screen both reads
+        // the seat and speaks on it, and a borrow cannot be held across the sending.
         let host = seated.host();
         let roster = seated.roster();
+        let mine = seated.seat().map(|seat| seat.0 as usize);
+        let named = seated.match_id();
         let enough = roster.iter().filter(|player| !player.left).count() >= 2;
 
         ui.heading(if host {
@@ -1270,11 +1276,11 @@ impl Page {
             "Waiting for the host"
         });
 
-        if let Some(match_id) = seated.match_id() {
+        if let Some(match_id) = named {
             ui.add_space(6.0);
             ui.label(egui::RichText::new("The id to pass to somebody").strong());
             // A field rather than a label: a label cannot be selected, and this has to be
-            // copied out of the page by hand until the lobby exists.
+            // copied out of the page by hand until the dashboard exists.
             let mut shown = match_id.0.clone();
             ui.add_sized(
                 [340.0, 30.0],
@@ -1300,11 +1306,33 @@ impl Page {
                 }
             });
 
+        // `A lobby is the only screen that offers to change a colour`, and the only one
+        // that can: what is free is a property of the match, which nothing before this
+        // screen knows.
+        ui.add_space(8.0);
+        ui.separator();
+        ui.label(egui::RichText::new("Your dice").strong());
+        ui.label(
+            egui::RichText::new(
+                "Yours until the match starts. The colours somebody else has are not                  offered.",
+            )
+            .size(12.0),
+        );
+        let (chosen, taken) = choosable(&roster, mine);
+        let recoloured = palette_choice(ui, chosen, &taken).and_then(|index| {
+            self.seated
+                .as_ref()
+                .and_then(|seated| seated.recolour(PALETTE[index].name))
+        });
+        if let Some(frame) = recoloured {
+            self.say(vec![frame]);
+        }
+
         ui.add_space(8.0);
         ui.separator();
         let start = if host {
             if tap(ui, "Start the match", enough) {
-                seated.start()
+                self.seated.as_ref().and_then(Seated::start)
             } else {
                 None
             }
@@ -1564,7 +1592,7 @@ impl Page {
             }
         });
         if done {
-            // Both buttons go back to the lobby, and say so differently on purpose: one
+            // Both buttons go back to the dashboard, and say so differently on purpose: one
             // person is going to host or join another and the other is done. Neither needs
             // the match they have just finished, and neither needs the socket closed —
             // leaving the relay is its own button, one screen on.
@@ -2226,7 +2254,7 @@ mod tests {
         }
     }
 
-    /// A page holding an open socket, which is the state the lobby screen is in.
+    /// A page holding an open socket, which is the state the dashboard screen is in.
     fn connected(page: &mut Page) -> Rc<RefCell<Vec<String>>> {
         let said = Rc::new(RefCell::new(Vec::new()));
         page.wire = Some(Box::new(Recorder(said.clone())));
@@ -2374,7 +2402,7 @@ mod tests {
 
     /// `An unattended client stays able to act`.
     ///
-    /// A page waiting in the lobby holds an open socket and no seat, and the keepalive
+    /// A page sitting on the dashboard holds an open socket and no seat, and the keepalive
     /// that stops API Gateway dropping it runs once per frame. Asking for frames only
     /// while seated is how that keepalive came to be unreachable on the one screen people
     /// wait on.
@@ -2493,8 +2521,8 @@ mod tests {
 
     #[test]
     fn with_no_seat_there_is_nothing_to_show_but_the_entry() {
-        assert_eq!(screen_for(false, None, false), Screen::Entry);
-        assert_eq!(screen_for(false, None, true), Screen::Entry);
+        assert_eq!(screen_for(false, None, false), Screen::SignIn);
+        assert_eq!(screen_for(false, None, true), Screen::SignIn);
     }
 
     /// A finished match shows its result whatever else is true of it, including when it is
@@ -2512,7 +2540,7 @@ mod tests {
         }
     }
 
-    /// Before the start there is no view to draw from, so nothing but Waiting can be shown.
+    /// Before the start there is no view to draw from, so nothing but the lobby can be shown.
     #[test]
     fn a_match_that_has_not_started_is_waited_for() {
         for stance in every_stance()
@@ -2522,7 +2550,7 @@ mod tests {
             for quiet in [false, true] {
                 assert_eq!(
                     screen_for(true, Some(stance), quiet),
-                    Screen::Waiting,
+                    Screen::Lobby,
                     "{stance:?} quiet: {quiet}"
                 );
             }
@@ -2659,7 +2687,7 @@ mod tests {
         assert_ne!(one.who(), other.who());
     }
 
-    /// Outside a browser there is no socket, and the entry screen is told so rather than
+    /// Outside a browser there is no socket, and the sign-in screen is told so rather than
     /// the page pretending it reached the relay.
     #[test]
     fn without_a_browser_nothing_is_connected() {
@@ -2672,30 +2700,98 @@ mod tests {
         assert!(page.trouble.is_some(), "and the reason is on the screen");
         assert_eq!(
             screen_for(page.wire.is_some(), page.stance(), false),
-            Screen::Entry
+            Screen::SignIn
         );
     }
 
-    /// A socket and no seat is the lobby, whatever else is true, and no seat and no socket
+    fn seated_as(colours: &[&str]) -> Vec<Player> {
+        colours
+            .iter()
+            .map(|colour| Player {
+                name: "Somebody".to_string(),
+                colour: (*colour).to_string(),
+                left: false,
+            })
+            .collect()
+    }
+
+    /// A seat's own colour is shown as chosen and never counted as taken.
+    ///
+    /// The off-by-one this function exists to prevent: if a seat counted itself, the
+    /// colour it is wearing would be the one colour it could not keep, and the picker
+    /// would offer nineteen colours none of which is the current one.
+    #[test]
+    fn a_seat_does_not_hold_its_own_colour_against_itself() {
+        let roster = seated_as(&["white", "black", "magenta"]);
+        let (chosen, taken) = choosable(&roster, Some(1));
+        assert_eq!(chosen, index_of("black"));
+        assert_eq!(
+            taken,
+            vec![
+                index_of("white").expect("white"),
+                index_of("magenta").expect("magenta")
+            ]
+        );
+        assert!(
+            !taken.contains(&index_of("black").expect("black")),
+            "a seat must be able to keep the colour it has"
+        );
+    }
+
+    /// Every other seat's colour is taken, including one that has left.
+    ///
+    /// A seat that left still holds its colour in the log, and `A player who leaves a
+    /// match is eliminated` rather than un-joined, so the colour is not free to take.
+    #[test]
+    fn a_departed_seat_still_holds_its_colour() {
+        let mut roster = seated_as(&["white", "black"]);
+        roster[1].left = true;
+        let (_, taken) = choosable(&roster, Some(0));
+        assert_eq!(taken, vec![index_of("black").expect("black")]);
+    }
+
+    /// A colour the palette does not know is no reason to offer a swatch, or to hide one.
+    ///
+    /// Reachable from a log written by a client that sent something else, which the relay
+    /// does not police: it refuses a colour another seat holds and says nothing about what
+    /// a colour is. So this returns no choice rather than an index into nothing.
+    #[test]
+    fn a_colour_the_palette_does_not_know_chooses_nothing() {
+        let roster = seated_as(&["chartreuse", "black"]);
+        let (chosen, taken) = choosable(&roster, Some(0));
+        assert_eq!(chosen, None);
+        assert_eq!(taken, vec![index_of("black").expect("black")]);
+    }
+
+    /// Holding no seat yet, so nothing is chosen and everything anybody holds is taken.
+    #[test]
+    fn a_page_with_no_seat_has_no_colour_of_its_own() {
+        let roster = seated_as(&["white"]);
+        let (chosen, taken) = choosable(&roster, None);
+        assert_eq!(chosen, None);
+        assert_eq!(taken, vec![index_of("white").expect("white")]);
+    }
+
+    /// A socket and no seat is the dashboard, whatever else is true, and no seat and no socket
     /// is the entry. Nothing else distinguishes the two screens, which is why connecting
     /// is a step of its own rather than part of hosting.
     #[test]
-    fn a_socket_without_a_seat_is_the_lobby() {
+    fn a_socket_without_a_seat_is_the_dashboard() {
         for quiet in [false, true] {
-            assert_eq!(screen_for(true, None, quiet), Screen::Lobby);
-            assert_eq!(screen_for(false, None, quiet), Screen::Entry);
+            assert_eq!(screen_for(true, None, quiet), Screen::Dashboard);
+            assert_eq!(screen_for(false, None, quiet), Screen::SignIn);
         }
     }
 
     /// Being at a match beats being connected: a seat is always drawn as the seat it is,
-    /// never as the lobby it was reached from.
+    /// never as the dashboard it was reached from.
     #[test]
-    fn a_seat_is_never_drawn_as_the_lobby() {
+    fn a_seat_is_never_drawn_as_the_dashboard() {
         for stance in every_stance() {
             for quiet in [false, true] {
                 assert_ne!(
                     screen_for(true, Some(stance), quiet),
-                    Screen::Lobby,
+                    Screen::Dashboard,
                     "{stance:?} quiet: {quiet}"
                 );
             }

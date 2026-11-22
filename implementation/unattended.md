@@ -22,7 +22,7 @@ if self.seated.is_some() {
 }
 ```
 
-So an unseated page — the entry screen and the lobby — runs no frames at all unless a
+So an unseated page — the sign-in screen and the dashboard — runs no frames at all unless a
 person moves the mouse over it. Everything asynchronous lands in a cell and waits for a
 frame to drain it: `Arrivals` for relay frames, `Mishap` for a socket that failed, and
 `FromExchange` for the exchange's answer. Nothing drains, so nothing shows.
@@ -102,16 +102,16 @@ if self.wire.is_some() {
 A seat implies a socket, so this is strictly wider, and it is the right boundary: the two
 things that need a frame with nothing arriving — the keepalive and `quiet` — both exist
 exactly as long as the socket does. A page with no socket owes nothing on a clock and goes
-back to sleep, which is why this is not a busy loop on the entry screen.
+back to sleep, which is why this is not a busy loop on the sign-in screen.
 
-The entry screen is also the one place waiting on something with no socket at all: the
+The sign-in screen is also the one place waiting on something with no socket at all: the
 exchange's answer. That is covered by the wake and not by the clock, which is the whole
 point of having both.
 
 ### What this repairs that was already built
 
-The keepalive shipped with `lobby.md` and has never run on the lobby screen, because the
-lobby screen runs no frames. A page listing matches holds an open socket, says nothing for
+The keepalive shipped with `dashboard.md` and has never run on the dashboard screen,
+because the dashboard screen runs no frames. A page listing matches holds an open socket, says nothing for
 ten minutes, and is dropped — and the drop is invisible until the next click fails. The
 mechanism was correct and simply never reached, which is the failure mode a test on the
 mechanism alone cannot see.
@@ -122,7 +122,7 @@ mechanism alone cannot see.
   condition, and the one argument each composition root now passes.
 - **Nothing else changes.** No crate, no message, no deployment, no specification outside
   the three statements above. The relay cannot tell the difference.
-- **Depends on** `lobby.md` only in the sense that it repairs the keepalive that unit
+- **Depends on** `dashboard.md` only in the sense that it repairs the keepalive that unit
   added. Nothing depends on this.
 
 ## Decisions
@@ -143,8 +143,8 @@ carry, and the mailboxes lose their derived `Default` so that every construction
 to be handed a real one. A `Waker` that might not wake is a `Waker` nobody can rely on,
 and a `Default` is exactly how one would get built by accident.
 
-**Not fixing the lobby's refresh.** A listing is still only true of the moment it was read,
-and `look_again` is still a button. Making the lobby poll is a design change and not this
+**Not fixing the dashboard's refresh.** A listing is still only true of the moment it was read,
+and `look_again` is still a button. Making the dashboard poll is a design change and not this
 bug; a page that redraws correctly and shows a listing from a minute ago is behaving as
 specified.
 
@@ -164,7 +164,7 @@ what the tests below do.
 
 - **A frame is owed whenever a socket is open**, seat or no seat. This is the test that
   fails today: with a socket and no seat, nothing is currently asked for.
-- A page with no socket asks for no timed frame, so the entry screen does not spin.
+- A page with no socket asks for no timed frame, so the sign-in screen does not spin.
 - **Pushing to `Arrivals` wakes.** A counting waker in place of the real one, asserting the
   count rose. Likewise `Mishap::say` and `FromExchange::put`. Each fails today, there being
   nothing to count.

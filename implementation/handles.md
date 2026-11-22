@@ -11,7 +11,7 @@ How one browser holds more than one player, so two tabs can be two people.
 ### What is wrong
 
 `guest_id()` reads `localStorage`, which is per-origin and not per-tab. Every tab on the
-site is the same player, and since the lobby unit landed they do not merely share an
+site is the same player, and since the dashboard unit landed they do not merely share an
 identity, they fight over it: the second tab lists, sees a match marked `mine`, resumes
 into the first tab's seat, and the relay evicts the first tab's socket because a seat holds
 one socket. Three rules behaving exactly as specified, combining into a result nobody

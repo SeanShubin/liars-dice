@@ -1,9 +1,9 @@
 //! What a request cost, counted by the thing that spent it.
 //!
 //! Realizes the measurement in /implementation/relay-service.md. `deployment.md` deferred
-//! the lobby projection until something measured asked for it; this is the something.
+//! the dashboard projection until something measured asked for it; this is the something.
 //!
-//! Two numbers decide: the p99 of `fold_millis`, and `events_read` for a single lobby
+//! Two numbers decide: the p99 of `fold_millis`, and `events_read` for a single dashboard
 //! view. The rest are here so that when one of them fires, the answer to *why* is a
 //! column rather than an investigation.
 
@@ -56,7 +56,7 @@ impl Meter {
 
     /// How many times the log was read.
     ///
-    /// On a lobby view that is the number of matches folded, one read each. On a message
+    /// On a dashboard view that is the number of matches folded, one read each. On a message
     /// it is the number of appends, because the relay reads to find the end of the log
     /// before each one — which is why the field is not called `matches_folded`. The first
     /// message the deployed relay ever served reported three, for one match.

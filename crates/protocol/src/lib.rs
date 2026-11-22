@@ -147,7 +147,75 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
 ///
 /// A client cannot join a match or load a save whose version differs from its own, so no
 /// match spans two versions and no log holds two. The `version` line says which.
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
+
+/// The dice colours, in the order a picker shows them.
+///
+/// `The palette hues are red, green, blue, cyan, magenta and yellow`, each with a light,
+/// a base and a dark variant, plus black and white. Grouped by hue, because that is the
+/// order somebody browsing a picker wants to read.
+///
+/// The names live here rather than beside the swatches because a log records the name a
+/// player chose and the relay has to pick a free one, and neither has any business
+/// knowing what the name looks like. `render-minimal` pairs these with the RGB values.
+pub const COLOURS: [&str; 20] = [
+    "pink",
+    "red",
+    "maroon",
+    "cream",
+    "yellow",
+    "olive",
+    "light green",
+    "green",
+    "dark green",
+    "pale cyan",
+    "cyan",
+    "teal",
+    "light blue",
+    "blue",
+    "navy",
+    "orchid",
+    "magenta",
+    "purple",
+    "white",
+    "black",
+];
+
+/// The order a seat is given a colour in, as indices into [`COLOURS`].
+///
+/// `A seat is given a colour when it is taken`, and the colour reaches the log, so
+/// choosing it is bound by `A value that determines the content of an event is computed
+/// exactly, with integer or rational arithmetic only` and by `No value crosses from the
+/// floating point side to the exact side`. Perceptual difference is measured in Oklab,
+/// which is transcendental, so it cannot decide this at run time however good an answer
+/// it would give.
+///
+/// So the spread is written down. This sequence is the greedy maximum-minimum one: the
+/// two furthest apart colours, then repeatedly whichever colour is furthest from every
+/// colour already in the sequence. A test in `render-minimal` re-derives it from the
+/// swatches and fails if this array stops matching, which is how the floating point side
+/// checks a value it is not allowed to produce.
+///
+/// [`COLOURS`]'s own order is deliberately not reused: it runs pink, red, maroon, so the
+/// first three seats of a match would all be shades of red.
+pub const ASSIGNMENT_ORDER: [usize; 20] = [
+    18, 19, 16, 7, 11, 0, 4, 17, 1, 12, 13, 5, 2, 14, 10, 6, 15, 8, 9, 3,
+];
+
+/// The first colour in [`ASSIGNMENT_ORDER`] that nothing in `taken` holds.
+///
+/// `None` when every colour is taken, which needs twenty seats and so cannot happen in a
+/// match — said rather than unwrapped, because a palette is a constant somebody may edit.
+///
+/// Membership, not position: nothing here depends on the order `taken` arrives in, as
+/// `No value that determines the content of an event depends on the iteration order of a
+/// collection` requires.
+pub fn free_colour(taken: &[&str]) -> Option<&'static str> {
+    ASSIGNMENT_ORDER
+        .iter()
+        .map(|&index| COLOURS[index])
+        .find(|colour| !taken.contains(colour))
+}
 
 /// A seat at a match.
 ///
@@ -298,6 +366,15 @@ pub enum Event {
         name: String,
         colour: String,
         account: Account,
+    },
+    /// A seat changed the colour of its dice, which it may do until the match starts.
+    ///
+    /// A new fact rather than an edit to the `join` that carried the first colour: the log
+    /// is append-only, and a reader seeing somebody change their mind is worth more than a
+    /// shorter log. A seat's colour is the last one of these for it, or its `join`'s.
+    Colour {
+        seat: Seat,
+        colour: String,
     },
     /// Turn order, which is chosen at random when the match starts.
     PlayerOrder(Vec<Seat>),
@@ -493,6 +570,7 @@ impl fmt::Display for Event {
                 token(name),
                 token(colour)
             ),
+            Event::Colour { seat, colour } => write!(out, "colour {seat} {}", token(colour)),
             Event::Host { seat } => write!(out, "host {seat}"),
             Event::Bar { seat } => write!(out, "bar {seat}"),
             Event::Lift { seat } => write!(out, "lift {seat}"),
@@ -563,6 +641,10 @@ mod tests {
                 name: named("Alice"),
                 colour: named("red"),
                 account: Account::Discord(named("450853396908343307")),
+            },
+            Event::Colour {
+                seat,
+                colour: named("blue"),
             },
             Event::PlayerOrder(vec![Seat(2), Seat(0), seat]),
             Event::Deal {
@@ -778,8 +860,13 @@ mod tests {
 
     /// The test for `No value derives from a player's name`. A name belongs on a join
     /// line and nowhere else, so every argument of every other event must be a seat, a
-    /// number, a percentage, or one of the two fixed claim keywords. A name field added
-    /// to any variant later fails here.
+    /// number, a percentage, one of the two fixed claim keywords, or a colour from the
+    /// palette. A name field added to any variant later fails here.
+    ///
+    /// The colour arm is not a loosening. A colour line carries free text in the format's
+    /// sense, so the test asserts it is one of the twenty names rather than merely a word
+    /// — which is the assertion that fails if a client ever sends a player's name where a
+    /// colour belongs.
     #[test]
     fn a_name_appears_on_a_join_line_and_on_no_other_line() {
         fn is_structural(argument: &str) -> bool {
@@ -787,6 +874,7 @@ mod tests {
                 || argument == "liar"
                 || argument == "spot-on"
                 || argument.trim_end_matches('%').parse::<f64>().is_ok()
+                || COLOURS.iter().any(|colour| token(colour) == argument)
         }
         for event in every_player_event() {
             let line = event.to_string();

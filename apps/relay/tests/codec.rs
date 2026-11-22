@@ -89,7 +89,7 @@ fn the_item_carries_the_key_and_the_event() {
 ///
 /// `relay::idle_seconds` reads `None` as inactive since forever, which is what abandons
 /// the matches that were in the table before times were kept. Treating a missing time as
-/// *unknown, so not expired* would leave them in the lobby permanently, which is the
+/// *unknown, so not expired* would leave them on the dashboard permanently, which is the
 /// problem the hour rule exists to solve.
 #[test]
 fn an_item_from_before_recorded_times_has_none() {

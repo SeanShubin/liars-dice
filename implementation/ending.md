@@ -137,7 +137,7 @@ judgement about whose fault the silence is.
 
 `A match in which no event has been recorded for an hour is cancelled`, and nothing is
 scheduled to notice. There is no monitor, no timer, no second deployable: the check runs
-where the matches are already being read, which is the lobby pass. For each match that is
+where the matches are already being read, which is the dashboard pass. For each match that is
 not over and whose last recorded event is more than an hour old, `Event::Abandon` is
 appended at the position just read — conditional, like every append, so a race loses
 harmlessly. The loser re-reads, finds the match already abandoned, and leaves it alone.
@@ -149,7 +149,7 @@ one conditional put each. Normally that count is zero.
 
 The one thing this does **not** fix is what `relay-service.md` already has an open item
 for. `matches()` scans every row in the table whatever state the matches are in, so
-abandoning a match tidies the lobby and saves nothing on the scan. The usability problem
+abandoning a match tidies the dashboard and saves nothing on the scan. The usability problem
 and the cost problem looked like one problem and are two.
 
 ### Where the time comes from
@@ -181,7 +181,7 @@ fn read(&self, match_id: &MatchId) -> Recording;
 
 Call sites take `.events`, so the fold is untouched. A second method instead of a wider
 return was the alternative and is rejected twice over: on DynamoDB it is a second query
-per match, which doubles what the lobby costs, and it is a second reader of the same rows,
+per match, which doubles what the dashboard costs, and it is a second reader of the same rows,
 which is a second thing to get wrong. Returning both means the cancel decision and the
 append that commits it come from the same read — the discipline `The position is the
 version` already insists on.
@@ -237,7 +237,7 @@ goes to 8: three new events, two new messages, two refusals changed.
 - **`crates/protocol`** gains `Event::Complete`, `Event::Cancel`, `Event::Abandon` and
   `Event::MatchOver`, with their archive lines. No dependency changes.
 - **`crates/relay`** owns `Ending`, the inactivity rule, the two thresholds as named
-  constants, the completion count, and the expiry inside the lobby pass. It owns the
+  constants, the completion count, and the expiry inside the dashboard pass. It owns the
   `Recording` shape and the `now` parameter. `present_seats` was extracted while this was
   built: the reveal and the completion both ask *who are we waiting for*, and two copies of
   that question would be two answers to it. `Sitting` likewise — hosting and joining ask
@@ -253,9 +253,9 @@ goes to 8: three new events, two new messages, two refusals changed.
 - **`apps/web`** owns the button, the countdown and the three endings on screen. The
   countdown is `remaining`, a free function over `(seconds, when)` and `now`, for the same
   reason `screen_for` is one: the arithmetic is the part that can be wrong.
-- **The lobby unit** owns what a listing contains and which matches appear in it. This unit
+- **The dashboard unit** owns what a listing contains and which matches appear in it. This unit
   owns only the expiry that happens during that pass. Both touch `open_matches`, and the
-  lobby document is where its final shape is written down.
+  dashboard document is where its final shape is written down.
 
 ## Decisions
 
@@ -272,12 +272,12 @@ The cost is that `Log::read` returns a struct rather than a `Vec`, which is a me
 change at four call sites.
 
 **Expiry is lazy.** A scheduled sweep would be a second deployable, an IAM role, a
-schedule to get wrong, and a thing that runs when nobody is looking. The lobby pass already
+schedule to get wrong, and a thing that runs when nobody is looking. The dashboard pass already
 reads every match, so the check is free where it is and the write happens only on the day a
 match crosses the hour. The cost is that `list` is no longer read-only.
 
 **An untimed row means inactive since forever.** The alternative is *unknown, so not
-expired*, which would leave every match that predates this unit in the lobby permanently —
+expired*, which would leave every match that predates this unit in the dashboard permanently —
 which is the exact problem this unit exists to fix. The four dead matches in production
 will be deleted by hand as well, so both the old and the new path are exercised.
 
@@ -346,9 +346,9 @@ act on when it arrives.
 
 **A finished match lingers for up to an hour** if everybody closed their tab at the moment
 of victory, because the count never completes and the hour rule is the backstop. Visible
-only in the lobby, and only as a match nobody can join.
+only in the dashboard, and only as a match nobody can join.
 
-**The lobby's scan cost is untouched.** Abandoning a match stops it being listed; it does
+**The dashboard's scan cost is untouched.** Abandoning a match stops it being listed; it does
 not stop its rows being scanned. `relay-service.md`'s open item about a projection survives
 this unit intact.
 

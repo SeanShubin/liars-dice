@@ -28,7 +28,9 @@
 - The host can bar a player from joining the match
 - The host can lift a bar
 - A match is not listed to a player barred from it
-- A player chooses the colour of their dice when they join
+- A seat is given a colour when it is taken
+- A player can change their seat's colour until the match starts
+- A player cannot change their seat's colour once the match has started
 - A colour another player has chosen cannot be chosen
 - Two players never share a seat
 - A player holds one seat in a match

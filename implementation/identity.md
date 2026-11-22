@@ -164,7 +164,7 @@ afterwards can change the answer. Leaving does not, because a seat that left is 
 seat in the log.
 
 `Listed` gains `ranked`, derived in the same fold that produces the host and the player
-count, so the lobby can say which matches are which before anybody joins one.
+count, so the dashboard can say which matches are which before anybody joins one.
 
 ## Boundaries
 
@@ -302,7 +302,7 @@ and then by the fact that a ranked match is possible at all.
 ## Open Items
 
 **Nothing consumes ranked.** It is a property the log proves and nobody reads. A rating, a
-leaderboard, or a filter in the lobby would each give it a point, and each is its own unit
+leaderboard, or a filter in the dashboard would each give it a point, and each is its own unit
 of work. It is built now because it has to be decided at the start of a match and cannot be
 reconstructed later for matches already played.
 
