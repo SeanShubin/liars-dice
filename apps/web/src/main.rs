@@ -61,6 +61,112 @@ const KEEPALIVE: f64 = 240.0;
 /// of somebody.
 const UNREADABLE_TICKET: &str = "Your sign-in has gone stale. Reload the page and sign in again.";
 
+/// The longest a handle may be, and what may be in one.
+///
+/// Refused rather than repaired. A handle that is quietly cleaned up is a person quietly
+/// becoming a different player, because the cleaned handle keys a different identity than
+/// the one they typed.
+#[cfg_attr(
+    not(target_arch = "wasm32"),
+    allow(
+        dead_code,
+        reason = "read from the address bar, which only a browser has"
+    )
+)]
+const HANDLE_LIMIT: usize = 32;
+
+/// The handle a fragment names, if it names a readable one.
+///
+/// `#as=bob`. A fragment rather than a query or a path because a fragment is never sent:
+/// `A handle is never part of a request`.
+#[cfg_attr(
+    not(target_arch = "wasm32"),
+    allow(
+        dead_code,
+        reason = "read from the address bar, which only a browser has"
+    )
+)]
+fn handle_in(fragment: &str) -> Option<String> {
+    let handle = pairs_of(fragment).find_map(|(key, value)| (key == "as").then_some(value))?;
+    clean_handle(&handle)
+}
+
+/// A handle, or nothing if what was offered is not one.
+#[cfg_attr(
+    not(target_arch = "wasm32"),
+    allow(
+        dead_code,
+        reason = "read from the address bar, which only a browser has"
+    )
+)]
+fn clean_handle(raw: &str) -> Option<String> {
+    let handle = raw.trim();
+    let usable = !handle.is_empty()
+        && handle.len() <= HANDLE_LIMIT
+        && handle
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    usable.then(|| handle.to_string())
+}
+
+/// The same fragment with any `as` taken out, and everything else left alone.
+///
+/// Per key rather than a blanket, because the two things a fragment might name have
+/// opposite sharing rules: a link naming a match is meant to be passed around, and a link
+/// naming a player is not.
+#[cfg_attr(
+    not(target_arch = "wasm32"),
+    allow(
+        dead_code,
+        reason = "read from the address bar, which only a browser has"
+    )
+)]
+fn fragment_without_handle(fragment: &str) -> String {
+    pairs_of(fragment)
+        .filter(|(key, _)| key != "as")
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+/// The `key=value` pairs in a fragment, with the leading `#` if there is one ignored.
+#[cfg_attr(
+    not(target_arch = "wasm32"),
+    allow(
+        dead_code,
+        reason = "read from the address bar, which only a browser has"
+    )
+)]
+fn pairs_of(fragment: &str) -> impl Iterator<Item = (String, String)> + '_ {
+    fragment
+        .trim_start_matches('#')
+        .split('&')
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| {
+            let (key, value) = part.split_once('=')?;
+            Some((key.to_string(), value.to_string()))
+        })
+}
+
+/// Where in storage a handle's belongings go.
+///
+/// With no handle this is exactly the key used before handles existed, which is
+/// `A browser holds one player until another is chosen` — anything else would hand every
+/// existing player a new identity on their next reload, and their seat with it.
+#[cfg_attr(
+    not(target_arch = "wasm32"),
+    allow(
+        dead_code,
+        reason = "read from the address bar, which only a browser has"
+    )
+)]
+fn storage_key(base: &str, handle: Option<&str>) -> String {
+    match handle {
+        Some(handle) => format!("{base}:{handle}"),
+        None => base.to_string(),
+    }
+}
+
 /// How often the page redraws while a match is live.
 ///
 /// Arrivals wake the frame loop themselves, so this exists only to notice silence: without
@@ -398,6 +504,11 @@ struct Page {
     /// What to tell the person on the entry screen.
     trouble: Option<String>,
 
+    /// Which player this tab is, if it is not the browser's usual one.
+    ///
+    /// Read once, at startup, and never changed: switching player mid-page would mean
+    /// deciding what happens to a match already in progress, which no statement answers.
+    handle: Option<String>,
     /// Handed to every mailbox, and kept because a new socket means new mailboxes.
     waker: Waker,
     seated: Option<Seated>,
@@ -441,10 +552,11 @@ struct Page {
 
 impl Page {
     fn new(waker: Waker) -> Self {
+        let handle = socket::handle();
         Self {
             relay: socket::relay_from_page(),
             name: String::new(),
-            guest: socket::guest_id(),
+            guest: socket::guest_id(handle.as_deref()),
             exchange: socket::auth_from_page(),
             asked_the_exchange: false,
             spoke: 0.0,
@@ -461,6 +573,7 @@ impl Page {
             wire: None,
             arrivals: Arrivals::new(waker.clone()),
             mishap: Mishap::new(waker.clone()),
+            handle,
             waker,
             hand: Hand::default(),
             pending: Claim {
@@ -517,7 +630,7 @@ impl Page {
         // A ticket already in storage outlives a reload, which is the point of keeping
         // one. Expiry is checked here rather than trusted: a stale ticket would be
         // refused by the relay and look like a bug.
-        if let Some(held) = socket::ticket_kept() {
+        if let Some(held) = socket::ticket_kept(self.handle.as_deref()) {
             self.signin = Signin::Held(held);
             return;
         }
@@ -546,7 +659,7 @@ impl Page {
             }
             Answered::Where(None) => self.signin = Signin::Off,
             Answered::Traded(Ok(held)) => {
-                socket::keep_ticket(&held);
+                socket::keep_ticket(self.handle.as_deref(), &held);
                 self.signin = Signin::Held(held);
             }
             Answered::Traded(Err(why)) => {
@@ -896,7 +1009,7 @@ impl Page {
                     // The ticket goes, and the guest id stays — so signing out is going
                     // back to being the guest this browser already was, not becoming
                     // somebody new.
-                    socket::forget_ticket();
+                    socket::forget_ticket(self.handle.as_deref());
                     self.signin = Signin::Asking;
                     socket::ask_where(&self.exchange, &self.from_exchange);
                 }
@@ -1505,6 +1618,55 @@ mod socket {
 
     /// Where this browser keeps its guest id.
     const GUEST_KEY: &str = "liars-dice-guest";
+    const HANDLE_KEY: &str = "liars-dice-handle";
+
+    /// Which player this tab is, if it is not the browser's usual one.
+    ///
+    /// The fragment sets it; the tab keeps it. `sessionStorage` is per browsing context in
+    /// exactly the way `localStorage` is not, which is the whole of why two tabs can be two
+    /// people, and it survives a reload, which is `A tab keeps its player across a reload`.
+    ///
+    /// Keeping it here also settles the Discord round trip without a `state` parameter: a
+    /// fragment survives a redirect only unreliably, and nothing depends on it surviving,
+    /// because the handle is already in the tab before anybody leaves for Discord.
+    pub fn handle() -> Option<String> {
+        let window = web_sys::window()?;
+        let tab = window.session_storage().ok().flatten();
+        if let Some(fragment) = window.location().hash().ok()
+            && let Some(handle) = super::handle_in(&fragment)
+        {
+            if let Some(tab) = &tab {
+                let _ = tab.set_item(HANDLE_KEY, &handle);
+            }
+            forget_handle(&fragment);
+            return Some(handle);
+        }
+        let kept = tab?.get_item(HANDLE_KEY).ok()??;
+        super::clean_handle(&kept)
+    }
+
+    /// Take the handle out of the address bar, leaving the rest of the fragment.
+    ///
+    /// The same reasoning as [`forget_code`], and the same `replaceState` so the page is
+    /// not reloaded: a URL people paste should not carry who they are.
+    fn forget_handle(fragment: &str) {
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let Ok(history) = window.history() else {
+            return;
+        };
+        let location = window.location();
+        let path = location.pathname().unwrap_or_else(|_| "/".to_string());
+        let query = location.search().unwrap_or_default();
+        let rest = super::fragment_without_handle(fragment);
+        let url = if rest.is_empty() {
+            format!("{path}{query}")
+        } else {
+            format!("{path}{query}#{rest}")
+        };
+        let _ = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&url));
+    }
 
     /// This browser's guest id: the one it already had, or a new one it will keep.
     ///
@@ -1525,10 +1687,11 @@ mod socket {
     /// from a file — the id is still generated and still works for this page's lifetime.
     /// It is a seat that does not survive a reload, which is worse than the alternative
     /// and better than not playing.
-    pub fn guest_id() -> String {
+    pub fn guest_id(handle: Option<&str>) -> String {
+        let key = super::storage_key(GUEST_KEY, handle);
         let storage = web_sys::window().and_then(|window| window.local_storage().ok().flatten());
         if let Some(storage) = &storage
-            && let Ok(Some(kept)) = storage.get_item(GUEST_KEY)
+            && let Ok(Some(kept)) = storage.get_item(&key)
             && kept.len() == 32
             && kept.chars().all(|digit| digit.is_ascii_hexdigit())
         {
@@ -1539,7 +1702,7 @@ mod socket {
             // A failure here is a quota or a private-browsing refusal, and there is
             // nothing useful to do about either: the id works, it just will not outlive
             // the tab.
-            let _ = storage.set_item(GUEST_KEY, &made);
+            let _ = storage.set_item(&key, &made);
         }
         made
     }
@@ -1606,8 +1769,10 @@ mod socket {
     /// Expiry is checked here rather than left to the relay. A stale ticket would be
     /// refused with `BadTicket`, which on screen would look like a bug rather than like
     /// *sign in again*.
-    pub fn ticket_kept() -> Option<super::Held> {
-        let kept = storage()?.get_item(TICKET_KEY).ok()??;
+    pub fn ticket_kept(handle: Option<&str>) -> Option<super::Held> {
+        let kept = storage()?
+            .get_item(&super::storage_key(TICKET_KEY, handle))
+            .ok()??;
         let (expires_at, rest) = kept.split_once(' ')?;
         let expires_at: u64 = expires_at.parse().ok()?;
         let (name_length, rest) = rest.split_once(' ')?;
@@ -1617,7 +1782,7 @@ mod socket {
         let name = rest.get(..name_length)?.to_string();
         let ticket = rest.get(name_length + 1..)?.to_string();
         if expires_at <= seconds_now() {
-            forget_ticket();
+            forget_ticket(handle);
             return None;
         }
         Some(super::Held {
@@ -1627,7 +1792,7 @@ mod socket {
         })
     }
 
-    pub fn keep_ticket(held: &super::Held) {
+    pub fn keep_ticket(handle: Option<&str>, held: &super::Held) {
         if let Some(storage) = storage() {
             let kept = format!(
                 "{} {} {} {}",
@@ -1636,13 +1801,13 @@ mod socket {
                 held.name,
                 held.ticket
             );
-            let _ = storage.set_item(TICKET_KEY, &kept);
+            let _ = storage.set_item(&super::storage_key(TICKET_KEY, handle), &kept);
         }
     }
 
-    pub fn forget_ticket() {
+    pub fn forget_ticket(handle: Option<&str>) {
         if let Some(storage) = storage() {
-            let _ = storage.remove_item(TICKET_KEY);
+            let _ = storage.remove_item(&super::storage_key(TICKET_KEY, handle));
         }
     }
 
@@ -1938,7 +2103,11 @@ mod socket {
     }
 
     /// Fixed, because a desktop build of this page is a compile check and not a client.
-    pub fn guest_id() -> String {
+    pub fn handle() -> Option<String> {
+        None
+    }
+
+    pub fn guest_id(_handle: Option<&str>) -> String {
         "0".repeat(32)
     }
 
@@ -1954,13 +2123,13 @@ mod socket {
 
     pub fn forget_code() {}
 
-    pub fn ticket_kept() -> Option<super::Held> {
+    pub fn ticket_kept(_handle: Option<&str>) -> Option<super::Held> {
         None
     }
 
-    pub fn keep_ticket(_held: &super::Held) {}
+    pub fn keep_ticket(_handle: Option<&str>, _held: &super::Held) {}
 
-    pub fn forget_ticket() {}
+    pub fn forget_ticket(_handle: Option<&str>) {}
 
     pub fn authorize(_client_id: &str, _redirect_uri: &str) {}
 
@@ -2089,6 +2258,118 @@ mod tests {
             }
         }
         all
+    }
+
+    /// `A player in a browser is chosen by a handle`, and only by one that is readable.
+    #[test]
+    fn a_fragment_names_a_handle_or_it_does_not() {
+        assert_eq!(handle_in("#as=bob"), Some("bob".to_string()));
+        assert_eq!(
+            handle_in("as=bob"),
+            Some("bob".to_string()),
+            "the hash is optional"
+        );
+        assert_eq!(
+            handle_in("#match=abc&as=bob"),
+            Some("bob".to_string()),
+            "and it need not be first"
+        );
+        assert_eq!(handle_in("#match=abc"), None, "no handle here");
+        assert_eq!(handle_in(""), None);
+        assert_eq!(handle_in("#as="), None, "an empty handle is not a handle");
+        // Nothing is percent-decoded, and nothing needs to be: a handle is letters,
+        // digits, dashes and underscores, none of which are ever encoded. So an encoded
+        // value is simply not a handle.
+        assert_eq!(
+            handle_in("#as=%20%20"),
+            None,
+            "an encoded value is not a handle"
+        );
+    }
+
+    /// Refused rather than repaired.
+    ///
+    /// A handle that is quietly cleaned up keys a different identity than the one that was
+    /// typed, so the person silently becomes a different player — which is the exact
+    /// failure this whole unit exists to stop.
+    #[test]
+    fn a_handle_that_is_not_one_is_refused_rather_than_tidied() {
+        assert_eq!(clean_handle("bob"), Some("bob".to_string()));
+        assert_eq!(
+            clean_handle("  bob  "),
+            Some("bob".to_string()),
+            "surrounding space is not part of it"
+        );
+        assert_eq!(clean_handle("bob-2_x"), Some("bob-2_x".to_string()));
+        assert_eq!(clean_handle(""), None);
+        assert_eq!(clean_handle("   "), None);
+        assert_eq!(
+            clean_handle("bob smith"),
+            None,
+            "a space inside is refused, not stripped"
+        );
+        assert_eq!(
+            clean_handle("bob/../alice"),
+            None,
+            "and nothing that could reshape a key"
+        );
+        assert_eq!(
+            clean_handle(&"b".repeat(HANDLE_LIMIT)),
+            Some("b".repeat(HANDLE_LIMIT))
+        );
+        assert_eq!(
+            clean_handle(&"b".repeat(HANDLE_LIMIT + 1)),
+            None,
+            "too long is refused whole"
+        );
+    }
+
+    /// `A browser holds one player until another is chosen`.
+    ///
+    /// Asserted against the literal key, because this is the test that fails if anybody
+    /// renames it — and renaming it takes the seat of every player who already has an id.
+    #[test]
+    fn a_browser_with_no_handle_uses_the_key_it_always_used() {
+        assert_eq!(storage_key("liars-dice-guest", None), "liars-dice-guest");
+        assert_eq!(storage_key("liars-dice-ticket", None), "liars-dice-ticket");
+    }
+
+    /// Two handles are two keyrings, and `A handle names a player whether or not they have
+    /// authenticated` — so the ticket is filed beside the id, not shared across handles.
+    #[test]
+    fn each_handle_gets_its_own_keyring() {
+        let bob = storage_key("liars-dice-guest", Some("bob"));
+        let alice = storage_key("liars-dice-guest", Some("alice"));
+        assert_ne!(bob, alice, "two handles are two players");
+        assert_ne!(
+            bob,
+            storage_key("liars-dice-guest", None),
+            "and neither is the default one"
+        );
+        assert_ne!(
+            storage_key("liars-dice-ticket", Some("bob")),
+            storage_key("liars-dice-guest", Some("bob")),
+            "a ticket and an id are different belongings of the same player"
+        );
+        assert_eq!(
+            storage_key("liars-dice-ticket", Some("bob")),
+            "liars-dice-ticket:bob"
+        );
+    }
+
+    /// The scrub is per key, because a link naming a match is meant to be shared and a
+    /// link naming a player is not.
+    #[test]
+    fn taking_the_handle_out_leaves_the_rest_of_the_fragment() {
+        assert_eq!(fragment_without_handle("#as=bob"), "");
+        assert_eq!(fragment_without_handle("#as=bob&match=abc"), "match=abc");
+        assert_eq!(fragment_without_handle("#match=abc&as=bob"), "match=abc");
+        assert_eq!(
+            fragment_without_handle("#match=abc"),
+            "match=abc",
+            "nothing to remove, nothing removed"
+        );
+        assert_eq!(fragment_without_handle(""), "");
     }
 
     /// `An unattended client stays able to act`.

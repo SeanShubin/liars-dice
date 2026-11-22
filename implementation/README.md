@@ -62,6 +62,7 @@ Not started | In progress | Built
 - [Ending a Match](/implementation/ending.md) — completion, cancelling, abandonment, and the relay's first clock reading
 - [Lobby](/implementation/lobby.md) — every match in progress, which of them you can join, and the one you are already in
 - [Unattended](/implementation/unattended.md) — what a client does when nobody is touching it: show what arrives, stay able to act
+- [Handles](/implementation/handles.md) — one browser holding more than one player, so two tabs can be two people
 
 ## Order
 

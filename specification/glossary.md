@@ -58,6 +58,7 @@
 | Abandoned | Said of a match cancelled because no event was recorded in it for an hour. |
 | Administrator | A configured Discord account with access to the data browser. |
 | Guest | A player who has not authenticated, identified by an id their own client generated. |
+| Handle | The name a browser files a player under. Chosen by the person, and never the player's identity. |
 | Unattended | Said of a client nobody is interacting with. |
 | Ranked | Said of a match in which every seat is held by an authenticated player. |
 | Save | A named record of a match, carrying the time it was made, that the host can load to continue the match. |

@@ -83,3 +83,10 @@
 - An unauthenticated player chooses their own name
 - A player's name is recorded once, when they join a match
 - No value derives from a player's name
+- A browser can hold more than one player
+- A browser holds one player until another is chosen
+- A player in a browser is chosen by a handle
+- A handle names a player whether or not they have authenticated
+- The same handle in two browsers names two players
+- A tab keeps its player across a reload
+- A handle is never part of a request
