@@ -28,11 +28,9 @@ fn of(match_id: &MatchId) -> (&'static str, Value) {
 /// different answers to one question.
 fn who_of(who: &Who) -> Vec<(&'static str, Value)> {
     match who {
-        Who::Guest { id, name } => vec![
-            ("who", text("guest")),
-            ("id", text(id)),
-            ("name", text(name)),
-        ],
+        // No name: a guest is an id, and what they are called is chosen when they take
+        // a seat and travels on the message that takes it.
+        Who::Guest { id } => vec![("who", text("guest")), ("id", text(id))],
         Who::Authenticated { ticket } => {
             vec![("who", text("authenticated")), ("ticket", text(ticket))]
         }
@@ -43,7 +41,6 @@ fn who_from(shape: &Shape) -> Result<Who, Malformed> {
     match shape.text("who")? {
         "guest" => Ok(Who::Guest {
             id: shape.text("id")?.to_string(),
-            name: shape.text("name")?.to_string(),
         }),
         "authenticated" => Ok(Who::Authenticated {
             ticket: shape.text("ticket")?.to_string(),
@@ -58,11 +55,13 @@ pub fn shape_of(message: &Message) -> Shape {
             who,
             version,
             nonce,
+            name,
         } => {
             let mut fields = who_of(who);
             fields.extend([
                 ("version", Value::Count(u64::from(*version))),
                 ("nonce", text(nonce)),
+                ("name", text(name)),
             ]);
             Shape::of("host", fields)
         }
@@ -70,10 +69,14 @@ pub fn shape_of(message: &Message) -> Shape {
             match_id,
             who,
             version,
+            name,
         } => {
             let mut fields = vec![of(match_id)];
             fields.extend(who_of(who));
-            fields.extend([("version", Value::Count(u64::from(*version)))]);
+            fields.extend([
+                ("version", Value::Count(u64::from(*version))),
+                ("name", text(name)),
+            ]);
             Shape::of("join", fields)
         }
         Message::Colour { match_id, colour } => {
@@ -119,11 +122,13 @@ pub fn from_shape(shape: &Shape) -> Result<Message, Malformed> {
             who: who_from(shape)?,
             version: shape.count("version")?,
             nonce: shape.text("nonce")?.to_string(),
+            name: shape.text("name")?.to_string(),
         }),
         "join" => Ok(Message::Join {
             match_id: match_id()?,
             who: who_from(shape)?,
             version: shape.count("version")?,
+            name: shape.text("name")?.to_string(),
         }),
         "colour" => Ok(Message::Colour {
             match_id: match_id()?,

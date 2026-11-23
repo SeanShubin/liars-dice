@@ -62,10 +62,37 @@ fn discord_account(id: &str) -> Account {
 }
 
 /// What a client sends to say who it is.
-fn guest_who(id: &str, name: &str) -> Who {
-    Who::Guest {
-        id: id.to_string(),
+fn guest_who(id: &str) -> Who {
+    Who::Guest { id: id.to_string() }
+}
+
+/// Who a client says it is, and what it asks to be called.
+///
+/// Two values rather than one, because a name is chosen when a seat is taken and so
+/// travels on the message that takes one rather than on the `Who` that says who is
+/// asking. A `Who` alone is what `List` and `Resume` send.
+struct Says {
+    who: Who,
+    name: String,
+}
+
+fn guest_says(id: &str, name: &str) -> Says {
+    Says {
+        who: guest_who(id),
         name: name.to_string(),
+    }
+}
+
+/// A ticket, and a name the relay is supposed to ignore in favour of the ticket's.
+///
+/// The name here is deliberately not the ticket's. `An authenticated player's name is
+/// their Discord display name`, so this is the string that must not appear on a join
+/// line — and a helper that sent the ticket's own name would not notice the day the
+/// relay started preferring what the client asked for.
+fn ticket_says(id: &str, name: &str) -> Says {
+    Says {
+        who: ticket_for(id, name),
+        name: format!("not really {name}"),
     }
 }
 
@@ -77,8 +104,9 @@ fn host<L: Log, C: Connections>(relay: &mut Relay<L, C>, who: &ConnectionId) -> 
     let outcome = relay.receive(
         who,
         Message::Host {
-            who: guest_who("1", "Alice"),
+            who: guest_who("1"),
             version: PROTOCOL_VERSION,
+            name: "Alice".to_string(),
             nonce: "alice-hosts".to_string(),
         },
         moment(),
@@ -99,8 +127,9 @@ fn join<L: Log, C: Connections>(
             who,
             Message::Join {
                 match_id: match_id.clone(),
-                who: guest_who(account, name),
+                who: guest_who(account),
                 version: PROTOCOL_VERSION,
+                name: name.to_string(),
             },
             moment(),
         )
@@ -138,8 +167,8 @@ fn a_started_match_is_listed_and_says_it_cannot_be_joined() {
 
     let listed = relay.open_matches(None, moment());
     assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].host, "Alice");
-    assert_eq!(listed[0].players, 1);
+    assert_eq!(listed[0].names, vec!["Alice".to_string()]);
+    assert_eq!(listed[0].names.len(), 1);
     assert!(listed[0].joinable, "hosted and waiting");
 
     relay.receive(
@@ -181,7 +210,7 @@ fn asking_what_is_open_lists_the_matches_that_are() {
     let empty = relay.receive(
         &looking,
         Message::List {
-            who: guest_who("9", "asking"),
+            who: guest_who("9"),
         },
         moment(),
     );
@@ -196,7 +225,7 @@ fn asking_what_is_open_lists_the_matches_that_are() {
         .receive(
             &looking,
             Message::List {
-                who: guest_who("9", "asking"),
+                who: guest_who("9"),
             },
             moment(),
         )
@@ -204,8 +233,12 @@ fn asking_what_is_open_lists_the_matches_that_are() {
         .expect("a listing");
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].match_id, match_id);
-    assert_eq!(listed[0].host, "Alice", "a listed match shows its host");
-    assert_eq!(listed[0].players, 1, "and how many have joined");
+    assert_eq!(
+        listed[0].names.first().map(String::as_str),
+        Some("Alice"),
+        "a listed match shows its host"
+    );
+    assert_eq!(listed[0].names.len(), 1, "and how many have joined");
 
     // Asking changes nothing: the log is as long as hosting left it.
     assert_eq!(relay.log().read(&match_id).events.len(), 3);
@@ -215,7 +248,7 @@ fn asking_what_is_open_lists_the_matches_that_are() {
         .receive(
             &looking,
             Message::List {
-                who: guest_who("9", "asking"),
+                who: guest_who("9"),
             },
             moment(),
         )
@@ -250,7 +283,7 @@ fn a_listing_is_answered_for_whoever_asked() {
         .receive(
             &bob,
             Message::List {
-                who: guest_who("2", "asking"),
+                who: guest_who("2"),
             },
             moment(),
         )
@@ -262,7 +295,7 @@ fn a_listing_is_answered_for_whoever_asked() {
         .receive(
             &connection("carol"),
             Message::List {
-                who: guest_who("3", "asking"),
+                who: guest_who("3"),
             },
             moment(),
         )
@@ -356,8 +389,9 @@ fn a_join_is_refused_for_a_mismatched_version_or_a_started_match() {
         &connection("old"),
         Message::Join {
             match_id: match_id.clone(),
-            who: guest_who("9", "Old"),
+            who: guest_who("9"),
             version: PROTOCOL_VERSION - 1,
+            name: "Old".to_string(),
         },
         moment(),
     );
@@ -718,8 +752,9 @@ fn coming_back_is_not_refused_by_your_own_seat() {
         &connection("alice-again"),
         Message::Join {
             match_id: match_id.clone(),
-            who: guest_who("1", "Alice"),
+            who: guest_who("1"),
             version: PROTOCOL_VERSION,
+            name: "Alice".to_string(),
         },
         moment(),
     );
@@ -737,8 +772,9 @@ fn coming_back_is_not_refused_by_your_own_seat() {
         &connection("alice-third"),
         Message::Join {
             match_id: match_id.clone(),
-            who: guest_who("1", "Alice"),
+            who: guest_who("1"),
             version: PROTOCOL_VERSION,
+            name: "Alice".to_string(),
         },
         moment(),
     );
@@ -871,7 +907,7 @@ fn a_returning_player_resumes_their_seat_and_learns_nothing_extra() {
         &back,
         Message::Resume {
             match_id: match_id.clone(),
-            who: guest_who("2", "asking"),
+            who: guest_who("2"),
         },
         moment(),
     );
@@ -911,7 +947,7 @@ fn a_stranger_cannot_resume_a_seat() {
                 &connection("nobody"),
                 Message::Resume {
                     match_id,
-                    who: guest_who("404", "asking"),
+                    who: guest_who("404"),
                 },
                 moment()
             )
@@ -955,6 +991,7 @@ fn hosting_the_same_request_twice_creates_one_match() {
     let request = Message::Host {
         who: meddled_host_who(),
         version: PROTOCOL_VERSION,
+        name: "not the ticket's name".to_string(),
         nonce: HOST_NONCE.to_string(),
     };
 
@@ -999,6 +1036,7 @@ fn hosting_twice_on_purpose_creates_two_matches() {
     let request = |nonce: &str| Message::Host {
         who: meddled_host_who(),
         version: PROTOCOL_VERSION,
+        name: "not the ticket's name".to_string(),
         nonce: nonce.to_string(),
     };
     let one = relay.receive(
@@ -1058,7 +1096,6 @@ fn meddled_host() -> Account {
 fn meddled_host_who() -> Who {
     Who::Guest {
         id: "account-host".to_string(),
-        name: "Host".to_string(),
     }
 }
 
@@ -1155,6 +1192,7 @@ fn a_join_survives_interference_at_every_append() {
             name: "Interloper".to_string(),
             colour: "blue".to_string(),
             account: Account::Discord("account-x".to_string()),
+            username: None,
         };
         let mut relay = Relay::new(
             Meddling::interfering_after(after, &match_id, vec![interloper]),
@@ -1171,6 +1209,7 @@ fn a_join_survives_interference_at_every_append() {
             Message::Host {
                 who: meddled_host_who(),
                 version: PROTOCOL_VERSION,
+                name: "not the ticket's name".to_string(),
                 nonce: HOST_NONCE.to_string(),
             },
             moment(),
@@ -1192,8 +1231,9 @@ fn a_join_survives_interference_at_every_append() {
             &ConnectionId("late".to_string()),
             Message::Join {
                 match_id: created.clone(),
-                who: guest_who("account-late", "Late"),
+                who: guest_who("account-late"),
                 version: PROTOCOL_VERSION,
+                name: "Late".to_string(),
             },
             moment(),
         );
@@ -1243,6 +1283,7 @@ fn a_join_decided_against_a_stale_log_is_decided_again() {
         name: "Interloper".to_string(),
         colour: "blue".to_string(),
         account: Account::Discord("account-x".to_string()),
+        username: None,
     };
     let mut relay = Relay::new(
         Meddling::interfering_after(1, &match_id, vec![interloper]),
@@ -1255,8 +1296,9 @@ fn a_join_decided_against_a_stale_log_is_decided_again() {
         &ConnectionId("late".to_string()),
         Message::Join {
             match_id: match_id.clone(),
-            who: guest_who("account-late", "Late"),
+            who: guest_who("account-late"),
             version: PROTOCOL_VERSION,
+            name: "Late".to_string(),
         },
         moment(),
     );
@@ -1314,7 +1356,7 @@ fn a_colour_taken_while_a_change_was_decided_is_refused_on_the_retry() {
             &mut relay,
             &ConnectionId("other".to_string()),
             &match_id,
-            guest_who("account-other", "Other"),
+            guest_says("account-other", "Other"),
         ),
         None
     );
@@ -1361,6 +1403,7 @@ fn seat_a_host<L: Log, C: Connections>(relay: &mut Relay<L, C>, expected: &Match
             Message::Host {
                 who: meddled_host_who(),
                 version: PROTOCOL_VERSION,
+                name: "not the ticket's name".to_string(),
                 nonce: HOST_NONCE.to_string(),
             },
             moment(),
@@ -1674,6 +1717,7 @@ fn a_match_with_no_recorded_time_is_abandoned_at_once() {
                 name: "Mary Jane".to_string(),
                 colour: "red".to_string(),
                 account: guest("1"),
+                username: None,
             },
             Event::Host { seat: Seat(0) },
         ],
@@ -1786,7 +1830,7 @@ fn nothing_is_recorded_in_a_match_that_is_over() {
         &bob,
         Message::Resume {
             match_id: match_id.clone(),
-            who: guest_who("2", "asking"),
+            who: guest_who("2"),
         },
         later(CANCEL_AFTER_SECONDS),
     );
@@ -1979,6 +2023,7 @@ fn ticket_for(id: &str, name: &str) -> Who {
             &secret(),
             &protocol::account_text(&Account::Discord(id.to_string())),
             name,
+            &format!("handle-of-{id}"),
             // Well after `moment()`, which is what every message in these tests arrives
             // at. Expiry has its own test; this is every other test's ticket.
             u64::MAX,
@@ -1991,15 +2036,16 @@ fn seat<L: Log, C: Connections>(
     relay: &mut Relay<L, C>,
     at: &ConnectionId,
     match_id: &MatchId,
-    who: Who,
+    says: Says,
 ) -> Option<Refused> {
     relay
         .receive(
             at,
             Message::Join {
                 match_id: match_id.clone(),
-                who,
+                who: says.who,
                 version: PROTOCOL_VERSION,
+                name: says.name,
             },
             moment(),
         )
@@ -2020,6 +2066,7 @@ fn a_ticket_seats_the_account_and_the_name_it_proves() {
         Message::Host {
             who: ticket_for("450853396908343307", "Ada Lovelace"),
             version: PROTOCOL_VERSION,
+            name: "not the ticket's name".to_string(),
             nonce: "once".to_string(),
         },
         moment(),
@@ -2033,7 +2080,233 @@ fn a_ticket_seats_the_account_and_the_name_it_proves() {
         "the account came out of the ticket"
     );
     assert_eq!(view.name_of(Seat(0)), "Ada Lovelace");
+    // And the username, which a client has no field to send and so cannot claim.
+    // `ticket_for` derives it from the id, so this is the exchange's value and not
+    // anything this message carried.
+    assert_eq!(
+        view.seats[0].username.as_deref(),
+        Some("handle-of-450853396908343307"),
+        "the username came out of the ticket"
+    );
     assert!(view.ranked(), "one authenticated seat and nothing else");
+}
+
+// -------------------------------------------------------------------------------------
+// Naming: /implementation/naming.md
+// -------------------------------------------------------------------------------------
+
+/// `A name another player in the match has chosen cannot be chosen`.
+#[test]
+fn a_name_another_player_chose_is_refused() {
+    let mut relay = relay();
+    let match_id = host(&mut relay, &connection("alice"));
+    // The host is Alice, so Alice is taken. A different account and a different
+    // socket, because the thing being refused is the name and nothing else.
+    assert_eq!(
+        join(&mut relay, &connection("other"), &match_id, "2", "Alice"),
+        Some(Refused::NameTaken)
+    );
+    assert_eq!(
+        relay.view(&match_id).seats.len(),
+        1,
+        "a refused join leaves nothing behind"
+    );
+    // And the same account is seated the moment it asks for a name nobody has.
+    assert_eq!(
+        join(&mut relay, &connection("other"), &match_id, "2", "Beatrice"),
+        None
+    );
+}
+
+/// A name is not freed by leaving.
+///
+/// Leaving is an elimination and stays in the log. Freeing the name would put two
+/// differently-accounted players under one name in one match's log, and nothing could
+/// say afterwards which of them a line meant.
+#[test]
+fn a_name_a_player_who_left_chose_is_still_refused() {
+    let mut relay = relay();
+    let match_id = host(&mut relay, &connection("alice"));
+    let bob = connection("bob");
+    assert_eq!(join(&mut relay, &bob, &match_id, "2", "Bob"), None);
+    relay.receive(
+        &bob,
+        Message::Leave {
+            match_id: match_id.clone(),
+        },
+        moment(),
+    );
+    assert!(
+        relay.view(&match_id).has_left(Seat(1)),
+        "the leave was recorded, so the rest of this test means something"
+    );
+    assert_eq!(
+        join(&mut relay, &connection("carol"), &match_id, "3", "Bob"),
+        Some(Refused::NameTaken)
+    );
+}
+
+/// A Discord display name constrains nobody.
+///
+/// The statement says `has chosen`, and a Discord display name is not chosen: it
+/// arrives out of a verified ticket, is not unique on Discord's side either, and so can
+/// never be refused. That one word is the whole of the separation between the two kinds
+/// of name — there is no namespace in the code to go looking for.
+#[test]
+fn a_guest_may_choose_the_display_name_of_a_discord_player() {
+    let mut relay = relay();
+    let alice = connection("alice");
+    let match_id = relay
+        .receive(
+            &alice,
+            Message::Host {
+                who: ticket_for("1", "Ada"),
+                version: PROTOCOL_VERSION,
+                nonce: "ada-hosts".to_string(),
+                name: "ignored".to_string(),
+            },
+            moment(),
+        )
+        .created
+        .expect("a match");
+    assert_eq!(relay.view(&match_id).name_of(Seat(0)), "Ada");
+    assert_eq!(
+        join(&mut relay, &connection("guest"), &match_id, "g", "Ada"),
+        None,
+        "a name nobody chose is in nobody's way"
+    );
+    // Both of them, under one name, which is what the separation permits. What tells
+    // them apart on screen is the account and the username, not the name.
+    let view = relay.view(&match_id);
+    assert_eq!(view.name_of(Seat(1)), "Ada");
+    assert!(view.seats[0].account.is_proven());
+    assert!(!view.seats[1].account.is_proven());
+    assert_eq!(view.seats[1].username, None, "a guest has no username");
+}
+
+/// Two Discord accounts sharing a display name both get in, and differ by username.
+///
+/// This is the test that says what the design actually promises rather than what it
+/// looks like it promises. Neither of these players can be refused, so the guarantee is
+/// not *no two Alices* — it is that a reader can always tell which is which.
+#[test]
+fn two_discord_players_with_one_display_name_both_join_and_differ() {
+    let mut relay = relay();
+    let match_id = relay
+        .receive(
+            &connection("first"),
+            Message::Host {
+                who: ticket_for("111", "Alice"),
+                version: PROTOCOL_VERSION,
+                nonce: "alices".to_string(),
+                name: "ignored".to_string(),
+            },
+            moment(),
+        )
+        .created
+        .expect("a match");
+    assert_eq!(
+        seat(
+            &mut relay,
+            &connection("second"),
+            &match_id,
+            ticket_says("222", "Alice"),
+        ),
+        None,
+        "a Discord name is never refused, however many share it"
+    );
+    let view = relay.view(&match_id);
+    assert_eq!(
+        vec![view.name_of(Seat(0)), view.name_of(Seat(1))],
+        vec!["Alice", "Alice"],
+        "both are called Alice, and both are entitled to be"
+    );
+    let handles: Vec<Option<&str>> = view
+        .seats
+        .iter()
+        .map(|seat| seat.username.as_deref())
+        .collect();
+    assert_eq!(
+        handles,
+        vec![Some("handle-of-111"), Some("handle-of-222")],
+        "and the usernames are what tells them apart"
+    );
+}
+
+/// `A listed match shows the names in it`, and the host's is the first.
+///
+/// Three statements off one field, so the order is load-bearing rather than incidental
+/// and a test has to say so.
+#[test]
+fn a_listing_names_everybody_with_the_host_first() {
+    let mut relay = relay();
+    let match_id = host(&mut relay, &connection("alice"));
+    assert_eq!(
+        join(&mut relay, &connection("bob"), &match_id, "2", "Bob"),
+        None
+    );
+    assert_eq!(
+        join(&mut relay, &connection("carol"), &match_id, "3", "Carol"),
+        None
+    );
+    let listed = relay.open_matches(None, moment());
+    assert_eq!(listed.len(), 1);
+    assert_eq!(
+        listed[0].names,
+        vec!["Alice".to_string(), "Bob".to_string(), "Carol".to_string()],
+        "in seat order, the host's first"
+    );
+}
+
+/// A name taken while a join was being decided is refused on the retry.
+///
+/// The listing carries the names, so a person meets `NameTaken` by losing a race rather
+/// than by being told something they had no way to know. This is that race: the guard
+/// reads the same snapshot the event is appended against, so the commit decides it.
+#[test]
+fn a_name_taken_while_a_join_was_decided_is_refused_on_the_retry() {
+    let match_id = meddled_match();
+    // Somebody takes Beatrice between this join being decided and it landing.
+    let interloper = Event::Join {
+        seat: Seat(1),
+        name: "Beatrice".to_string(),
+        colour: "blue".to_string(),
+        account: Account::Guest("account-x".to_string()),
+        username: None,
+    };
+    let mut relay = Relay::new(
+        Meddling::interfering_after(1, &match_id, vec![interloper]),
+        MemoryConnections::new(),
+        both(Secret::from_bytes(MEDDLED_SECRET)),
+    );
+    seat_a_host(&mut relay, &match_id);
+    assert_eq!(
+        seat(
+            &mut relay,
+            &ConnectionId("late".to_string()),
+            &match_id,
+            guest_says("account-late", "Beatrice"),
+        ),
+        Some(Refused::NameTaken),
+        "free when it was decided, taken by the time it tried to land"
+    );
+    assert!(
+        relay.log().spent(),
+        "the interference never fired, so this proved nothing"
+    );
+    // By account, not by count: one Beatrice is also what an interference that never
+    // fired would leave behind.
+    let view = relay.view(&match_id);
+    assert_eq!(
+        view.seat_of_account(&Account::Guest("account-x".to_string())),
+        Some(Seat(1)),
+        "the interloper holds the name"
+    );
+    assert_eq!(
+        view.seat_of_account(&Account::Guest("account-late".to_string())),
+        None,
+        "and the refused join left nothing behind"
+    );
 }
 
 /// A guest id is never checked, asserted directly.
@@ -2054,12 +2327,10 @@ fn a_guest_id_is_taken_as_given() {
         let outcome = relay.receive(
             &connection(id),
             Message::Host {
-                who: Who::Guest {
-                    id: id.to_string(),
-                    name: "Anybody".to_string(),
-                },
+                who: Who::Guest { id: id.to_string() },
                 version: PROTOCOL_VERSION,
                 nonce: format!("nonce-{id}"),
+                name: "Anybody".to_string(),
             },
             moment(),
         );
@@ -2087,10 +2358,10 @@ fn a_guest_cannot_spell_its_way_into_a_discord_account() {
             Message::Host {
                 who: Who::Guest {
                     id: "discord:450853396908343307".to_string(),
-                    name: "Ada Lovelace".to_string(),
                 },
                 version: PROTOCOL_VERSION,
                 nonce: "impostor".to_string(),
+                name: "Ada Lovelace".to_string(),
             },
             moment(),
         )
@@ -2122,6 +2393,7 @@ fn a_ticket_that_proves_nothing_seats_nobody() {
                 &Secret::from_bytes([99; 32]),
                 "discord:450853396908343307",
                 "Ada",
+                "ada",
                 u64::MAX,
             ),
         ),
@@ -2131,6 +2403,7 @@ fn a_ticket_that_proves_nothing_seats_nobody() {
                 &secret(),
                 "discord:450853396908343307",
                 "Ada",
+                "ada",
                 // A second before every message in these tests arrives.
                 moment().to_unix_nanos() / 1_000_000_000 - 1,
             ),
@@ -2139,7 +2412,7 @@ fn a_ticket_that_proves_nothing_seats_nobody() {
             // Nothing mints one of these, and if anything ever did it must not count as
             // proven — which is what the guard in `identify` is for.
             "a ticket naming a guest",
-            integrity::ticket(&secret(), "guest:1", "Ada", u64::MAX),
+            integrity::ticket(&secret(), "guest:1", "Ada", "ada", u64::MAX),
         ),
     ];
     for (what, ticket) in forgeries {
@@ -2148,7 +2421,12 @@ fn a_ticket_that_proves_nothing_seats_nobody() {
                 &mut relay,
                 &connection(what),
                 &match_id,
-                Who::Authenticated { ticket },
+                Says {
+                    who: Who::Authenticated { ticket },
+                    // Never reached: every one of these tickets is refused before a
+                    // name could be recorded.
+                    name: "Forger".to_string(),
+                },
             ),
             Some(Refused::BadTicket),
             "{what} was accepted"
@@ -2176,9 +2454,9 @@ fn ranked_is_every_seat_and_not_most_of_them() {
             let mut match_id = None;
             for (at, &is_proven) in proven.iter().enumerate() {
                 let who = if is_proven {
-                    ticket_for(&format!("4508533969083433{at:02}"), &format!("Proven {at}"))
+                    ticket_says(&format!("4508533969083433{at:02}"), &format!("Proven {at}"))
                 } else {
-                    guest_who(&format!("guest-{at}"), &format!("Guest {at}"))
+                    guest_says(&format!("guest-{at}"), &format!("Guest {at}"))
                 };
                 let socket = connection(&format!("socket-{at}"));
                 match &match_id {
@@ -2186,8 +2464,9 @@ fn ranked_is_every_seat_and_not_most_of_them() {
                         let outcome = relay.receive(
                             &socket,
                             Message::Host {
-                                who,
+                                who: who.who,
                                 version: PROTOCOL_VERSION,
+                                name: who.name,
                                 nonce: "ranked".to_string(),
                             },
                             moment(),
@@ -2234,6 +2513,7 @@ fn leaving_a_started_match_does_not_change_whether_it_is_ranked() {
             Message::Host {
                 who: ticket_for("1", "Ada"),
                 version: PROTOCOL_VERSION,
+                name: "not the ticket's name".to_string(),
                 nonce: "ranked".to_string(),
             },
             moment(),
@@ -2241,7 +2521,7 @@ fn leaving_a_started_match_does_not_change_whether_it_is_ranked() {
         .created
         .expect("a match");
     assert_eq!(
-        seat(&mut relay, &bob, &match_id, ticket_for("2", "Bob")),
+        seat(&mut relay, &bob, &match_id, ticket_says("2", "Bob")),
         None
     );
     relay.receive(
@@ -2276,6 +2556,7 @@ fn a_listing_says_which_matches_are_ranked() {
             Message::Host {
                 who: ticket_for("1", "Ada"),
                 version: PROTOCOL_VERSION,
+                name: "not the ticket's name".to_string(),
                 nonce: "proven".to_string(),
             },
             moment(),
@@ -2286,8 +2567,9 @@ fn a_listing_says_which_matches_are_ranked() {
         .receive(
             &connection("sean"),
             Message::Host {
-                who: guest_who("sean", "Sean"),
+                who: guest_who("sean"),
                 version: PROTOCOL_VERSION,
+                name: "Sean".to_string(),
                 nonce: "unproven".to_string(),
             },
             moment(),
@@ -2327,13 +2609,14 @@ fn a_ticket_minted_with_the_dice_secret_proves_nothing() {
         },
     );
     let minted_with_the_wrong_one = Who::Authenticated {
-        ticket: integrity::ticket(&dice, "discord:1", "Ada", u64::MAX),
+        ticket: integrity::ticket(&dice, "discord:1", "Ada", "ada", u64::MAX),
     };
     let outcome = relay.receive(
         &connection("ada"),
         Message::Host {
             who: minted_with_the_wrong_one,
             version: PROTOCOL_VERSION,
+            name: "not the ticket's name".to_string(),
             nonce: "once".to_string(),
         },
         moment(),
@@ -2345,9 +2628,10 @@ fn a_ticket_minted_with_the_dice_secret_proves_nothing() {
         &connection("ada"),
         Message::Host {
             who: Who::Authenticated {
-                ticket: integrity::ticket(&ticket, "discord:1", "Ada", u64::MAX),
+                ticket: integrity::ticket(&ticket, "discord:1", "Ada", "ada", u64::MAX),
             },
             version: PROTOCOL_VERSION,
+            name: "not the ticket's name".to_string(),
             nonce: "once".to_string(),
         },
         moment(),
@@ -2375,9 +2659,10 @@ fn without_a_ticket_secret_guests_still_play() {
             who: Who::Authenticated {
                 // Minted under the dice secret, which is the only one this relay has —
                 // and still refused, because it has no ticket secret to check against.
-                ticket: integrity::ticket(&secret(), "discord:1", "Ada", u64::MAX),
+                ticket: integrity::ticket(&secret(), "discord:1", "Ada", "ada", u64::MAX),
             },
             version: PROTOCOL_VERSION,
+            name: "not the ticket's name".to_string(),
             nonce: "once".to_string(),
         },
         moment(),
@@ -2387,8 +2672,9 @@ fn without_a_ticket_secret_guests_still_play() {
     let guest = relay.receive(
         &connection("sean"),
         Message::Host {
-            who: guest_who("sean", "Sean"),
+            who: guest_who("sean"),
             version: PROTOCOL_VERSION,
+            name: "Sean".to_string(),
             nonce: "guest".to_string(),
         },
         moment(),
@@ -2436,7 +2722,7 @@ fn the_listing_and_the_refusal_say_the_same_thing() {
                         &mut relay,
                         &connection(&format!("socket-{at}")),
                         &match_id,
-                        guest_who(&format!("filler-{at}"), "Filler"),
+                        guest_says(&format!("filler-{at}"), &format!("Filler {at}")),
                     ),
                     None,
                     "seat {at} of a full match"
@@ -2499,8 +2785,8 @@ fn the_listing_and_the_refusal_say_the_same_thing() {
 type Shape = fn() -> (Relay<MemoryLog, MemoryConnections>, MatchId);
 
 /// What the asker says it is, for the agreement test above.
-fn asker() -> Who {
-    guest_who("asker", "Asker")
+fn asker() -> Says {
+    guest_says("asker", "Asker")
 }
 
 /// `A listed match shows whether the player asking holds a seat in it`.
@@ -2515,8 +2801,9 @@ fn a_listing_marks_the_one_match_the_asker_is_in() {
         .receive(
             &bob,
             Message::Host {
-                who: guest_who("bob", "Bob"),
+                who: guest_who("bob"),
                 version: PROTOCOL_VERSION,
+                name: "Bob".to_string(),
                 nonce: "bob-hosts".to_string(),
             },
             moment(),
@@ -2558,8 +2845,9 @@ fn a_player_in_one_match_cannot_join_another() {
         .receive(
             &bob,
             Message::Host {
-                who: guest_who("bob", "Bob"),
+                who: guest_who("bob"),
                 version: PROTOCOL_VERSION,
+                name: "Bob".to_string(),
                 nonce: "bob-hosts".to_string(),
             },
             moment(),
@@ -2573,7 +2861,7 @@ fn a_player_in_one_match_cannot_join_another() {
             &mut relay,
             &connection("alice-elsewhere"),
             &second,
-            guest_who("1", "Alice"),
+            guest_says("1", "Alice"),
         ),
         Some(Refused::AlreadyInAMatch {
             match_id: first.clone()
@@ -2601,7 +2889,7 @@ fn a_player_in_one_match_cannot_join_another() {
             &mut relay,
             &connection("alice-elsewhere"),
             &second,
-            guest_who("1", "Alice"),
+            guest_says("1", "Alice"),
         ),
         None,
         "leaving is how somebody goes and plays elsewhere"
@@ -2627,8 +2915,9 @@ fn a_finished_match_does_not_hold_its_players() {
     let again = relay.receive(
         &alice,
         Message::Host {
-            who: guest_who("1", "Alice"),
+            who: guest_who("1"),
             version: PROTOCOL_VERSION,
+            name: "Alice".to_string(),
             nonce: "second".to_string(),
         },
         moment(),
@@ -2667,7 +2956,13 @@ fn a_seat_is_given_the_first_colour_nobody_holds() {
     for (at, expected) in [(2, "black"), (3, "magenta"), (4, "green")] {
         let who = connection(&format!("socket-{at}"));
         assert_eq!(
-            join(&mut relay, &who, &match_id, &at.to_string(), "Joiner"),
+            join(
+                &mut relay,
+                &who,
+                &match_id,
+                &at.to_string(),
+                &format!("Joiner {at}"),
+            ),
             None
         );
         assert_eq!(

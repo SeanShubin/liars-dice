@@ -286,6 +286,9 @@ fn start(colour: usize, opponents: usize) -> Playing {
             name: name_of(player),
             colour: PALETTE[colours[player]].name.to_string(),
             account: account_of(player),
+            // A desktop game has no authentication, so nobody here has a Discord
+            // username to be told apart by.
+            username: None,
         });
     }
     audit.record(Event::PlayerOrder(
@@ -760,6 +763,7 @@ mod tests {
                 name: "You".into(),
                 colour: "red".into(),
                 account: Account::Local,
+                username: None,
             });
             audit.record(Event::Deal {
                 seat: Seat(0),

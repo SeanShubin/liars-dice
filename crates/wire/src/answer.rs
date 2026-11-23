@@ -68,8 +68,7 @@ fn listed_shape(open: &Listed) -> Shape {
         "open",
         vec![
             ("match", text(&open.match_id.0)),
-            ("host", text(&open.host)),
-            ("players", Value::Count(open.players as u64)),
+            ("names", Value::Texts(open.names.clone())),
             ("ranked", Value::Flag(open.ranked)),
             ("joinable", Value::Flag(open.joinable)),
             ("mine", Value::Flag(open.mine)),
@@ -97,6 +96,7 @@ fn refusal(why: &Refused) -> Shape {
         Refused::AlreadyStarted => named("already-started"),
         Refused::Barred => named("barred"),
         Refused::ColourTaken => named("colour-taken"),
+        Refused::NameTaken => named("name-taken"),
         Refused::MatchIsFull => named("match-is-full"),
         Refused::NotTheHost => named("not-the-host"),
         Refused::NotInThisMatch => named("not-in-this-match"),
@@ -142,8 +142,7 @@ pub fn from_shape(shape: &Shape) -> Result<Answer, Malformed> {
 fn listed_of(shape: &Shape) -> Result<Listed, Malformed> {
     Ok(Listed {
         match_id: MatchId(shape.text("match")?.to_string()),
-        host: shape.text("host")?.to_string(),
-        players: shape.count("players")?,
+        names: shape.texts("names")?,
         ranked: shape.flag("ranked")?,
         joinable: shape.flag("joinable")?,
         mine: shape.flag("mine")?,

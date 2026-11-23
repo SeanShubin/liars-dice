@@ -18,6 +18,10 @@ pub struct SeatInfo {
     pub name: String,
     pub colour: String,
     pub account: Account,
+    /// The Discord username, for an authenticated player. Carried so a reader can
+    /// tell two players with one display name apart, which is the only thing that
+    /// can: a Discord display name is not unique and cannot be refused.
+    pub username: Option<String>,
 }
 
 /// How a match stopped.
@@ -79,11 +83,13 @@ impl MatchView {
                     name,
                     colour,
                     account,
+                    username,
                 } => view.seats.push(SeatInfo {
                     seat: *seat,
                     name: name.clone(),
                     colour: colour.clone(),
                     account: account.clone(),
+                    username: username.clone(),
                 }),
                 Event::Host { seat } => view.host = Some(*seat),
                 Event::Bar { seat } => {

@@ -43,18 +43,26 @@ pub fn every_event() -> Vec<Event> {
             name: awkward_name(),
             colour: "dark red".to_string(),
             account: Account::Discord("450853396908343307".to_string()),
+            // Awkward too, and deliberately not the display name: a rendering that
+            // wrote one field where the other belonged would round-trip if these
+            // were the same string.
+            username: Some("a.username\u{0}with a nul".to_string()),
         },
+        // Absent, which is the case the shape omits a field for entirely. A list with
+        // only the present case would pass against a reader that required it.
         Event::Join {
             seat: Seat(0),
             name: "Ada".to_string(),
             colour: "blue".to_string(),
             account: Account::Ai,
+            username: None,
         },
         Event::Join {
             seat: Seat(1),
             name: "the keyboard".to_string(),
             colour: "green".to_string(),
             account: Account::Local,
+            username: None,
         },
         Event::PlayerOrder(vec![Seat(2), Seat(0), seat]),
         Event::Variant {
@@ -110,23 +118,27 @@ pub fn every_message() -> Vec<Message> {
             },
             version: protocol::PROTOCOL_VERSION,
             nonce: "a nonce with a space".to_string(),
+            // Sent even with a ticket, and ignored by the relay in favour of what the
+            // ticket proved. The format carries what a client sends, not what the
+            // relay does with it.
+            name: "ignored over a ticket".to_string(),
         },
         // And a guest, whose name is theirs to choose and is awkward on purpose.
         Message::Host {
             who: Who::Guest {
                 id: "0123456789abcdef0123456789abcdef".to_string(),
-                name: awkward_name(),
             },
             version: protocol::PROTOCOL_VERSION,
             nonce: "a nonce with a space".to_string(),
+            name: awkward_name(),
         },
         Message::Join {
             match_id: match_id.clone(),
             who: Who::Guest {
                 id: "fedcba9876543210fedcba9876543210".to_string(),
-                name: "Ada".to_string(),
             },
             version: protocol::PROTOCOL_VERSION,
+            name: "Ada".to_string(),
         },
         Message::List {
             who: Who::Authenticated {
@@ -178,7 +190,6 @@ pub fn every_message() -> Vec<Message> {
             match_id,
             who: Who::Guest {
                 id: "0123456789abcdef0123456789abcdef".to_string(),
-                name: "Ada".to_string(),
             },
         },
     ]
@@ -217,8 +228,9 @@ pub fn every_answer() -> Vec<Answer> {
         Answer::Listing(vec![
             Listed {
                 match_id: MatchId("match-7".to_string()),
-                host: awkward_name(),
-                players: 1,
+                // One name, which is the host's, because that is what a match nobody
+                // has joined yet looks like.
+                names: vec![awkward_name()],
                 ranked: false,
                 joinable: true,
                 mine: false,
@@ -227,8 +239,10 @@ pub fn every_answer() -> Vec<Answer> {
             // back as one of them and look right half the time.
             Listed {
                 match_id: MatchId("match-8".to_string()),
-                host: "Ada".to_string(),
-                players: 9,
+                // Several, in order, with a repeat: two players may share a display
+                // name when neither of them chose it. A rendering that deduplicated
+                // or sorted would fail here and nowhere else.
+                names: vec!["Ada".to_string(), awkward_name(), "Ada".to_string()],
                 ranked: true,
                 // Every flag both ways across the two rows, because a rendering that
                 // dropped one would come back as a default and look right half the time.

@@ -139,7 +139,6 @@ impl Table {
             // and nothing in a local match asks whether there was one.
             let who = Who::Guest {
                 id: format!("table-{at}"),
-                name,
             };
             let outcome = match &match_id {
                 None => relay.receive(
@@ -149,6 +148,7 @@ impl Table {
                         version: PROTOCOL_VERSION,
                         // Fixed, not generated, for the same reason as the id above.
                         nonce: "table".to_string(),
+                        name,
                     },
                     now,
                 ),
@@ -158,6 +158,7 @@ impl Table {
                         match_id: MatchId(id.to_string()),
                         who,
                         version: PROTOCOL_VERSION,
+                        name,
                     },
                     now,
                 ),

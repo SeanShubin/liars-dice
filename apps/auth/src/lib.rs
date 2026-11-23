@@ -45,6 +45,10 @@ pub struct Identified {
     /// The display name. What `An authenticated player's name is their Discord display
     /// name` means.
     pub name: String,
+    /// The username, which Discord keeps unique where it does not keep a display name
+    /// unique. Minted into the ticket so a reader can tell two players called the same
+    /// thing apart; never the name a seat is recorded under.
+    pub username: String,
 }
 
 /// Why a code could not be traded.
@@ -202,7 +206,13 @@ impl<D: Discord> Exchange<D> {
 
         let account = account_text(&Account::Discord(identified.id));
         let expires_at = now.to_unix_nanos() / 1_000_000_000 + TICKET_SECONDS;
-        let ticket = integrity::ticket(secret, &account, &identified.name, expires_at);
+        let ticket = integrity::ticket(
+            secret,
+            &account,
+            &identified.name,
+            &identified.username,
+            expires_at,
+        );
         Response::of(
             200,
             json!({

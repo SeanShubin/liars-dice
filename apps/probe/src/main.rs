@@ -57,9 +57,9 @@ fn main() {
         let seated = Seated::hosting(
             Who::Guest {
                 id: "probe-host".to_string(),
-                name: "Host".to_string(),
             },
             host_nonce,
+            "Host",
             Box::new(Ai),
         )
         .expect("a guest is always a seat");
@@ -85,9 +85,12 @@ fn main() {
         let seated = Seated::joining(
             Who::Guest {
                 id: "probe-guest".to_string(),
-                name: "Guest".to_string(),
             },
             match_id,
+            // Not the host's name, because two players in one match cannot share a
+            // chosen one. A probe that sent the same name twice would be refused on
+            // the join and report a broken relay.
+            "Guest",
             Box::new(Ai),
         )
         .expect("a guest is always a seat");

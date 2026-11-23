@@ -44,8 +44,12 @@ fn a_name_keeps_its_spaces_and_odds_keep_their_precision() {
         name: examples::awkward_name(),
         colour: "red".to_string(),
         account: Account::Discord("1".to_string()),
+        username: Some("mary jane".to_string()),
     };
-    assert_eq!(joined.to_string(), "join #1 Mary-Jane red discord:1");
+    assert_eq!(
+        joined.to_string(),
+        "join #1 Mary-Jane red discord:1 mary-jane"
+    );
     let text = json::write(&event::shape_of(&joined));
     assert!(
         text.contains("Mary Jane"),
@@ -198,6 +202,9 @@ fn a_discord_id_keeps_everything_after_the_first_colon() {
             name: "Ada".to_string(),
             colour: "red".to_string(),
             account: Account::Discord("a:b".to_string()),
+            // The shape above carries no username field, and absent reads back as
+            // absent rather than as a refusal.
+            username: None,
         })
     );
 }
@@ -210,6 +217,7 @@ fn a_guest_account_is_its_own_kind() {
         name: "Mary Jane".to_string(),
         colour: "dark red".to_string(),
         account: Account::Guest("0123456789abcdef0123456789abcdef".to_string()),
+        username: None,
     };
     let shape = json::read(&json::write(&event::shape_of(&original))).expect("a shape");
     assert_eq!(event::from_shape(&shape), Ok(original));

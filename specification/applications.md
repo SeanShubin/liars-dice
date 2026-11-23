@@ -18,7 +18,7 @@
 ## Web
 - A web game is reached through a sign in
 - A person can sign in without an account
-- A person who signs in without an account chooses a display name
+- A sign in survives a reload
 - A signed in player holding no seat sees the dashboard
 - The dashboard is the only screen that offers to host a match
 - The dashboard is the only screen that offers to join a match
@@ -29,6 +29,8 @@
 - Only the host's lobby offers to start the match
 - Only the host's lobby offers to add an AI player
 - Only the host's lobby offers to bar a player
+- A match shows which players have an account
+- An authenticated player's Discord username is available on demand
 
 ## Hotseat
 - Hotseat is a seating arrangement, not a game

@@ -71,11 +71,8 @@ fn frame_of(answer: &Answer) -> String {
 
 /// A guest, which is what every player in a hosted match is until they authenticate — and
 /// what every AI player is forever, because it never authenticates.
-fn guest(id: &str, name: &str) -> Who {
-    Who::Guest {
-        id: id.to_string(),
-        name: name.to_string(),
-    }
+fn guest(id: &str) -> Who {
+    Who::Guest { id: id.to_string() }
 }
 
 /// One page's worth of state: a person's seat, and a seat per bot it added.
@@ -90,7 +87,7 @@ fn a_host_plays_a_whole_match_against_two_bots_it_added() {
     // The person, and two bots the host added. Each gets its own connection, which is the
     // correction this test exists for: a socket holds one seat.
     let host_socket = ConnectionId("page-host".to_string());
-    let host = Seated::hosting(guest("host-id", "Sean"), "bots", Box::new(Ai))
+    let host = Seated::hosting(guest("host-id"), "bots", "Sean", Box::new(Ai))
         .expect("a guest is always a seat");
 
     let mut page = Page {
@@ -120,8 +117,11 @@ fn a_host_plays_a_whole_match_against_two_bots_it_added() {
                 let bot = Seated::joining(
                     // A guest id the host's client generated, and a name it chose. The
                     // relay cannot tell this from a person, which is the point.
-                    guest(&format!("bot-{at}"), &format!("Ada {at}")),
+                    guest(&format!("bot-{at}")),
                     match_id.clone(),
+                    // One per bot, because two players in a match cannot share a
+                    // chosen name and a bot's name is chosen by whoever added it.
+                    format!("Ada {at}"),
                     Box::new(Ai),
                 )
                 .expect("a guest is always a seat");

@@ -89,8 +89,49 @@ const MAX_ATTEMPTS: usize = 16;
 /// about is a parameter list long enough to pass two strings in the wrong order.
 struct Sitting {
     account: Account,
+    /// What this seat will be called: the Discord display name when a ticket proved
+    /// one, and otherwise the name the request asked for.
+    ///
+    /// `An authenticated player's name is their Discord display name`, so a name sent
+    /// alongside a ticket is ignored rather than refused — the screen that sends it
+    /// offers no field for one, and refusing would turn a client's politeness into an
+    /// error.
     name: String,
+    /// The Discord username, when a ticket proved one.
+    username: Option<String>,
     version: u32,
+}
+
+/// What a ticket proved, beyond the account.
+///
+/// Both are `None` for a guest, who proves nothing and names themselves when they take
+/// a seat.
+struct Proved {
+    name: Option<String>,
+    username: Option<String>,
+}
+
+/// The names in a match that were chosen rather than proved.
+///
+/// `A name another player in the match has chosen cannot be chosen`. A Discord display
+/// name is not *chosen*: it arrives out of a verified ticket, no client can alter it,
+/// and it is not unique, so it can never be refused. It therefore constrains nobody,
+/// and that one word in the statement is the whole of the separation between the two
+/// kinds of name — there is no concept of a namespace in this code.
+///
+/// A guest and an AI player share the one namespace, because neither name is backed by
+/// an account. An AI's name was chosen by the host that added it, which is still a
+/// choice somebody made.
+///
+/// A player who left keeps their name reserved. Leaving stays in the log, so freeing
+/// the name would put two differently-accounted players under one name in one match's
+/// log, with nothing able to say afterwards which of them a line meant.
+fn chosen_names(view: &MatchView) -> Vec<&str> {
+    view.seats
+        .iter()
+        .filter(|seat| !seat.account.is_proven())
+        .map(|seat| seat.name.as_str())
+        .collect()
 }
 
 /// The colours the seats of a match hold.
@@ -311,6 +352,10 @@ pub enum Message {
     Host {
         who: Who,
         version: u32,
+        /// What the host asks to be called, used only when no ticket proved a name.
+        ///
+        /// `A player chooses their name when they take a seat`, and hosting takes one.
+        name: String,
         /// Which request this is, so the match it makes has a name.
         ///
         /// Need not be secret or unpredictable, only distinct per request. Sending the
@@ -322,6 +367,12 @@ pub enum Message {
         match_id: MatchId,
         who: Who,
         version: u32,
+        /// What the joiner asks to be called, used only when no ticket proved a name.
+        ///
+        /// Refused as `NameTaken` if another player in the match chose it. Unlike the
+        /// colour, which the relay gives, this is asked for — the listing carries the
+        /// names in a match, so the answer is knowable before the asking.
+        name: String,
     },
     /// A seat chooses the colour of its dice, which it may do until the match starts.
     Colour {
@@ -447,6 +498,7 @@ pub enum Refused {
     AlreadyStarted,
     Barred,
     ColourTaken,
+    NameTaken,
     MatchIsFull,
     NotTheHost,
     NotInThisMatch,
@@ -522,8 +574,17 @@ impl Outcome {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Listed {
     pub match_id: MatchId,
-    pub host: String,
-    pub players: usize,
+    /// Every name in the match, in seat order, so the host's is the first.
+    ///
+    /// One field answering three statements. `A listed match shows the names in it` is
+    /// the list, and it is what makes choosing a name at the join an informed choice
+    /// rather than a guess. `A listed match shows its host` is the first element,
+    /// because the host holds the seat the match was created with. `A listed match
+    /// shows how many players have joined` is its length.
+    ///
+    /// A separate host and player count were those same two values a second time on
+    /// the wire, and a copy is something that can be changed one at a time.
+    pub names: Vec<String>,
     /// Whether the asking account could join it right now.
     ///
     /// The refusal `join` would give, inverted — not a second opinion about it. Two copies
@@ -655,11 +716,7 @@ impl<L: Log, C: Connections> Relay<L, C> {
                     .is_some_and(|seat| !view.has_left(seat))
             });
             listed.push(Listed {
-                host: view
-                    .host()
-                    .map(|seat| view.name_of(seat).to_string())
-                    .unwrap_or_default(),
-                players: view.seats.len(),
+                names: view.seats.iter().map(|seat| seat.name.clone()).collect(),
                 ranked: view.ranked(),
                 joinable: self.why_not_joinable(&match_id, &view, asking).is_none(),
                 mine,
@@ -796,12 +853,14 @@ impl<L: Log, C: Connections> Relay<L, C> {
                 who,
                 version,
                 nonce,
+                name,
             } => match self.identify(who, now) {
-                Ok((account, name)) => self.host(
+                Ok((account, proved)) => self.host(
                     from,
                     Sitting {
+                        name: proved.name.unwrap_or(name),
+                        username: proved.username,
                         account,
-                        name,
                         version,
                     },
                     nonce,
@@ -813,13 +872,15 @@ impl<L: Log, C: Connections> Relay<L, C> {
                 match_id,
                 who,
                 version,
+                name,
             } => match self.identify(who, now) {
-                Ok((account, name)) => self.join(
+                Ok((account, proved)) => self.join(
                     from,
                     match_id,
                     Sitting {
+                        name: proved.name.unwrap_or(name),
+                        username: proved.username,
                         account,
-                        name,
                         version,
                     },
                     now,
@@ -857,9 +918,15 @@ impl<L: Log, C: Connections> Relay<L, C> {
     /// than an oversight: anybody who learns somebody else's guest id can take their seat
     /// in an unranked match, and the whole of the security budget is spent on the one
     /// question a ranked match turns on.
-    fn identify(&self, who: Who, now: Moment) -> Result<(Account, String), Refused> {
+    fn identify(&self, who: Who, now: Moment) -> Result<(Account, Proved), Refused> {
         match who {
-            Who::Guest { id, name } => Ok((Account::Guest(id), name)),
+            Who::Guest { id } => Ok((
+                Account::Guest(id),
+                Proved {
+                    name: None,
+                    username: None,
+                },
+            )),
             Who::Authenticated { ticket } => {
                 // No ticket secret, so nothing can be proved and nothing is guessed at.
                 // A deployment in this state serves guests and refuses sign-ins, which is
@@ -881,7 +948,13 @@ impl<L: Log, C: Connections> Relay<L, C> {
                 if !account.is_proven() {
                     return Err(Refused::BadTicket);
                 }
-                Ok((account, proved.name))
+                Ok((
+                    account,
+                    Proved {
+                        name: Some(proved.name),
+                        username: Some(proved.username),
+                    },
+                ))
             }
         }
     }
@@ -925,6 +998,7 @@ impl<L: Log, C: Connections> Relay<L, C> {
         let Sitting {
             account,
             name,
+            username,
             version,
         } = sitting;
         if version != PROTOCOL_VERSION {
@@ -959,12 +1033,15 @@ impl<L: Log, C: Connections> Relay<L, C> {
         work.push(Event::Version { protocol: version });
         work.push(Event::Join {
             seat,
+            // The first seat of a new match, so no name is taken and nothing can be
+            // refused here. NameTaken belongs to `join`.
             name,
             // The first seat of a new match, so nothing is taken and this is the first
             // colour in the assignment order. Expected to be changed in the lobby, which
             // is the only screen that can show what is free.
             colour: given_colour(&[]),
             account: account.clone(),
+            username,
         });
         work.push(Event::Host { seat });
 
@@ -1019,6 +1096,7 @@ impl<L: Log, C: Connections> Relay<L, C> {
         let Sitting {
             account,
             name,
+            username,
             version,
         } = sitting;
         let mut work = self.open(&match_id, now);
@@ -1049,15 +1127,27 @@ impl<L: Log, C: Connections> Relay<L, C> {
         if view.seat_of_account(&account).is_some() {
             return self.resume(from, match_id, account, now);
         }
+        // `A name another player in the match has chosen cannot be chosen`. Only a name
+        // that was chosen constrains one; see `chosen_names`. The listing carries the
+        // names in a match, so meeting this refusal is losing a race rather than the
+        // ordinary way to find out — which is the whole reason the choice moved here.
+        // `A name another player in the match has chosen cannot be chosen`. Only a name
+        // that was chosen constrains one; see `chosen_names`. The listing carries the
+        // names in a match, so meeting this refusal is losing a race rather than the
+        // ordinary way to find out — which is the whole reason the choice moved here.
+        if !account.is_proven() && chosen_names(&view).contains(&name.as_str()) {
+            return Ok(Outcome::refused(Refused::NameTaken));
+        }
         // Every guard above read the same snapshot this event is appended against, so the
-        // seat, the colour, the player count and the started flag are all decided by the
-        // commit rather than merely consulted before it.
+        // seat, the name, the colour, the player count and the started flag are all
+        // decided by the commit rather than merely consulted before it.
         let seat = Seat(view.seats.len() as u8);
         let event = Event::Join {
             seat,
             name,
             colour: given_colour(&taken_colours(&view)),
             account,
+            username,
         };
         work.push(event.clone());
         self.commit(&work)?;

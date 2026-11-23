@@ -261,13 +261,20 @@ pub struct Ticket {
     pub account: String,
     /// The display name to record at the join.
     pub name: String,
+    /// The Discord username, which Discord keeps unique where a display name is not.
+    ///
+    /// Proved rather than sent, for the same reason the display name is: a client that
+    /// could assert a username could claim to be anybody. It is what lets a reader
+    /// tell two players with one display name apart, and nothing else can.
+    pub username: String,
 }
 
-/// Mint a ticket: an account, a display name and an expiry, with a MAC over all three.
+/// Mint a ticket: an account, a display name, a username and an expiry, with a MAC over
+/// all four.
 ///
 /// `<payload-hex>.<mac-hex>`. Hex rather than plain text because a display name may
 /// contain anything at all, including whatever separator a readable format would have
-/// picked; and one separator rather than three because then there is exactly one way to
+/// picked; and one separator rather than four because then there is exactly one way to
 /// parse it. The whole payload is covered, so no field can be moved into another.
 ///
 /// Here rather than in the exchange that calls it, because this crate already owns the
@@ -276,8 +283,14 @@ pub struct Ticket {
 ///
 /// `expires_at` is seconds since the epoch, read by a composition root and passed in. It
 /// is the only clock reading that reaches a ticket, and it never reaches a log.
-pub fn ticket(secret: &Secret, account: &str, name: &str, expires_at: u64) -> String {
-    let payload = ticket_payload(account, name, expires_at);
+pub fn ticket(
+    secret: &Secret,
+    account: &str,
+    name: &str,
+    username: &str,
+    expires_at: u64,
+) -> String {
+    let payload = ticket_payload(account, name, username, expires_at);
     format!(
         "{}.{}",
         hex_of(&payload),
@@ -304,11 +317,15 @@ pub fn check_ticket(secret: &Secret, ticket: &str, now: u64) -> Option<Ticket> {
     candidate.update(&tagged(&payload));
     candidate.verify_slice(&tag).ok()?;
 
-    let (account, name, expires_at) = ticket_fields(&payload)?;
+    let (account, name, username, expires_at) = ticket_fields(&payload)?;
     if expires_at <= now {
         return None;
     }
-    Some(Ticket { account, name })
+    Some(Ticket {
+        account,
+        name,
+        username,
+    })
 }
 
 /// The three fields, length-prefixed.
@@ -332,13 +349,17 @@ pub fn check_ticket(secret: &Secret, ticket: &str, now: u64) -> Option<Ticket> {
 /// typed.
 pub fn ticket_claims(ticket: &str) -> Option<Ticket> {
     let payload = unhex_any(ticket.split_once('.')?.0)?;
-    let (account, name, _) = ticket_fields(&payload)?;
-    Some(Ticket { account, name })
+    let (account, name, username, _) = ticket_fields(&payload)?;
+    Some(Ticket {
+        account,
+        name,
+        username,
+    })
 }
 
-fn ticket_payload(account: &str, name: &str, expires_at: u64) -> Vec<u8> {
+fn ticket_payload(account: &str, name: &str, username: &str, expires_at: u64) -> Vec<u8> {
     let mut payload = Vec::new();
-    for field in [account.as_bytes(), name.as_bytes()] {
+    for field in [account.as_bytes(), name.as_bytes(), username.as_bytes()] {
         payload.extend_from_slice(&(field.len() as u32).to_be_bytes());
         payload.extend_from_slice(field);
     }
@@ -352,10 +373,10 @@ fn ticket_payload(account: &str, name: &str, expires_at: u64) -> Vec<u8> {
 /// with anything appended is not a payload. The MAC has already been verified by the time
 /// this runs, so a failure here means a ticket this build minted and cannot read — worth
 /// refusing loudly rather than guessing at.
-fn ticket_fields(payload: &[u8]) -> Option<(String, String, u64)> {
+fn ticket_fields(payload: &[u8]) -> Option<(String, String, String, u64)> {
     let mut rest = payload;
     let mut text = Vec::new();
-    for _ in 0..2 {
+    for _ in 0..3 {
         let length = u32::from_be_bytes(rest.get(..4)?.try_into().ok()?) as usize;
         let body = rest.get(4..4 + length)?;
         text.push(String::from_utf8(body.to_vec()).ok()?);
@@ -363,7 +384,12 @@ fn ticket_fields(payload: &[u8]) -> Option<(String, String, u64)> {
     }
     let expiry: [u8; 8] = rest.try_into().ok()?;
     let mut text = text.into_iter();
-    Some((text.next()?, text.next()?, u64::from_be_bytes(expiry)))
+    Some((
+        text.next()?,
+        text.next()?,
+        text.next()?,
+        u64::from_be_bytes(expiry),
+    ))
 }
 
 /// Tagged, so a ticket's message space cannot overlap a match name's or a seed's.
@@ -396,19 +422,31 @@ mod tests {
     /// `assert!` rather than `assert_eq!` throughout: `Secret` implements no `Debug`, so
     /// a failing comparison cannot print it. That is the point of the type, and a test is
     /// not a reason to weaken it.
-    /// A ticket round-trips: minted for an account and a name, verified back to the same
-    /// two.
+    /// A ticket round-trips: minted for an account, a name and a username, verified
+    /// back to the same three.
+    ///
+    /// The display name and the username differ here on purpose. They are the same
+    /// field in Discord's older scheme and different fields in its current one, and a
+    /// test that used one string for both would pass against an encoder that dropped
+    /// either of them.
     #[test]
-    fn a_ticket_proves_the_account_and_the_name_it_was_minted_for() {
+    fn a_ticket_proves_the_account_the_name_and_the_username_it_was_minted_for() {
         let secret = Secret::from_bytes([11; 32]);
         // A name with a space, because the archive's line format would hyphenate it and a
         // ticket must not: the relay records what the ticket says.
-        let minted = ticket(&secret, "discord:450853396908343307", "Mary Jane", 1_000);
+        let minted = ticket(
+            &secret,
+            "discord:450853396908343307",
+            "Mary Jane",
+            "mj",
+            1_000,
+        );
         assert_eq!(
             check_ticket(&secret, &minted, 999),
             Some(Ticket {
                 account: "discord:450853396908343307".to_string(),
                 name: "Mary Jane".to_string(),
+                username: "mj".to_string(),
             })
         );
     }
@@ -421,10 +459,13 @@ mod tests {
     fn a_name_cannot_be_rearranged_into_another_field() {
         let secret = Secret::from_bytes([11; 32]);
         for name in ["", ".", "a.b", "a\0b", "discord:9", "\u{1f600} dice", "   "] {
-            let minted = ticket(&secret, "discord:1", name, 1_000);
+            // The same awkward text in both name positions, so a field that leaked into
+            // its neighbour would be caught whichever direction it leaked.
+            let minted = ticket(&secret, "discord:1", name, name, 1_000);
             let checked = check_ticket(&secret, &minted, 0).expect("{name:?} did not verify");
             assert_eq!(checked.account, "discord:1", "{name:?} moved the account");
             assert_eq!(checked.name, name, "{name:?} did not come back");
+            assert_eq!(checked.username, name, "{name:?} lost its username");
         }
     }
 
@@ -435,12 +476,25 @@ mod tests {
     #[test]
     fn every_field_is_covered_by_the_mac() {
         let secret = Secret::from_bytes([11; 32]);
-        let honest = ticket(&secret, "discord:1", "Ada", 1_000);
+        let honest = ticket(&secret, "discord:1", "Ada", "ada", 1_000);
         let forgeries = [
             // Each is the same ticket with one field changed and the original MAC kept.
-            ("the account", ticket(&secret, "discord:2", "Ada", 1_000)),
-            ("the name", ticket(&secret, "discord:1", "Eve", 1_000)),
-            ("the expiry", ticket(&secret, "discord:1", "Ada", 2_000)),
+            (
+                "the account",
+                ticket(&secret, "discord:2", "Ada", "ada", 1_000),
+            ),
+            (
+                "the name",
+                ticket(&secret, "discord:1", "Eve", "ada", 1_000),
+            ),
+            (
+                "the username",
+                ticket(&secret, "discord:1", "Ada", "eve", 1_000),
+            ),
+            (
+                "the expiry",
+                ticket(&secret, "discord:1", "Ada", "ada", 2_000),
+            ),
         ];
         let tag = honest.split_once('.').expect("a tag").1;
         for (what, other) in forgeries {
@@ -459,7 +513,7 @@ mod tests {
     #[test]
     fn a_ticket_expires() {
         let secret = Secret::from_bytes([11; 32]);
-        let minted = ticket(&secret, "discord:1", "Ada", 1_000);
+        let minted = ticket(&secret, "discord:1", "Ada", "ada", 1_000);
         assert!(check_ticket(&secret, &minted, 999).is_some(), "still good");
         assert_eq!(
             check_ticket(&secret, &minted, 1_000),
@@ -476,7 +530,13 @@ mod tests {
     /// loudly.
     #[test]
     fn a_ticket_from_another_secret_proves_nothing() {
-        let minted = ticket(&Secret::from_bytes([11; 32]), "discord:1", "Ada", 1_000);
+        let minted = ticket(
+            &Secret::from_bytes([11; 32]),
+            "discord:1",
+            "Ada",
+            "ada",
+            1_000,
+        );
         assert_eq!(
             check_ticket(&Secret::from_bytes([12; 32]), &minted, 0),
             None
@@ -494,7 +554,7 @@ mod tests {
             "not hex.not hex",
             "ab.cd",
             // A valid payload with no tag at all.
-            &hex_of(&ticket_payload("discord:1", "Ada", 1_000)),
+            &hex_of(&ticket_payload("discord:1", "Ada", "ada", 1_000)),
             // A tag of the right shape over nothing.
             &format!("{}.{}", "", "00".repeat(32)),
         ] {
@@ -510,7 +570,7 @@ mod tests {
     #[test]
     fn a_ticket_shares_no_message_space_with_a_match_name_or_a_seed() {
         let secret = Secret::from_bytes([11; 32]);
-        let payload = ticket_payload("discord:1", "Ada", 1_000);
+        let payload = ticket_payload("discord:1", "Ada", "ada", 1_000);
         assert_ne!(
             hex_of(&mac(&secret.0, &tagged(&payload))),
             hex_of(&mac(&secret.0, &payload)),

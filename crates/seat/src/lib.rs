@@ -70,6 +70,18 @@ pub struct Showing {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Player {
     pub name: String,
+    /// Which kind of account holds this seat, from its join.
+    ///
+    /// `A match shows which players have an account` is answered from this and not from
+    /// a second flag that could disagree with it. `A log says whether an account is
+    /// authenticated`, and this is that answer carried to a screen.
+    pub account: Account,
+    /// The Discord username, for an authenticated player.
+    ///
+    /// `An authenticated player's Discord username is available on demand`. The only
+    /// thing that can tell two players with one display name apart, since a Discord
+    /// display name is not unique and arrives already decided.
+    pub username: Option<String>,
     /// The colour of their dice, by name: the last one they chose, or the one the relay
     /// gave the seat when it was taken. Distinct within a match, because the relay refuses
     /// one another seat has taken.
@@ -87,6 +99,9 @@ impl Player {
             name: "nobody".to_string(),
             colour: String::new(),
             left: false,
+            // A seat no join was seen for is nobody's, and nobody has an account.
+            account: Account::Local,
+            username: None,
         }
     }
 }
@@ -95,9 +110,16 @@ impl Player {
 enum Opening {
     Host {
         nonce: String,
+        /// What this seat asks to be called.
+        ///
+        /// On the opening rather than on the seat, because only the two openings that
+        /// take a seat carry one: `A player chooses their name when they take a seat`,
+        /// and coming back is not taking one.
+        name: String,
     },
     Join {
         match_id: MatchId,
+        name: String,
     },
     /// Coming back to a seat this account already holds.
     ///
@@ -183,19 +205,37 @@ fn account_claimed(who: &Who) -> Option<Account> {
 
 impl Seated {
     /// `None` if `who` is an `Authenticated` holding something that is not a ticket.
-    pub fn hosting(who: Who, nonce: impl Into<String>, driver: Box<dyn Decides>) -> Option<Self> {
+    pub fn hosting(
+        who: Who,
+        nonce: impl Into<String>,
+        name: impl Into<String>,
+        driver: Box<dyn Decides>,
+    ) -> Option<Self> {
         Self::new(
             who,
             Opening::Host {
                 nonce: nonce.into(),
+                name: name.into(),
             },
             driver,
         )
     }
 
     /// `None` if `who` is an `Authenticated` holding something that is not a ticket.
-    pub fn joining(who: Who, match_id: MatchId, driver: Box<dyn Decides>) -> Option<Self> {
-        Self::new(who, Opening::Join { match_id }, driver)
+    pub fn joining(
+        who: Who,
+        match_id: MatchId,
+        name: impl Into<String>,
+        driver: Box<dyn Decides>,
+    ) -> Option<Self> {
+        Self::new(
+            who,
+            Opening::Join {
+                match_id,
+                name: name.into(),
+            },
+            driver,
+        )
     }
 
     /// Return to a seat this account already holds.
@@ -208,7 +248,7 @@ impl Seated {
     fn new(who: Who, opening: Opening, driver: Box<dyn Decides>) -> Option<Self> {
         let match_id = match &opening {
             Opening::Host { .. } => None,
-            Opening::Join { match_id } | Opening::Resume { match_id } => Some(match_id.clone()),
+            Opening::Join { match_id, .. } | Opening::Resume { match_id } => Some(match_id.clone()),
         };
         let account = account_claimed(&who)?;
         Some(Self {
@@ -231,15 +271,17 @@ impl Seated {
     /// The first frame to put on the socket.
     pub fn opening(&self) -> String {
         let message = match &self.opening {
-            Opening::Host { nonce } => Message::Host {
+            Opening::Host { nonce, name } => Message::Host {
                 who: self.who.clone(),
                 version: PROTOCOL_VERSION,
                 nonce: nonce.clone(),
+                name: name.clone(),
             },
-            Opening::Join { match_id } => Message::Join {
+            Opening::Join { match_id, name } => Message::Join {
                 match_id: match_id.clone(),
                 who: self.who.clone(),
                 version: PROTOCOL_VERSION,
+                name: name.clone(),
             },
             Opening::Resume { match_id } => Message::Resume {
                 match_id: match_id.clone(),
@@ -344,8 +386,14 @@ impl Seated {
         let mut seats: Vec<Player> = Vec::new();
         for event in self.stream() {
             match event {
+                // Every field named rather than `..`: this fold dropped `Event::Colour`
+                // silently once already, and a join's fields are exactly what a roster is.
                 Event::Join {
-                    seat, name, colour, ..
+                    seat,
+                    name,
+                    colour,
+                    account,
+                    username,
                 } => {
                     let index = seat.0 as usize;
                     if seats.len() <= index {
@@ -355,6 +403,8 @@ impl Seated {
                         name: name.clone(),
                         colour: colour.clone(),
                         left: false,
+                        account: account.clone(),
+                        username: username.clone(),
                     };
                 }
                 Event::Colour { seat, colour } => {

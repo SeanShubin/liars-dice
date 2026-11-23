@@ -100,6 +100,12 @@ fn rendered(value: &Value) -> AttributeValue {
                 .map(|count| AttributeValue::N(count.to_string()))
                 .collect(),
         ),
+        Value::Texts(texts) => AttributeValue::L(
+            texts
+                .iter()
+                .map(|text| AttributeValue::S(text.clone()))
+                .collect(),
+        ),
         Value::Nested(shape) => AttributeValue::M(written(shape)),
         // No event holds one, so nothing with this in it is ever stored — but the
         // rendering is total on purpose: a `Value` the codec cannot answer for would be a
@@ -172,6 +178,18 @@ fn parsed(value: &AttributeValue, kind: &str, field: &str) -> Result<Value, Malf
                 })
                 .collect::<Result<Vec<Shape>, Malformed>>()
                 .map(Value::Many)
+        }
+        // Strings before numbers, for the same reason shapes come before both: a list
+        // of strings read as a list of counts would fail on every element rather than
+        // being read as what it is.
+        AttributeValue::L(items)
+            if !items.is_empty() && items.iter().all(|item| item.as_s().is_ok()) =>
+        {
+            items
+                .iter()
+                .map(|item| item.as_s().cloned().map_err(|_| wrong()))
+                .collect::<Result<Vec<String>, Malformed>>()
+                .map(Value::Texts)
         }
         AttributeValue::L(values) => values
             .iter()

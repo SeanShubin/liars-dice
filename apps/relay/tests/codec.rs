@@ -59,14 +59,25 @@ fn a_name_keeps_its_spaces_and_odds_keep_their_precision() {
         name: examples::awkward_name(),
         colour: "red".to_string(),
         account: Account::Discord("1".to_string()),
+        username: Some("mary jane".to_string()),
     };
-    assert_eq!(joined.to_string(), "join #1 Mary-Jane red discord:1");
-    let Ok(Event::Join { name, .. }) =
+    assert_eq!(
+        joined.to_string(),
+        "join #1 Mary-Jane red discord:1 mary-jane"
+    );
+    let Ok(Event::Join { name, username, .. }) =
         codec::event_from_item(&codec::item("m", 0, &joined, recorded()))
     else {
         panic!("a join did not read back as a join");
     };
     assert_eq!(name, examples::awkward_name(), "storage renamed a player");
+    // The archive hyphenates a space and storage must not, which is this test. A username
+    // may hold one too, so it is held to the same standard as the display name.
+    assert_eq!(
+        username.as_deref(),
+        Some("mary jane"),
+        "storage hyphenated a username"
+    );
 }
 
 #[test]

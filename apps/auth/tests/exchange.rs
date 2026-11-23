@@ -60,6 +60,9 @@ impl Stub {
         Self::saying(Ok(Identified {
             id: id.to_string(),
             name: name.to_string(),
+            // Deliberately not the display name. A test that used one string for both
+            // would pass against an exchange that minted the wrong one into the ticket.
+            username: format!("{}_handle", name.to_lowercase()),
         }))
     }
 }

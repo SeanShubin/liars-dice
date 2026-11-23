@@ -43,6 +43,17 @@ pub enum Value {
     Flag(bool),
     /// Order and repeats both matter, so this is a list and never a set.
     Counts(Vec<u64>),
+    /// Several strings as one field. Only the names in a listed match need it.
+    ///
+    /// Order matters: `A listed match shows its host` is the first element. Repeats
+    /// are possible, because two players in one match may share a display name when
+    /// neither of them chose it.
+    ///
+    /// Encoding these as one separated string was the alternative, and it is not
+    /// available: a display name may hold any character, so there is no separator that
+    /// cannot appear inside a name. That is the same reason a ticket's payload is
+    /// length-prefixed rather than delimited.
+    Texts(Vec<String>),
     /// A whole shape as a field. Only `Message::Claim` needs it, which carries an event.
     Nested(Box<Shape>),
     /// Several shapes as one field. Only the dashboard's listing needs it.
@@ -141,6 +152,20 @@ impl Shape {
             .map(|(_, value)| value)
     }
 
+    /// The text a field holds, or `None` when the shape does not carry the field.
+    ///
+    /// For a field a shape may legitimately omit, where [`Shape::text`] would refuse
+    /// it. A field that is present and holds something other than text is still
+    /// malformed: absent and wrong are different answers, and reading a wrong one as
+    /// missing would let a mistyped field pass as an omitted one.
+    pub fn maybe_text(&self, field: &str) -> Result<Option<&str>, Malformed> {
+        match self.get(field) {
+            None => Ok(None),
+            Some(Value::Text(text)) => Ok(Some(text)),
+            Some(_) => Err(self.wrong(field)),
+        }
+    }
+
     pub fn text(&self, field: &str) -> Result<&str, Malformed> {
         match self.get(field) {
             Some(Value::Text(text)) => Ok(text),
@@ -167,6 +192,20 @@ impl Shape {
     pub fn flag(&self, field: &str) -> Result<bool, Malformed> {
         match self.get(field) {
             Some(Value::Flag(flag)) => Ok(*flag),
+            _ => Err(self.wrong(field)),
+        }
+    }
+
+    /// The strings a field holds, or an empty slice when the field is an empty list.
+    ///
+    /// An empty one arrives as the other kind of list for the reason [`Value::Many`]
+    /// gives: a JSON array carries no element type and an empty one says nothing about
+    /// what was meant to be in it. A listed match always has at least its host's name,
+    /// so this is tolerance rather than a case the relay produces.
+    pub fn texts(&self, field: &str) -> Result<Vec<String>, Malformed> {
+        match self.get(field) {
+            Some(Value::Texts(texts)) => Ok(texts.clone()),
+            Some(Value::Counts(counts)) if counts.is_empty() => Ok(Vec::new()),
             _ => Err(self.wrong(field)),
         }
     }

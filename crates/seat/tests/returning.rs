@@ -38,11 +38,8 @@ fn moment() -> Moment {
     Moment::from_unix_nanos(1_700_000_000_000_000_000)
 }
 
-fn guest(id: &str, name: &str) -> Who {
-    Who::Guest {
-        id: id.to_string(),
-        name: name.to_string(),
-    }
+fn guest(id: &str) -> Who {
+    Who::Guest { id: id.to_string() }
 }
 
 struct Wire {
@@ -119,7 +116,7 @@ fn a_player_whose_socket_died_is_returned_to_their_own_match() {
     let host_socket = ConnectionId("host".to_string());
     let guest_socket = ConnectionId("guest".to_string());
 
-    let host = Seated::hosting(guest("host-id", "Sean"), "returning", Box::new(Waiting))
+    let host = Seated::hosting(guest("host-id"), "returning", "Sean", Box::new(Waiting))
         .expect("a guest is always a seat");
     let mut seats = vec![(host_socket.clone(), host)];
     let pending = vec![(host_socket.clone(), seats[0].1.opening())];
@@ -127,8 +124,9 @@ fn a_player_whose_socket_died_is_returned_to_their_own_match() {
     let match_id = seats[0].1.match_id().expect("a match").clone();
 
     let joiner = Seated::joining(
-        guest("guest-id", "Ada"),
+        guest("guest-id"),
         match_id.clone(),
+        "Ada",
         Box::new(Waiting),
     )
     .expect("a guest is always a seat");
@@ -151,7 +149,7 @@ fn a_player_whose_socket_died_is_returned_to_their_own_match() {
     // A new page, a new socket, the same guest id out of local storage. All it does is ask
     // what is going on, which is what the real page does as its opening frame.
     let returning = ConnectionId("guest-again".to_string());
-    let listing = wire.send(&returning, &dashboard::ask(&guest("guest-id", "Ada")));
+    let listing = wire.send(&returning, &dashboard::ask(&guest("guest-id")));
     assert_eq!(listing.len(), 1, "one answer, the listing");
     let listed = dashboard::listing(&listing[0].1).expect("a listing");
 
@@ -174,7 +172,9 @@ fn a_player_whose_socket_died_is_returned_to_their_own_match() {
 
     // So the page resumes it, having asked nobody for the id.
     let mut back = Seated::resuming(
-        guest("guest-id", "Ada"),
+        // No name: coming back is not taking a seat, and the seat this account
+        // holds already has the name its join recorded.
+        guest("guest-id"),
         mine[0].match_id.clone(),
         Box::new(Waiting),
     )
@@ -209,7 +209,7 @@ fn a_player_whose_socket_died_is_returned_to_their_own_match() {
 fn a_player_who_left_is_not_marked_as_belonging_anywhere() {
     let mut wire = Wire::new();
     let host_socket = ConnectionId("host".to_string());
-    let host = Seated::hosting(guest("host-id", "Sean"), "leaving", Box::new(Waiting))
+    let host = Seated::hosting(guest("host-id"), "leaving", "Sean", Box::new(Waiting))
         .expect("a guest is always a seat");
     let mut seats = vec![(host_socket.clone(), host)];
     let pending = vec![(host_socket.clone(), seats[0].1.opening())];
@@ -220,7 +220,7 @@ fn a_player_who_left_is_not_marked_as_belonging_anywhere() {
     settle(&mut wire, &mut seats, pending);
 
     let asking = ConnectionId("host-again".to_string());
-    let listing = wire.send(&asking, &dashboard::ask(&guest("host-id", "Sean")));
+    let listing = wire.send(&asking, &dashboard::ask(&guest("host-id")));
     let listed = dashboard::listing(&listing[0].1).expect("a listing");
     assert!(
         listed.iter().all(|open| !open.mine),
@@ -240,14 +240,14 @@ fn a_colour_change_reaches_every_seats_roster() {
     let host_socket = ConnectionId("host".to_string());
     let guest_socket = ConnectionId("guest".to_string());
 
-    let host = Seated::hosting(guest("host-id", "Sean"), "colours", Box::new(Waiting))
+    let host = Seated::hosting(guest("host-id"), "colours", "Sean", Box::new(Waiting))
         .expect("a guest is always a seat");
     let mut seats = vec![(host_socket.clone(), host)];
     let pending = vec![(host_socket.clone(), seats[0].1.opening())];
     settle(&mut wire, &mut seats, pending);
     let match_id = seats[0].1.match_id().expect("a match").clone();
 
-    let joiner = Seated::joining(guest("guest-id", "Ada"), match_id, Box::new(Waiting))
+    let joiner = Seated::joining(guest("guest-id"), match_id, "Ada", Box::new(Waiting))
         .expect("a guest is always a seat");
     seats.push((guest_socket.clone(), joiner));
     let pending = vec![(guest_socket.clone(), seats[1].1.opening())];
@@ -282,4 +282,40 @@ fn colours(seat: &Seated) -> Vec<String> {
         .into_iter()
         .map(|player| player.colour)
         .collect()
+}
+
+/// A roster carries the account and the username out of the join.
+///
+/// `A match shows which players have an account` and `An authenticated player's Discord
+/// username is available on demand` are both drawn from `Seated::roster`, which is a
+/// client-side fold that used to read a join's fields with `..`. A relay recording both
+/// perfectly would still show neither until the fold was told to keep them, and the
+/// relay's own tests cannot catch that: they read the log.
+///
+/// `Event::Colour` was dropped by this exact fold once already, which is why this test
+/// exists before anybody has complained.
+#[test]
+fn a_roster_carries_the_account_and_the_username_from_the_join() {
+    let mut wire = Wire::new();
+    let host_socket = ConnectionId("host".to_string());
+    let host = Seated::hosting(guest("host-id"), "accounts", "Sean", Box::new(Waiting))
+        .expect("a guest is always a seat");
+    let mut seats = vec![(host_socket.clone(), host)];
+    let pending = vec![(host_socket.clone(), seats[0].1.opening())];
+    settle(&mut wire, &mut seats, pending);
+
+    let roster = seats[0].1.roster();
+    assert_eq!(roster.len(), 1, "one seat so far");
+    assert_eq!(
+        roster[0].account,
+        protocol::Account::Guest("host-id".to_string()),
+        "the account came through the fold"
+    );
+    assert!(
+        !roster[0].account.is_proven(),
+        "a guest is not an authenticated player"
+    );
+    // A guest has none, which is the case a fold could satisfy by always answering None.
+    // The relay tests cover the other side, where a ticket puts one on the join line.
+    assert_eq!(roster[0].username, None);
 }

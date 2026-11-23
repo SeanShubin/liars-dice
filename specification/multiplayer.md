@@ -21,6 +21,7 @@
 - A listed match shows how many players have joined
 - A listed match shows whether it can be joined
 - A listed match shows whether the player asking holds a seat in it
+- A listed match shows the names in it
 - A player can join a hosted match
 - A player cannot join a match that has started
 - A player cannot join a match while holding a seat in another match
@@ -28,6 +29,8 @@
 - The host can bar a player from joining the match
 - The host can lift a bar
 - A match is not listed to a player barred from it
+- A player chooses their name when they take a seat
+- A name another player in the match has chosen cannot be chosen
 - A seat is given a colour when it is taken
 - A player can change their seat's colour until the match starts
 - A player cannot change their seat's colour once the match has started

@@ -114,8 +114,25 @@ impl Live {
         Ok(Identified {
             id: id.to_string(),
             name: display_name(&body, id),
+            username: username(&body, id),
         })
     }
+}
+
+/// The username, which Discord keeps unique.
+///
+/// The same JSON this already reads the display name out of, so keeping it costs no
+/// second call. Unlike `display_name` this does not fall back to `global_name`: a
+/// display name is not unique, and a username that was really a display name would be
+/// a worse answer than none. The id is still the last resort, so a reader always has
+/// something that differs between two accounts.
+fn username(body: &serde_json::Value, id: &str) -> String {
+    body.get("username")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|username| !username.is_empty())
+        .unwrap_or(id)
+        .to_string()
 }
 
 /// The display name, which is not one field.

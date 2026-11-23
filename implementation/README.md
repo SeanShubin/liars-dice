@@ -64,6 +64,7 @@ Not started | In progress | Built
 - [Unattended](/implementation/unattended.md) — what a client does when nobody is touching it: show what arrives, stay able to act
 - [Handles](/implementation/handles.md) — one browser holding more than one player, so two tabs can be two people
 - [Screens](/implementation/screens.md) — sign in, dashboard, lobby, match, and a colour asked for where the answer could be known
+- [Naming](/implementation/naming.md) — a nameless sign in, a name chosen at the seat, a match that needs none, and two Discord players told apart
 
 ## Order
 

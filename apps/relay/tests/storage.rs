@@ -194,6 +194,7 @@ fn a_log_reads_back_in_position_order() {
             name: "Mary Jane".into(),
             colour: "red".into(),
             account: Account::Discord("450853396908343307".into()),
+            username: Some("mary jane".into()),
         },
         claim(0, 2),
         claim(1, 3),
@@ -255,6 +256,7 @@ fn a_message_of_several_events_lands_whole_or_not_at_all() {
             name: "Mary Jane".into(),
             colour: "red".into(),
             account: Account::Discord("450853396908343307".into()),
+            username: Some("mary jane".into()),
         },
         Event::Host { seat: Seat(0) },
     ];
@@ -444,10 +446,10 @@ fn host_message(at: usize) -> Message {
     Message::Host {
         who: Who::Guest {
             id: format!("account-{at}"),
-            name: format!("Player {at}"),
         },
         version: protocol::PROTOCOL_VERSION,
         nonce: format!("nonce-{at}"),
+        name: format!("Player {at}"),
     }
 }
 
@@ -746,7 +748,10 @@ fn two_joins_at_once_take_two_seats() {
             let match_id = match_id.clone();
             scope.spawn(move || {
                 let mut relay = relay_over(&client, &log_table, &place_table, handle);
-                let Message::Host { who, version, .. } = host_message(at) else {
+                let Message::Host {
+                    who, version, name, ..
+                } = host_message(at)
+                else {
                     unreachable!("host_message makes a host message")
                 };
                 let outcome = relay.receive(
@@ -755,6 +760,9 @@ fn two_joins_at_once_take_two_seats() {
                         match_id,
                         who,
                         version,
+                        // One per joiner, from `host_message`, because two players in a
+                        // match cannot share a chosen name.
+                        name,
                     },
                     recorded(),
                 );
@@ -949,9 +957,9 @@ fn the_account_index_answers_what_a_full_scan_would() {
                     match_id: first.clone(),
                     who: Who::Guest {
                         id: "account-1".to_string(),
-                        name: "Player 1".to_string(),
                     },
                     version: protocol::PROTOCOL_VERSION,
+                    name: "Player 1".to_string(),
                 },
                 recorded(),
             )

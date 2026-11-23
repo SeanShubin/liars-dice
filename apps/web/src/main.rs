@@ -174,6 +174,13 @@ fn storage_key(base: &str, handle: Option<&str>) -> String {
 /// an event.
 const TICK: Duration = Duration::from_millis(500);
 
+/// The two answers `socket::signed_in` can hold.
+///
+/// Text rather than an enum because it crosses a storage boundary, where a value has
+/// to survive being read back by a build that may not have the same enum.
+const GUEST: &str = "guest";
+const DISCORD: &str = "discord";
+
 /// The swatch a colour nobody recognises is drawn in. Unreachable through the picker.
 const UNKNOWN_COLOUR: usize = 19;
 
@@ -418,6 +425,48 @@ fn ranked_note(ranked: bool) -> String {
     }
 }
 
+/// The host's name, which is the first in the match.
+///
+/// `A listed match shows its host` is answered by position rather than by a field of
+/// its own, because the host holds the seat the match was created with and a second
+/// field would be the same value on the wire twice. Empty if a listing somehow has no
+/// names, which the relay does not produce — a row with no host reads better than a
+/// panic in front of somebody.
+fn host_of(listed: &Listed) -> &str {
+    listed.names.first().map(String::as_str).unwrap_or_default()
+}
+
+/// Everybody but the host, for a row that has to show who is already in there.
+fn others_in(listed: &Listed) -> String {
+    listed
+        .names
+        .iter()
+        .skip(1)
+        .cloned()
+        .collect::<Vec<String>>()
+        .join(", ")
+}
+
+/// Whether the name this page would send can be taken in that match.
+///
+/// `A name another player in the match has chosen cannot be chosen`, and
+/// `A listed match shows the names in it` is what lets the page say so before the
+/// relay has to. The refusal still exists — a listing is stale by the time anybody
+/// presses anything — but meeting it is now losing a race rather than the ordinary
+/// way to find out, which is the whole point of asking here.
+///
+/// **Stricter than the relay, on purpose.** The relay only refuses a name somebody
+/// *chose*, because a Discord display name arrives already decided and can never be
+/// refused. A listing cannot say which of its names were chosen, so this compares
+/// against all of them — and being stricter here avoids a collision the relay is not
+/// allowed to prevent, at the cost of sometimes asking for another name when the relay
+/// would have taken that one. It never refuses a join the relay would have accepted;
+/// it only declines to send it.
+fn name_is_free(name: &str, listed: &Listed) -> bool {
+    let name = name.trim();
+    !name.is_empty() && !listed.names.iter().any(|taken| taken == name)
+}
+
 fn may_call(stance: Stance) -> bool {
     stance.started && !stance.over && stance.playing && stance.my_turn
 }
@@ -497,8 +546,16 @@ struct Page {
     /// Where the relay is. Read from the page, and editable so a local build can reach a
     /// deployed relay.
     relay: String,
-    /// What this person is called. Theirs to choose, and recorded at the join like any
-    /// other name: `An unauthenticated player chooses their own name`.
+    /// What this person asks to be called in the next match they sit down at.
+    ///
+    /// `A player chooses their name when they take a seat`, so this is read when Host
+    /// or Join is pressed and not before. It used to be typed on the sign-in screen,
+    /// where nothing could say whether it was free — the same defect the colour had,
+    /// and the same fix.
+    ///
+    /// Prefilled from the last one used, which is a convenience and not an identity:
+    /// it is recorded nowhere but this browser, and `An unauthenticated player's id is
+    /// not derived from anything they typed` is untouched by it.
     name: String,
     /// This browser's guest id, from local storage.
     ///
@@ -512,11 +569,12 @@ struct Page {
     /// identity, which on the unranked side of the line is not worth paying anything to
     /// avoid.
     guest: String,
-    /// The name the host gives the match, which is what its identity is derived from. Host
-    /// twice under one name and the relay answers with the match that already exists, which
-    /// is `A repeated request to host creates no second match` made useful rather than
-    /// merely true.
-    match_name: String,
+    /// Whether this page has already decided, once, whether to connect on its own.
+    ///
+    /// `A sign in survives a reload`: a page that kept an answer from last time opens a
+    /// socket without being pressed. Once per load, and never again — somebody who
+    /// presses Disconnect must not be reconnected by the next frame.
+    settled: bool,
     /// The id pasted in to join somebody else's match.
     paste: String,
     /// What to tell the person on the sign-in screen.
@@ -573,7 +631,9 @@ impl Page {
         let handle = socket::handle();
         Self {
             relay: socket::relay_from_page(),
-            name: String::new(),
+            // Offered back, not remembered as an identity: a name is chosen per match
+            // and this only saves retyping the same one.
+            name: socket::name_kept(handle.as_deref()).unwrap_or_default(),
             guest: socket::guest_id(handle.as_deref()),
             exchange: socket::auth_from_page(),
             asked_the_exchange: false,
@@ -581,7 +641,7 @@ impl Page {
             returned: false,
             signin: Signin::Asking,
             from_exchange: FromExchange::new(waker.clone()),
-            match_name: String::new(),
+            settled: false,
             paste: String::new(),
             trouble: None,
             seated: None,
@@ -617,9 +677,10 @@ impl Page {
             Signin::Held(held) => Who::Authenticated {
                 ticket: held.ticket.clone(),
             },
+            // No name. A guest is an id; what they are called is chosen when they
+            // take a seat, where the names already in the match are known.
             _ => Who::Guest {
                 id: self.guest.clone(),
-                name: self.name.trim().to_string(),
             },
         }
     }
@@ -662,6 +723,42 @@ impl Page {
         }
     }
 
+    /// Connect without being asked, once, if this page kept an answer from last time.
+    ///
+    /// `A sign in survives a reload`. Everything a reloaded page needs is already in
+    /// storage — the guest id, or the ticket — and what was missing was only the
+    /// decision to use it. With that kept, opening a socket is all a reload costs, and
+    /// then `A signed in player holding no seat sees the dashboard` is true of a page
+    /// that was just reloaded as much as of one that never left.
+    ///
+    /// Nothing stores *which screen* this was. The screen is `screen_for` of three
+    /// facts, and only one of them — whether a socket is open — fails to survive a
+    /// reload; the stance comes back out of the log through `dashboard.md`'s return
+    /// path. A stored screen would be a second place that knows whether this seat holds
+    /// dice, and the two would disagree.
+    ///
+    /// Waits for the sign in to settle. A page that connected as a guest while a code
+    /// was still being traded would hold a socket that says guest for a player who is
+    /// about to be authenticated, and a `Who` is sent once per socket.
+    fn settle(&mut self, now: f64) {
+        if self.settled || matches!(self.signin, Signin::Asking) {
+            return;
+        }
+        self.settled = true;
+        let kept = socket::signed_in(self.handle.as_deref());
+        let ready = match kept.as_deref() {
+            Some(GUEST) => true,
+            // A ticket that expired while the tab was closed leaves the choice kept and
+            // nothing to honour it with, so the screen asks again rather than connecting
+            // as somebody this player did not choose to be.
+            Some(DISCORD) => matches!(self.signin, Signin::Held(_)),
+            _ => false,
+        };
+        if ready && self.relay.contains("://") {
+            self.connect(now);
+        }
+    }
+
     /// Take whatever the exchange has said since the last frame.
     fn hear_the_exchange(&mut self) {
         let Some(answered) = self.from_exchange.take() else {
@@ -677,6 +774,10 @@ impl Page {
             Answered::Where(None) => self.signin = Signin::Off,
             Answered::Traded(Ok(held)) => {
                 socket::keep_ticket(self.handle.as_deref(), &held);
+                // Coming back from Discord is the one place the answer is not a button
+                // press: somebody who authorized has chosen, and the next reload must
+                // not ask again.
+                socket::keep_signed_in(self.handle.as_deref(), DISCORD);
                 self.signin = Signin::Held(held);
             }
             Answered::Traded(Err(why)) => {
@@ -935,7 +1036,15 @@ impl eframe::App for Page {
             self.ask_the_exchange();
         }
         self.hear_the_exchange();
+        self.settle(now);
         self.pump(now);
+        // A match with an id is a host request that was answered, so the nonce that
+        // made it has nothing left to make idempotent. Pressing Host after this derives
+        // a different id and is refused with the match this player is already in, which
+        // is the right answer and was already built.
+        if self.seated.as_ref().and_then(Seated::match_id).is_some() {
+            socket::forget_nonce(self.handle.as_deref());
+        }
         self.keep_the_socket(now);
         if let Some(after) = self.frame_owed() {
             ui.ctx().request_repaint_after(after);
@@ -1027,6 +1136,9 @@ impl Page {
                     // back to being the guest this browser already was, not becoming
                     // somebody new.
                     socket::forget_ticket(self.handle.as_deref());
+                    // And the answer, or `settle` would connect this page straight back
+                    // in as somebody who had just asked not to be.
+                    socket::forget_signed_in(self.handle.as_deref());
                     self.signin = Signin::Asking;
                     socket::ask_where(&self.exchange, &self.from_exchange);
                 }
@@ -1052,61 +1164,56 @@ impl Page {
 
         ui.add_space(8.0);
         ui.separator();
-        match &self.signin {
-            // `An authenticated player's name is their Discord display name`, so there is
-            // nothing to type and no field to type it in.
-            Signin::Held(held) => {
-                ui.label(egui::RichText::new("Your name").strong());
-                ui.label(egui::RichText::new(&held.name).size(17.0));
-                ui.label(
-                    egui::RichText::new("From Discord, which is what makes a match ranked.")
-                        .size(12.0),
-                );
-            }
-            _ => {
-                ui.label(egui::RichText::new("Your name").strong());
-                ui.add_sized(
-                    [240.0, 30.0],
-                    egui::TextEdit::singleline(&mut self.name).hint_text("name"),
-                );
-                ui.label(
-                    egui::RichText::new(
-                        "Yours to choose, and nothing checks it. Who you are is an id this \
-                         browser keeps, so two people called the same thing are still two \
-                         people.",
-                    )
-                    .size(12.0),
-                );
-            }
+        // No name is asked for here. `A player chooses their name when they take a
+        // seat`, and this screen cannot say which names are free because no match has
+        // been chosen yet — which is exactly why the field was moved off it.
+        if let Signin::Held(held) = &self.signin {
+            ui.label(egui::RichText::new("Signed in as").strong());
+            ui.label(egui::RichText::new(&held.name).size(17.0));
+            ui.label(
+                egui::RichText::new("From Discord, which is what makes a match ranked.").size(12.0),
+            );
+            ui.add_space(8.0);
+            ui.separator();
         }
 
-        ui.add_space(8.0);
-        ui.separator();
         ui.label(egui::RichText::new("The relay").strong());
         ui.add_sized(
             [460.0, 30.0],
             egui::TextEdit::singleline(&mut self.relay).hint_text("wss://host/stage"),
         );
 
-        // A signed-in player is already named, so there is nothing to wait for.
-        let named = !self.shown_name().is_empty();
-        let reachable = named && self.relay.contains("://");
+        let reachable = self.relay.contains("://");
+        let held = matches!(self.signin, Signin::Held(_));
 
         ui.add_space(8.0);
         ui.separator();
-        if tap(ui, "Look for matches", reachable) {
+        // Two buttons rather than one, because which of them is pressed is the answer
+        // that gets kept: `A sign in survives a reload` means the page must know next
+        // time whether to use the ticket or the id, and only the person can say.
+        let how = if held {
+            tap(ui, "Look for matches", reachable).then_some(DISCORD)
+        } else {
+            tap(ui, "Play without an account", reachable).then_some(GUEST)
+        };
+        if let Some(how) = how {
+            socket::keep_signed_in(self.handle.as_deref(), how);
             self.connect(now);
         }
         if !reachable {
-            // A button that does nothing and says nothing is the worst of both. Say which
-            // of the two things is missing, since one of them arrives with the page and a
-            // person has no reason to expect either.
             ui.label(
-                egui::RichText::new(if named {
-                    "A relay address is needed, and this page did not come with one."
-                } else {
-                    "A name is needed first."
-                })
+                egui::RichText::new(
+                    "A relay address is needed, and this page did not come with one.",
+                )
+                .size(12.0),
+            );
+        } else if !held {
+            ui.label(
+                egui::RichText::new(
+                    "No account, nothing to remember. You pick a name for each match you \
+                     sit down at, and who you are is an id this browser keeps — so two \
+                     people called the same thing are still two people.",
+                )
                 .size(12.0),
             );
         }
@@ -1119,10 +1226,15 @@ impl Page {
             ui.label(egui::RichText::new(trouble).strong());
         }
         ui.label(
-            egui::RichText::new(format!(
-                "You are {}. Your dice get their colour in the match.",
-                self.shown_name()
-            ))
+            egui::RichText::new(match self.signin {
+                // A signed-in player is named by Discord and cannot choose otherwise.
+                Signin::Held(_) => format!(
+                    "You are {}. Your dice get their colour in the match.",
+                    self.shown_name()
+                ),
+                // And a guest has no name at all until they sit down at something.
+                _ => "You pick a name and a colour at whichever match you sit down at.".to_string(),
+            })
             .size(12.0),
         );
         ui.separator();
@@ -1146,10 +1258,17 @@ impl Page {
                 ui.label(egui::RichText::new("Open to join").strong());
                 egui::Grid::new("open").spacing([12.0, 8.0]).show(ui, |ui| {
                     for listed in &open {
-                        ui.label(egui::RichText::new(&listed.host).strong());
-                        ui.label(players(listed.players));
+                        ui.label(egui::RichText::new(host_of(listed)).strong());
+                        ui.label(players(listed.names.len()));
                         ui.label(ranked_note(listed.ranked));
-                        if tap(ui, if listed.mine { "Rejoin" } else { "Join" }, true) {
+                        // `A listed match shows the names in it`, which is what makes
+                        // the name chosen below an informed choice and not a guess.
+                        ui.label(egui::RichText::new(others_in(listed)).size(12.0));
+                        // A name already in that match is not offered, rather than
+                        // offered and then refused. Rejoining needs no name: the seat
+                        // this account holds already has the one its join recorded.
+                        let ready = listed.mine || name_is_free(&self.name, listed);
+                        if tap(ui, if listed.mine { "Rejoin" } else { "Join" }, ready) {
                             joining = Some(listed.match_id.clone());
                         }
                         ui.end_row();
@@ -1164,8 +1283,8 @@ impl Page {
                     .spacing([12.0, 8.0])
                     .show(ui, |ui| {
                         for listed in &going_on {
-                            ui.label(egui::RichText::new(&listed.host).strong());
-                            ui.label(players(listed.players));
+                            ui.label(egui::RichText::new(host_of(listed)).strong());
+                            ui.label(players(listed.names.len()));
                             ui.label(ranked_note(listed.ranked));
                             // No button. Why there is none is the useful part, and the
                             // relay already said it.
@@ -1190,19 +1309,36 @@ impl Page {
 
         ui.add_space(8.0);
         ui.separator();
-        ui.label(egui::RichText::new("Host a match").strong());
-        let mut hosting = false;
-        ui.horizontal(|ui| {
+        // One field for both ways of sitting down, because a name is a name wherever
+        // the seat comes from. Above the two buttons on purpose: it is read when either
+        // is pressed, and the Join buttons are enabled from it.
+        let mine_to_pick = !matches!(self.signin, Signin::Held(_));
+        if mine_to_pick {
+            ui.label(egui::RichText::new("What to call you").strong());
             ui.add_sized(
                 [240.0, 30.0],
-                egui::TextEdit::singleline(&mut self.match_name).hint_text("what to call it"),
+                egui::TextEdit::singleline(&mut self.name).hint_text("name"),
             );
-            hosting = tap(ui, "Host", !self.match_name.trim().is_empty());
-        });
+            ui.label(
+                egui::RichText::new(
+                    "Per match, so it can be different next time. A name somebody in a \
+                     match already has is not offered there.",
+                )
+                .size(12.0),
+            );
+            ui.add_space(8.0);
+        }
+
+        ui.separator();
+        ui.label(egui::RichText::new("Host a match").strong());
+        // Nothing to name. The match id comes from a nonce this page keeps, which is
+        // what `A repeated request to host creates no second match` actually needs —
+        // a person retyping a name was only ever a worse way to supply the same thing.
+        let hosting = tap(ui, "Host", !mine_to_pick || !self.name.trim().is_empty());
         ui.label(
             egui::RichText::new(
-                "The name decides which match this is, so hosting the same name twice \
-                 takes you back to the same match rather than making a second one.",
+                "You hold one match at a time, so hosting again takes you back to the \
+                 one you are in rather than making a second.",
             )
             .size(12.0),
         );
@@ -1215,7 +1351,9 @@ impl Page {
                 [340.0, 30.0],
                 egui::TextEdit::singleline(&mut self.paste).hint_text("the id the host gives you"),
             );
-            if tap(ui, "Join", !self.paste.trim().is_empty()) {
+            let ready =
+                !self.paste.trim().is_empty() && (!mine_to_pick || !self.name.trim().is_empty());
+            if tap(ui, "Join", ready) {
                 joining = Some(MatchId(self.paste.trim().to_string()));
             }
         });
@@ -1238,18 +1376,22 @@ impl Page {
         // ticket cannot be read, and this page builds a guest, so the seat always exists.
         // Said with a `let else` rather than an `expect` so that adding the Discord path
         // later has to answer the question here instead of panicking in front of somebody.
-        if hosting {
-            let seated = Seated::hosting(
-                self.who(),
-                self.match_name.trim(),
-                Box::new(self.hand.clone()),
-            );
-            match seated {
-                Some(seated) => self.sit(seated),
-                None => self.trouble = Some(UNREADABLE_TICKET.to_string()),
-            }
-        } else if let Some(match_id) = joining {
-            let seated = Seated::joining(self.who(), match_id, Box::new(self.hand.clone()));
+        if hosting || joining.is_some() {
+            // Offered back next time. A convenience, kept in this browser and nowhere
+            // else, and nothing is ever derived from it.
+            let name = self.name.trim().to_string();
+            socket::keep_name(self.handle.as_deref(), &name);
+            let seated = match joining {
+                Some(match_id) => {
+                    Seated::joining(self.who(), match_id, name, Box::new(self.hand.clone()))
+                }
+                None => Seated::hosting(
+                    self.who(),
+                    socket::nonce_for_hosting(self.handle.as_deref()),
+                    name,
+                    Box::new(self.hand.clone()),
+                ),
+            };
             match seated {
                 Some(seated) => self.sit(seated),
                 None => self.trouble = Some(UNREADABLE_TICKET.to_string()),
@@ -1299,6 +1441,23 @@ impl Page {
                 for player in &roster {
                     die(ui, index_of(&player.colour).unwrap_or(UNKNOWN_COLOUR), None);
                     ui.label(&player.name);
+                    // `A match shows which players have an account`, from the account on
+                    // the join rather than from a second flag that could disagree, and
+                    // `An authenticated player's Discord username is available on
+                    // demand` — on demand because a username is a handle for a real
+                    // person and a roster is not the place to publish one unasked.
+                    //
+                    // This is the only thing that can tell two players apart when both
+                    // are called Alice on Discord: a display name there is not unique,
+                    // and arrives already decided, so it can never be refused.
+                    if player.account.is_proven() {
+                        let badge = ui.label(egui::RichText::new("account").size(11.0));
+                        if let Some(username) = &player.username {
+                            badge.on_hover_text(format!("@{username}"));
+                        }
+                    } else {
+                        ui.label("");
+                    }
                     if player.left {
                         ui.label(egui::RichText::new("left").size(12.0));
                     }
@@ -1596,7 +1755,6 @@ impl Page {
             // person is going to host or join another and the other is done. Neither needs
             // the match they have just finished, and neither needs the socket closed —
             // leaving the relay is its own button, one screen on.
-            self.match_name.clear();
             self.paste.clear();
             self.leave_seat(None);
         }
@@ -1759,6 +1917,94 @@ mod socket {
 
     /// Where this browser keeps the ticket it was given.
     const TICKET_KEY: &str = "liars-dice-ticket";
+
+    /// Which way this player signed in last time, so they are not asked again.
+    const SIGNED_IN_KEY: &str = "liars-dice-signed-in";
+
+    /// The name this player last asked to be called, to offer back as a prefill.
+    const NAME_KEY: &str = "liars-dice-name";
+
+    /// The nonce of a host request that has not been answered yet.
+    const NONCE_KEY: &str = "liars-dice-nonce";
+
+    /// How this player signed in, as they last chose it.
+    ///
+    /// `A sign in survives a reload`. The id and the ticket both already outlive a
+    /// reload; what did not was the *answer* to which of them to use, so a reloaded
+    /// page had to ask again. Keeping the answer is the whole of the statement.
+    ///
+    /// `sessionStorage` would be wrong: closing the tab is not signing out, and signing
+    /// out is what `forget_signed_in` is for.
+    pub fn signed_in(handle: Option<&str>) -> Option<String> {
+        storage()?
+            .get_item(&super::storage_key(SIGNED_IN_KEY, handle))
+            .ok()?
+    }
+
+    pub fn keep_signed_in(handle: Option<&str>, how: &str) {
+        if let Some(storage) = storage() {
+            let _ = storage.set_item(&super::storage_key(SIGNED_IN_KEY, handle), how);
+        }
+    }
+
+    pub fn forget_signed_in(handle: Option<&str>) {
+        if let Some(storage) = storage() {
+            let _ = storage.remove_item(&super::storage_key(SIGNED_IN_KEY, handle));
+        }
+    }
+
+    /// The name this player last asked to be called.
+    ///
+    /// A prefill and nothing more. Two people on one browser are two handles and so two
+    /// of these, and nothing anywhere derives anything from it.
+    pub fn name_kept(handle: Option<&str>) -> Option<String> {
+        storage()?
+            .get_item(&super::storage_key(NAME_KEY, handle))
+            .ok()?
+    }
+
+    pub fn keep_name(handle: Option<&str>, name: &str) {
+        if let Some(storage) = storage() {
+            let _ = storage.set_item(&super::storage_key(NAME_KEY, handle), name);
+        }
+    }
+
+    /// The nonce for a host request, made once and kept until it is answered.
+    ///
+    /// `A repeated request to host creates no second match` rests on one property and
+    /// only one: a retry carries the same nonce. The host used to type a match name to
+    /// supply it, which asked a person to guarantee something a stored random value
+    /// guarantees better — nobody can be relied on to retype a name exactly.
+    ///
+    /// `sessionStorage`, so a reload mid-host still retries rather than making a second
+    /// match, and so two tabs hosting at once make two matches rather than one.
+    ///
+    /// Cleared when `Created` comes back. Pressing Host again after that derives a
+    /// different id, and `match_of` refuses it with the match the player is already in
+    /// — which is the right answer and was already built.
+    pub fn nonce_for_hosting(handle: Option<&str>) -> String {
+        let key = super::storage_key(NONCE_KEY, handle);
+        let tab = web_sys::window().and_then(|window| window.session_storage().ok().flatten());
+        if let Some(tab) = &tab
+            && let Ok(Some(kept)) = tab.get_item(&key)
+            && !kept.is_empty()
+        {
+            return kept;
+        }
+        let made = fresh_id();
+        if let Some(tab) = &tab {
+            let _ = tab.set_item(&key, &made);
+        }
+        made
+    }
+
+    pub fn forget_nonce(handle: Option<&str>) {
+        if let Some(tab) =
+            web_sys::window().and_then(|window| window.session_storage().ok().flatten())
+        {
+            let _ = tab.remove_item(&super::storage_key(NONCE_KEY, handle));
+        }
+    }
 
     /// Where the exchange is, according to the page. Empty means login is off.
     pub fn auth_from_page() -> String {
@@ -2158,6 +2404,30 @@ mod socket {
     pub fn keep_ticket(_handle: Option<&str>, _held: &super::Held) {}
 
     pub fn forget_ticket(_handle: Option<&str>) {}
+
+    /// Nothing is kept, so a desktop build always takes the branch of a page nobody
+    /// has signed in on before: it draws the sign-in screen and connects to nothing.
+    pub fn signed_in(_handle: Option<&str>) -> Option<String> {
+        None
+    }
+
+    pub fn keep_signed_in(_handle: Option<&str>, _how: &str) {}
+
+    pub fn forget_signed_in(_handle: Option<&str>) {}
+
+    pub fn name_kept(_handle: Option<&str>) -> Option<String> {
+        None
+    }
+
+    pub fn keep_name(_handle: Option<&str>, _name: &str) {}
+
+    /// Fixed, so a desktop build hosts the same match every run, which is what every
+    /// other observation in this module already does.
+    pub fn nonce_for_hosting(_handle: Option<&str>) -> String {
+        "0".repeat(32)
+    }
+
+    pub fn forget_nonce(_handle: Option<&str>) {}
 
     pub fn authorize(_client_id: &str, _redirect_uri: &str) {}
 
@@ -2648,12 +2918,15 @@ mod tests {
         }
     }
 
-    /// A page says it is a guest, with the id this browser keeps and the name typed on it.
+    /// A page says it is a guest, with the id this browser keeps and nothing else.
     ///
     /// This test used to assert the opposite — that the account *was* the typed name — and
     /// the relay's log has since shown what that cost: two people who both typed the same
-    /// name were one account, and the second would land on the first's seat. The name is
-    /// now display and the id is identity.
+    /// name were one account, and the second would land on the first's seat.
+    ///
+    /// It now asserts something stronger: a `Who` carries no name at all, so there is no
+    /// name on the frame that asks what matches exist. A typed name sits on the page while
+    /// this is being asked, and still does not reach it.
     #[test]
     fn a_page_says_it_is_a_guest_with_the_id_this_browser_keeps() {
         let mut page = Page::new(Counted::default().waker());
@@ -2664,9 +2937,8 @@ mod tests {
             once,
             Who::Guest {
                 id: page.guest.clone(),
-                name: "Sean".to_string(),
             },
-            "the name is trimmed, so a stray space is not a different person"
+            "a name is chosen at the seat, so none of it rides on a Who"
         );
     }
 
@@ -2711,6 +2983,8 @@ mod tests {
                 name: "Somebody".to_string(),
                 colour: (*colour).to_string(),
                 left: false,
+                account: protocol::Account::Guest("whoever".to_string()),
+                username: None,
             })
             .collect()
     }
@@ -2824,5 +3098,67 @@ mod tests {
             "and then there is nothing to say"
         );
         assert_eq!(remaining(said, 600.0), None, "never negative");
+    }
+}
+
+#[cfg(test)]
+mod listings {
+    use super::*;
+
+    fn listed(names: &[&str]) -> Listed {
+        Listed {
+            match_id: MatchId("m".to_string()),
+            names: names.iter().map(|name| (*name).to_string()).collect(),
+            ranked: false,
+            joinable: true,
+            mine: false,
+        }
+    }
+
+    /// `A listed match shows its host`, by position rather than by a field.
+    ///
+    /// The order is load-bearing: a listing that sorted or deduplicated its names would
+    /// put the wrong person's name on the row, and nothing else would notice.
+    #[test]
+    fn the_host_is_the_first_name_in_the_match() {
+        assert_eq!(host_of(&listed(&["Alice", "Bob"])), "Alice");
+        assert_eq!(others_in(&listed(&["Alice", "Bob", "Carol"])), "Bob, Carol");
+        assert_eq!(others_in(&listed(&["Alice"])), "", "nobody else yet");
+    }
+
+    /// A listing with no names at all does not panic in front of somebody.
+    ///
+    /// The relay does not produce one — a match has its host from the first event — so
+    /// this is about the row reading as empty rather than about a case that happens.
+    #[test]
+    fn a_match_with_no_names_has_no_host_and_no_others() {
+        assert_eq!(host_of(&listed(&[])), "");
+        assert_eq!(others_in(&listed(&[])), "");
+    }
+
+    /// `A name another player in the match has chosen cannot be chosen`, said before the
+    /// relay has to say it.
+    #[test]
+    fn a_name_already_in_the_match_is_not_offered() {
+        let open = listed(&["Alice", "Bob"]);
+        assert!(!name_is_free("Alice", &open), "the host has it");
+        assert!(!name_is_free("Bob", &open), "and so does a joiner");
+        assert!(name_is_free("Carol", &open));
+        // Trimmed the way the page trims it before sending, so a stray space is not a
+        // different name here and the same name at the relay.
+        assert!(!name_is_free("  Alice  ", &open));
+        // An empty name is not free either: there is nothing to send.
+        assert!(!name_is_free("", &open));
+        assert!(!name_is_free("   ", &open));
+    }
+
+    /// Case matters, because it matters to the relay.
+    ///
+    /// The relay compares names exactly. A page that folded case would offer a name the
+    /// relay then accepted, and the match would hold Alice and alice — which is not a
+    /// collision by the rule, so being stricter here would be inventing a rule.
+    #[test]
+    fn a_name_differing_only_in_case_is_free() {
+        assert!(name_is_free("alice", &listed(&["Alice"])));
     }
 }

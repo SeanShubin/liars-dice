@@ -76,9 +76,9 @@ fn two_seats_play_a_whole_match_through_the_wire() {
     let mut host = Seated::hosting(
         Who::Guest {
             id: "host-id".to_string(),
-            name: "Host".to_string(),
         },
         "one",
+        "Host",
         Box::new(Ai),
     )
     .expect("a guest is always a seat");
@@ -111,9 +111,9 @@ fn two_seats_play_a_whole_match_through_the_wire() {
             let guest = Seated::joining(
                 Who::Guest {
                     id: "guest-id".to_string(),
-                    name: "Guest".to_string(),
                 },
                 match_id.clone(),
+                "Guest",
                 Box::new(Ai),
             )
             .expect("a guest is always a seat");

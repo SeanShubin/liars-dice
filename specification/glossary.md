@@ -60,6 +60,7 @@
 | Guest | A player who has not authenticated, identified by an id their own client generated. |
 | Handle | The name a browser files a player under. Chosen by the person, and never the player's identity. |
 | Unattended | Said of a client nobody is interacting with. |
+| Username | The unique name a Discord user chooses for themselves, which Discord keeps distinct from their display name. Never a handle: a handle is browser-local and is never sent. |
 | Sign in | How a person reaches a web game, either with an account or without one. |
 | Dashboard | The screen a player sees while holding no seat: what matches are open, and the ways to be at one. |
 | Lobby | The screen a seat sees before its match starts: who is in the match, what colour each of them has, and the host's controls. |

@@ -147,7 +147,7 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
 ///
 /// A client cannot join a match or load a save whose version differs from its own, so no
 /// match spans two versions and no log holds two. The `version` line says which.
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// The dice colours, in the order a picker shows them.
 ///
@@ -285,8 +285,10 @@ impl Account {
 /// was meant to remove. Here there is nowhere to claim a name you were not given.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Who {
-    /// An id a client generated for itself, and the name they chose. Neither is checked.
-    Guest { id: String, name: String },
+    /// An id a client generated for itself. Not checked, and not a name: what a guest
+    /// is called is chosen when they take a seat, where the names already in the match
+    /// are known. See `A player chooses their name when they take a seat`.
+    Guest { id: String },
     /// A ticket from the exchange. Checked, and both the account and the name come out of
     /// it.
     Authenticated { ticket: String },
@@ -366,6 +368,15 @@ pub enum Event {
         name: String,
         colour: String,
         account: Account,
+        /// The Discord username, for an authenticated player, and `None` for anybody
+        /// else. Present because a Discord display name is not unique and cannot be
+        /// refused: two players called Alice are both entitled to be, and this is what
+        /// tells a reader which is which.
+        ///
+        /// It arrives out of a verified ticket and never out of a field a client fills
+        /// in, for the same reason the display name does. A second name on this line is
+        /// still a name on a join line, which is the only line a name may appear on.
+        username: Option<String>,
     },
     /// A seat changed the colour of its dice, which it may do until the match starts.
     ///
@@ -564,12 +575,21 @@ impl fmt::Display for Event {
                 name,
                 colour,
                 account,
-            } => write!(
-                out,
-                "join {seat} {} {} {account}",
-                token(name),
-                token(colour)
-            ),
+                username,
+            } => {
+                write!(
+                    out,
+                    "join {seat} {} {} {account}",
+                    token(name),
+                    token(colour)
+                )?;
+                // Last, and only when there is one, so a line for a guest reads exactly
+                // as it did before this field existed.
+                match username {
+                    Some(username) => write!(out, " {}", token(username)),
+                    None => Ok(()),
+                }
+            }
             Event::Colour { seat, colour } => write!(out, "colour {seat} {}", token(colour)),
             Event::Host { seat } => write!(out, "host {seat}"),
             Event::Bar { seat } => write!(out, "bar {seat}"),
@@ -641,6 +661,7 @@ mod tests {
                 name: named("Alice"),
                 colour: named("red"),
                 account: Account::Discord(named("450853396908343307")),
+                username: Some(named("alice_dev")),
             },
             Event::Colour {
                 seat,
@@ -809,12 +830,14 @@ mod tests {
                 name: named("Alice"),
                 colour: named("red"),
                 account: Account::Discord(named("450853396908343307")),
+                username: Some(named("alice_dev")),
             },
             Event::Join {
                 seat: Seat(1),
                 name: named("Bob"),
                 colour: named("blue"),
                 account: Account::Ai,
+                username: None,
             },
             Event::PlayerOrder(vec![Seat(0), Seat(1)]),
             Event::Variant {
@@ -845,7 +868,7 @@ mod tests {
                 // Not the literal, so bumping the version is not a line to edit here.
                 &format!("version {PROTOCOL_VERSION}"),
                 "started 2023-11-14T22:13:20.000Z",
-                "join #0 Alice red discord:450853396908343307",
+                "join #0 Alice red discord:450853396908343307 alice_dev",
                 "join #1 Bob blue ai",
                 "player-order #0 #1",
                 "variant ones-wild off",
@@ -985,6 +1008,7 @@ mod tests {
             name: named("light blue player"),
             colour: named("light blue"),
             account: Account::Local,
+            username: None,
         });
         for event in events {
             let line = event.to_string();
@@ -1007,9 +1031,23 @@ mod tests {
                 name: named("Mary Anne"),
                 colour: named("light blue"),
                 account: Account::Local,
+                username: None,
             }
             .to_string(),
             "join #0 Mary-Anne light-blue local"
+        );
+        // A username is collapsed the same way and sits last, so a line for somebody
+        // who has one is still one token per field.
+        assert_eq!(
+            Event::Join {
+                seat: Seat(2),
+                name: named("Mary Anne"),
+                colour: named("red"),
+                account: Account::Discord(named("7")),
+                username: Some(named("mary anne")),
+            }
+            .to_string(),
+            "join #2 Mary-Anne red discord:7 mary-anne"
         );
         assert_eq!(
             Event::Join {
@@ -1017,6 +1055,7 @@ mod tests {
                 name: named("   "),
                 colour: named("red"),
                 account: Account::Ai,
+                username: None,
             }
             .to_string(),
             "join #1 - red ai"

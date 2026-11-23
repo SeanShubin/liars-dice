@@ -51,6 +51,12 @@ fn rendered(value: &Value) -> Json {
                 .map(|count| Json::Number(Number::from(*count)))
                 .collect(),
         ),
+        Value::Texts(texts) => Json::Array(
+            texts
+                .iter()
+                .map(|text| Json::String(text.clone()))
+                .collect(),
+        ),
         Value::Nested(shape) => object(shape),
         Value::Many(shapes) => Json::Array(shapes.iter().map(object).collect()),
     }
@@ -108,6 +114,13 @@ fn parsed(json: &Json, kind: &str, field: &str) -> Result<Value, Malformed> {
             .map(shape)
             .collect::<Result<Vec<Shape>, Malformed>>()
             .map(Value::Many),
+        // Strings before numbers, on the same reasoning as objects before numbers: a
+        // non-empty array whose first element is a string is a list of strings.
+        Json::Array(values) if values.first().is_some_and(Json::is_string) => values
+            .iter()
+            .map(|value| value.as_str().map(str::to_string).ok_or_else(wrong))
+            .collect::<Result<Vec<String>, Malformed>>()
+            .map(Value::Texts),
         Json::Array(values) => values
             .iter()
             .map(|value| value.as_u64().ok_or_else(wrong))

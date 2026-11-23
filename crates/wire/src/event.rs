@@ -40,15 +40,22 @@ pub fn shape_of(event: &Event) -> Shape {
             name,
             colour,
             account,
-        } => Shape::of(
-            "join",
-            vec![
+            username,
+        } => {
+            let mut fields = vec![
                 ("seat", seat(*at)),
                 ("name", text(name)),
                 ("colour", text(colour)),
                 ("account", text(&account_text(account))),
-            ],
-        ),
+            ];
+            // Omitted rather than empty, so a guest's join carries no field for
+            // something a guest cannot have. `Shape::maybe_text` reads it back, and
+            // still refuses a field that is present and is not text.
+            if let Some(username) = username {
+                fields.push(("username", text(username)));
+            }
+            Shape::of("join", fields)
+        }
         Event::Colour { seat: at, colour } => Shape::of(
             "colour",
             vec![("seat", seat(*at)), ("colour", text(colour))],
@@ -140,6 +147,7 @@ pub fn from_shape(shape: &Shape) -> Result<Event, Malformed> {
             name: shape.text("name")?.to_string(),
             colour: shape.text("colour")?.to_string(),
             account: account_of(shape.text("account")?)?,
+            username: shape.maybe_text("username")?.map(str::to_string),
         }),
         "colour" => Ok(Event::Colour {
             seat: at()?,
